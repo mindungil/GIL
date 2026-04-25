@@ -1,0 +1,39 @@
+# Build artifacts
+/bin/
+/dist/
+*.exe
+*.test
+*.out
+coverage.txt
+coverage.html
+
+# Go workspace local state
+go.work.sum
+vendor/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local data / state (these accumulate during local testing)
+.gil/
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+sessions/
+events/
+snapshots/
+
+# Secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
