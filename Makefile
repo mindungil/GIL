@@ -1,4 +1,4 @@
-.PHONY: tidy test gen build install clean e2e e2e2 e2e3 e2e4 e2e5 e2e-all
+.PHONY: tidy test gen build install clean e2e e2e2 e2e3 e2e4 e2e5 e2e6 e2e-all
 
 tidy:
 	@for m in core runtime proto server cli tui sdk mcp; do \
@@ -19,11 +19,13 @@ build:
 	@mkdir -p bin
 	@cd cli && go build -o ../bin/gil ./cmd/gil
 	@cd server && go build -o ../bin/gild ./cmd/gild
+	@cd tui && go build -o ../bin/giltui ./cmd/giltui
 
 install: build
-	@install -m 0755 bin/gil  /usr/local/bin/gil  2>/dev/null || sudo install -m 0755 bin/gil  /usr/local/bin/gil
-	@install -m 0755 bin/gild /usr/local/bin/gild 2>/dev/null || sudo install -m 0755 bin/gild /usr/local/bin/gild
-	@echo "Installed gil and gild to /usr/local/bin"
+	@install -m 0755 bin/gil    /usr/local/bin/gil    2>/dev/null || sudo install -m 0755 bin/gil    /usr/local/bin/gil
+	@install -m 0755 bin/gild   /usr/local/bin/gild   2>/dev/null || sudo install -m 0755 bin/gild   /usr/local/bin/gild
+	@install -m 0755 bin/giltui /usr/local/bin/giltui 2>/dev/null || sudo install -m 0755 bin/giltui /usr/local/bin/giltui
+	@echo "Installed gil, gild, giltui to /usr/local/bin"
 
 e2e: build
 	@bash tests/e2e/phase01_test.sh
@@ -40,7 +42,10 @@ e2e4: build
 e2e5: build
 	@bash tests/e2e/phase05_test.sh
 
-e2e-all: e2e e2e2 e2e3 e2e4 e2e5
+e2e6: build
+	@bash tests/e2e/phase06_test.sh
+
+e2e-all: e2e e2e2 e2e3 e2e4 e2e5 e2e6
 
 clean:
 	@rm -rf bin

@@ -1,0 +1,97 @@
+package app
+
+import (
+	"fmt"
+	"strings"
+
+	"github.com/charmbracelet/lipgloss"
+)
+
+var (
+	titleStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12"))
+	selectedRow = lipgloss.NewStyle().Foreground(lipgloss.Color("0")).Background(lipgloss.Color("12"))
+	paneBorder  = lipgloss.NewStyle().Border(lipgloss.NormalBorder(), false, true, false, false).
+			BorderForeground(lipgloss.Color("8")).Padding(0, 1)
+	statusStyle = lipgloss.NewStyle().Background(lipgloss.Color("8")).Foreground(lipgloss.Color("15")).Padding(0, 1)
+)
+
+// View implements tea.Model.
+func (m *Model) View() string {
+	if m.width == 0 {
+		// First render before WindowSizeMsg
+		return "loading…"
+	}
+	leftWidth := m.width / 3
+	if leftWidth < 30 {
+		leftWidth = 30
+	}
+	rightWidth := m.width - leftWidth - 1
+
+	paneHeight := m.height - 2 // reserve status bar + title
+
+	left := m.renderSessionList(leftWidth, paneHeight)
+	right := m.renderSessionDetail(rightWidth, paneHeight)
+	body := lipgloss.JoinHorizontal(lipgloss.Top,
+		paneBorder.Width(leftWidth).Height(paneHeight).Render(left),
+		right,
+	)
+
+	title := titleStyle.Render(" gil ") + lipgloss.NewStyle().Faint(true).Render(" — autonomous coding harness")
+	status := m.renderStatus()
+	return lipgloss.JoinVertical(lipgloss.Left, title, body, status)
+}
+
+func (m *Model) renderSessionList(w, h int) string {
+	var sb strings.Builder
+	sb.WriteString(titleStyle.Render("Sessions") + "\n\n")
+	if len(m.sessions) == 0 {
+		sb.WriteString("(no sessions — run 'gil new' first)")
+		return sb.String()
+	}
+	for i, s := range m.sessions {
+		line := fmt.Sprintf("%-12s %s", s.Status, truncate(s.GoalHint, w-16))
+		if i == m.selectedIdx {
+			line = selectedRow.Render(line)
+		}
+		sb.WriteString(line + "\n")
+	}
+	return sb.String()
+}
+
+func (m *Model) renderSessionDetail(w, h int) string {
+	if len(m.sessions) == 0 || m.selectedIdx >= len(m.sessions) {
+		return "\n  No session selected.\n  Press 'r' to refresh."
+	}
+	s := m.sessions[m.selectedIdx]
+	var sb strings.Builder
+	sb.WriteString(titleStyle.Render("Session "+s.ID) + "\n\n")
+	fmt.Fprintf(&sb, "  Status:       %s\n", s.Status)
+	fmt.Fprintf(&sb, "  Working dir:  %s\n", s.WorkingDir)
+	fmt.Fprintf(&sb, "  Goal:         %s\n", s.GoalHint)
+	if s.CurrentIteration > 0 {
+		fmt.Fprintf(&sb, "  Iteration:    %d\n", s.CurrentIteration)
+	}
+	if s.CurrentTokens > 0 {
+		fmt.Fprintf(&sb, "  Tokens:       %d\n", s.CurrentTokens)
+	}
+	sb.WriteString("\n  (event tail — Phase 7 next task)\n")
+	return sb.String()
+}
+
+func (m *Model) renderStatus() string {
+	keys := "k/↓: down  j/↑: up  r: refresh  q: quit"
+	if m.err != "" {
+		keys = "ERROR: " + m.err + "    " + keys
+	}
+	return statusStyle.Width(m.width).Render(keys)
+}
+
+func truncate(s string, max int) string {
+	if max <= 0 || len(s) <= max {
+		return s
+	}
+	if max <= 3 {
+		return s[:max]
+	}
+	return s[:max-1] + "…"
+}
