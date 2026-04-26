@@ -3,15 +3,23 @@ package spec
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 
 	"google.golang.org/protobuf/proto"
 
 	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
 )
 
-// Freeze deterministically marshals the FrozenSpec and sets ContentSha256 to its SHA-256 hash.
-// After calling Freeze, fs.ContentSha256 will equal the returned lock string.
+// Freeze deterministically marshals the FrozenSpec, computes its SHA-256,
+// stores the hex digest in fs.ContentSha256, and returns the digest.
+// Mutates fs.ContentSha256 as a side effect (the hash includes itself,
+// so we clear-then-set; this is intentional and idempotent — calling Freeze
+// multiple times on the same content produces the same digest).
+// Returns an error if fs is nil.
 func Freeze(fs *gilv1.FrozenSpec) (string, error) {
+	if fs == nil {
+		return "", fmt.Errorf("spec.Freeze: nil spec")
+	}
 	fs.ContentSha256 = ""
 	b, err := proto.MarshalOptions{Deterministic: true}.Marshal(fs)
 	if err != nil {
@@ -25,6 +33,9 @@ func Freeze(fs *gilv1.FrozenSpec) (string, error) {
 
 // VerifyLock validates that the spec's ContentSha256 matches the actual hash of its content.
 func VerifyLock(fs *gilv1.FrozenSpec) (bool, error) {
+	if fs == nil {
+		return false, fmt.Errorf("spec.VerifyLock: nil spec")
+	}
 	stored := fs.ContentSha256
 	fs.ContentSha256 = ""
 	defer func() { fs.ContentSha256 = stored }()

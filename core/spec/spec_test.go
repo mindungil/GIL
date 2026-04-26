@@ -56,3 +56,13 @@ func TestSpec_RequiredSlots_AllFilled(t *testing.T) {
 	missing := &gilv1.FrozenSpec{Goal: &gilv1.Goal{OneLiner: "x"}}
 	require.False(t, AllRequiredSlotsFilled(missing))
 }
+
+func TestSpec_Freeze_NilSpec_ReturnsError(t *testing.T) {
+	_, err := Freeze(nil)
+	require.Error(t, err)
+}
+
+func TestSpec_VerifyLock_NilSpec_ReturnsError(t *testing.T) {
+	_, err := VerifyLock(nil)
+	require.Error(t, err)
+}
