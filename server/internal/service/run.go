@@ -33,6 +33,7 @@ import (
 	"github.com/jedutools/gil/runtime/local"
 	"github.com/jedutools/gil/runtime/modal"
 	"github.com/jedutools/gil/runtime/ssh"
+	"github.com/jedutools/gil/server/internal/metrics"
 )
 
 // runProgressSnap holds live iteration/token counters for an active run.
@@ -220,6 +221,7 @@ func (s *RunService) Start(ctx context.Context, req *gilv1.StartRunRequest) (*gi
 	if err := s.repo.UpdateStatus(ctx, req.SessionId, "running"); err != nil {
 		return nil, status.Errorf(codes.Internal, "update status: %v", err)
 	}
+	metrics.SessionsRunning.Inc()
 
 	if req.Detach {
 		go func() {
@@ -421,12 +423,13 @@ func (s *RunService) executeRun(
 	s.runProgress[sessionID] = &runProgressSnap{}
 	s.mu.Unlock()
 
-	// Cleanup on exit: remove both stream and progress entry.
+	// Cleanup on exit: remove both stream and progress entry, decrement running gauge.
 	defer func() {
 		s.mu.Lock()
 		delete(s.runStreams, sessionID)
 		delete(s.runProgress, sessionID)
 		s.mu.Unlock()
+		metrics.SessionsRunning.Dec()
 	}()
 
 	// Persistence subscriber: write every event to disk.
@@ -456,6 +459,41 @@ func (s *RunService) executeRun(
 				}
 			}
 			s.mu.Unlock()
+		}
+	}()
+
+	// Metrics subscriber: bump Prometheus counters based on event type.
+	metricsSub := stream.Subscribe(256)
+	metricsDone := make(chan struct{})
+	go func() {
+		defer close(metricsDone)
+		for evt := range metricsSub.Events() {
+			switch evt.Type {
+			case "iteration_start":
+				metrics.RunIterationsTotal.Inc()
+			case "compact_done":
+				metrics.CompactDoneTotal.Inc()
+			case "stuck_detected":
+				var d map[string]any
+				if err := json.Unmarshal(evt.Data, &d); err == nil {
+					if p, ok := d["pattern"].(string); ok {
+						metrics.StuckDetectedTotal.WithLabelValues(p).Inc()
+					}
+				}
+			case "tool_result":
+				var d map[string]any
+				if err := json.Unmarshal(evt.Data, &d); err == nil {
+					name, _ := d["name"].(string)
+					isErr, _ := d["is_error"].(bool)
+					result := "ok"
+					if isErr {
+						result = "error"
+					}
+					if name != "" {
+						metrics.ToolCallsTotal.WithLabelValues(name, result).Inc()
+					}
+				}
+			}
 		}
 	}()
 
@@ -587,11 +625,13 @@ func (s *RunService) executeRun(
 
 	res, runErr := loop.Run(ctx)
 
-	// Drain both subscribers before syncing to disk (order-independent).
+	// Drain all subscribers before syncing to disk (order-independent).
 	persistSub.Close()
 	<-persistDone
 	progSub.Close()
 	<-progDone
+	metricsSub.Close()
+	<-metricsDone
 
 	_ = persister.Sync()
 

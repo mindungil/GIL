@@ -16,6 +16,7 @@ import (
 	"syscall"
 
 	"github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	_ "modernc.org/sqlite"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -23,6 +24,7 @@ import (
 	"github.com/jedutools/gil/core/provider"
 	"github.com/jedutools/gil/core/session"
 	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
+	"github.com/jedutools/gil/server/internal/metrics"
 	"github.com/jedutools/gil/server/internal/service"
 	"github.com/jedutools/gil/server/internal/uds"
 )
@@ -234,6 +236,8 @@ func main() {
 	base := flag.String("base", defaultBase, "data directory")
 	foreground := flag.Bool("foreground", false, "run in foreground")
 	httpAddr := flag.String("http", "", "if non-empty, start HTTP/JSON gateway on this addr (e.g., :8080)")
+	user := flag.String("user", "", "user namespace; data dir becomes <base>/users/<user>")
+	metricsAddr := flag.String("metrics", "", "if non-empty, expose Prometheus metrics on this addr (e.g., :9090)")
 	flag.Parse()
 
 	if !*foreground {
@@ -241,10 +245,16 @@ func main() {
 		os.Exit(2)
 	}
 
+	if *user != "" {
+		*base = filepath.Join(*base, "users", *user)
+	}
+
 	if err := os.MkdirAll(*base, 0o700); err != nil {
 		fmt.Fprintln(os.Stderr, "gild:", err)
 		os.Exit(1)
 	}
+
+	metrics.SetVersion("0.9.0-dev")
 
 	dbPath := filepath.Join(*base, "sessions.db")
 	sockPath := filepath.Join(*base, "gild.sock")
@@ -262,6 +272,17 @@ func main() {
 		go func() {
 			if err := runHTTPGateway(*httpAddr, sockPath); err != nil {
 				slog.Error("http gateway exited", "err", err)
+			}
+		}()
+	}
+
+	if *metricsAddr != "" {
+		go func() {
+			mux := http.NewServeMux()
+			mux.Handle("/metrics", promhttp.Handler())
+			slog.Info("metrics endpoint listening", "addr", *metricsAddr)
+			if err := http.ListenAndServe(*metricsAddr, mux); err != nil {
+				slog.Error("metrics endpoint exited", "err", err)
 			}
 		}()
 	}
