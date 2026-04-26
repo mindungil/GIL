@@ -33,3 +33,16 @@ type Result struct {
 type CommandWrapper interface {
 	Wrap(cmd string, args ...string) []string
 }
+
+// RemoteExecutor is an OPTIONAL interface a CommandWrapper may also
+// implement when there is no real local subprocess to spawn. HTTP-bound
+// backends (e.g., Daytona REST) return the full result (stdout, stderr,
+// exit code) in a single round-trip; for those, the bash tool calls
+// ExecRemote instead of building an exec.Cmd from Wrap's argv.
+//
+// Wrappers that satisfy this interface SHOULD still implement Wrap so
+// observability/logging can describe what would have been executed; Wrap's
+// argv just isn't fed into exec.Cmd anymore.
+type RemoteExecutor interface {
+	ExecRemote(ctx context.Context, cmd string, args []string) (stdout, stderr string, exit int, err error)
+}

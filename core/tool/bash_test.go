@@ -96,3 +96,55 @@ func TestBash_WrapperIsCalled(t *testing.T) {
 	require.False(t, r.IsError)
 	require.Contains(t, r.Content, "wrapped: bash")
 }
+
+// fakeRemoteWrapper implements both CommandWrapper and RemoteExecutor.
+// We assert that the bash tool calls ExecRemote (and skips exec.Cmd) when
+// the wrapper exposes RemoteExecutor, and that the returned stdout/stderr/
+// exit are surfaced into the Result.
+type fakeRemoteWrapper struct {
+	called   bool
+	lastCmd  string
+	lastArgs []string
+	stdout   string
+	stderr   string
+	exit     int
+	err      error
+}
+
+func (f *fakeRemoteWrapper) Wrap(cmd string, args ...string) []string {
+	// Should NOT be exercised when ExecRemote is available; return a
+	// sentinel that would cause exec.Cmd to fail noisily so the test
+	// catches accidental fall-through.
+	return []string{"/nonexistent/should-not-run", cmd}
+}
+
+func (f *fakeRemoteWrapper) ExecRemote(_ context.Context, cmd string, args []string) (string, string, int, error) {
+	f.called = true
+	f.lastCmd = cmd
+	f.lastArgs = append([]string(nil), args...)
+	return f.stdout, f.stderr, f.exit, f.err
+}
+
+func TestBash_RemoteExecutor_TakesPriority(t *testing.T) {
+	fw := &fakeRemoteWrapper{stdout: "remote-out", stderr: "remote-err", exit: 0}
+	b := &Bash{WorkingDir: t.TempDir(), Wrapper: fw}
+	r, err := b.Run(context.Background(), json.RawMessage(`{"command":"echo hi"}`))
+	require.NoError(t, err)
+	require.True(t, fw.called, "ExecRemote should have been called")
+	require.Equal(t, "bash", fw.lastCmd)
+	require.Equal(t, []string{"-c", "echo hi"}, fw.lastArgs)
+	require.False(t, r.IsError)
+	require.Contains(t, r.Content, "exit=0")
+	require.Contains(t, r.Content, "remote-out")
+	require.Contains(t, r.Content, "remote-err")
+}
+
+func TestBash_RemoteExecutor_NonZeroExit_MarksError(t *testing.T) {
+	fw := &fakeRemoteWrapper{stdout: "", stderr: "boom", exit: 7}
+	b := &Bash{WorkingDir: t.TempDir(), Wrapper: fw}
+	r, err := b.Run(context.Background(), json.RawMessage(`{"command":"false"}`))
+	require.NoError(t, err)
+	require.True(t, r.IsError, "non-zero exit must mark IsError")
+	require.Contains(t, r.Content, "exit=7")
+	require.Contains(t, r.Content, "boom")
+}

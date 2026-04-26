@@ -55,6 +55,17 @@ func (b *Bash) Run(ctx context.Context, argsJSON json.RawMessage) (Result, error
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	// Remote-executor fast path: HTTP-bound backends (e.g., Daytona REST) hand
+	// back stdout/stderr/exit in a single call, so there is no exec.Cmd to
+	// build. Detected by an optional RemoteExecutor interface on the wrapper;
+	// wrappers that don't implement it fall through to the legacy argv path.
+	if re, ok := b.Wrapper.(RemoteExecutor); ok && re != nil {
+		stdout, stderr, exitCode, runErr := re.ExecRemote(cctx, "bash", []string{"-c", args.Command})
+		output := fmt.Sprintf("exit=%d\n--- stdout ---\n%s\n--- stderr ---\n%s",
+			exitCode, truncate(stdout, 8192), truncate(stderr, 4096))
+		return Result{Content: output, IsError: runErr != nil || exitCode != 0}, nil
+	}
+
 	argv := []string{"bash", "-c", args.Command}
 	if b.Wrapper != nil {
 		argv = b.Wrapper.Wrap(argv[0], argv[1:]...)
