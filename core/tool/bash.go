@@ -12,7 +12,8 @@ import (
 // Bash runs shell commands in the project's working directory with a timeout.
 type Bash struct {
 	WorkingDir string
-	Timeout    time.Duration // per-command timeout; 0 → 60s default
+	Timeout    time.Duration  // per-command timeout; 0 → 60s default
+	Wrapper    CommandWrapper // optional; if non-nil, command is wrapped before exec
 }
 
 const bashSchema = `{
@@ -54,7 +55,11 @@ func (b *Bash) Run(ctx context.Context, argsJSON json.RawMessage) (Result, error
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(cctx, "bash", "-c", args.Command)
+	argv := []string{"bash", "-c", args.Command}
+	if b.Wrapper != nil {
+		argv = b.Wrapper.Wrap(argv[0], argv[1:]...)
+	}
+	cmd := exec.CommandContext(cctx, argv[0], argv[1:]...)
 	cmd.Dir = b.WorkingDir
 
 	var stdout, stderr bytes.Buffer

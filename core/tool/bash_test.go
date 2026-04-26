@@ -62,3 +62,37 @@ func TestBash_TruncatesLargeOutput(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, r.Content, "(truncated)")
 }
+
+func TestBash_NilWrapper_RunsDirectly(t *testing.T) {
+	b := &Bash{WorkingDir: t.TempDir(), Wrapper: nil}
+	r, err := b.Run(context.Background(), json.RawMessage(`{"command":"echo hello"}`))
+	require.NoError(t, err)
+	require.False(t, r.IsError)
+	require.Contains(t, r.Content, "hello")
+}
+
+// fakeWrapper records the Wrap call and replaces the command with /bin/echo.
+type fakeWrapper struct {
+	called   bool
+	lastCmd  string
+	lastArgs []string
+}
+
+func (f *fakeWrapper) Wrap(cmd string, args ...string) []string {
+	f.called = true
+	f.lastCmd = cmd
+	f.lastArgs = append([]string(nil), args...)
+	// Replace the command: just echo the original cmd name so we can verify it.
+	return []string{"/bin/echo", "wrapped:", cmd}
+}
+
+func TestBash_WrapperIsCalled(t *testing.T) {
+	fw := &fakeWrapper{}
+	b := &Bash{WorkingDir: t.TempDir(), Wrapper: fw}
+	r, err := b.Run(context.Background(), json.RawMessage(`{"command":"unused"}`))
+	require.NoError(t, err)
+	require.True(t, fw.called, "Wrap should have been called")
+	require.Equal(t, "bash", fw.lastCmd, "Wrap should receive 'bash' as cmd")
+	require.False(t, r.IsError)
+	require.Contains(t, r.Content, "wrapped: bash")
+}

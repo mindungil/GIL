@@ -10,8 +10,10 @@ import (
 
 // WriteFile creates or overwrites a file relative to the working directory.
 // Parent directories are created automatically (mode 0755).
+// When ReadOnly is true, all write attempts are rejected immediately.
 type WriteFile struct {
 	WorkingDir string
+	ReadOnly   bool // if true, all write attempts return an error without touching the filesystem
 }
 
 const writeFileSchema = `{
@@ -45,6 +47,9 @@ func (w *WriteFile) Run(ctx context.Context, argsJSON json.RawMessage) (Result, 
 	}
 	if args.Path == "" {
 		return Result{Content: "path is empty", IsError: true}, nil
+	}
+	if w.ReadOnly {
+		return Result{Content: "write_file is disabled in read-only mode", IsError: true}, nil
 	}
 	abs := filepath.Join(w.WorkingDir, args.Path)
 	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {

@@ -26,3 +26,10 @@ type Result struct {
 	Content string // text rendered into the next LLM turn
 	IsError bool   // marks the result as an error (LLM may retry or change approach)
 }
+
+// CommandWrapper transforms a command + args into an isolated form
+// (e.g., a bwrap-wrapped command). Implementations live in the runtime/
+// module. A nil wrapper means execute the command as-is.
+type CommandWrapper interface {
+	Wrap(cmd string, args ...string) []string
+}

@@ -73,3 +73,26 @@ func TestReadFile_NameAndSchema(t *testing.T) {
 	require.Equal(t, "read_file", r.Name())
 	require.Contains(t, string(r.Schema()), "path")
 }
+
+func TestWriteFile_ReadOnlyRejects(t *testing.T) {
+	dir := t.TempDir()
+	w := &WriteFile{WorkingDir: dir, ReadOnly: true}
+	res, err := w.Run(context.Background(), json.RawMessage(`{"path":"x","content":"y"}`))
+	require.NoError(t, err)
+	require.True(t, res.IsError)
+	require.Contains(t, res.Content, "read-only")
+	// File must NOT have been created.
+	_, statErr := os.Stat(filepath.Join(dir, "x"))
+	require.True(t, os.IsNotExist(statErr), "file should not exist in read-only mode")
+}
+
+func TestWriteFile_DefaultAllowsWrite(t *testing.T) {
+	dir := t.TempDir()
+	w := &WriteFile{WorkingDir: dir}
+	res, err := w.Run(context.Background(), json.RawMessage(`{"path":"x","content":"y"}`))
+	require.NoError(t, err)
+	require.False(t, res.IsError)
+	data, readErr := os.ReadFile(filepath.Join(dir, "x"))
+	require.NoError(t, readErr)
+	require.Equal(t, "y", string(data))
+}
