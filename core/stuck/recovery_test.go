@@ -184,26 +184,7 @@ func TestAltToolOrderStrategy_HintContainsPatternAndDetail(t *testing.T) {
 // Stub strategies smoke test
 // --------------------------------------------------------------------------
 
-func TestStubs_ReturnErrNoFallback(t *testing.T) {
-	ctx := context.Background()
-	req := ApplyRequest{
-		CurrentModel: "a",
-		ModelChain:   []string{"a", "b"},
-	}
-
-	stubs := []Strategy{
-		SubagentBranchStrategy{},
-	}
-
-	for _, s := range stubs {
-		t.Run(s.Name(), func(t *testing.T) {
-			_, err := s.Apply(ctx, req)
-			if !errors.Is(err, ErrNoFallback) {
-				t.Errorf("expected ErrNoFallback from %s, got %v", s.Name(), err)
-			}
-		})
-	}
-}
+// (SubagentBranchStrategy is no longer a stub — it has real tests below.)
 
 // --------------------------------------------------------------------------
 // ResetSectionStrategy tests
@@ -471,4 +452,132 @@ func TestBuildAdversaryConsultPrompt_CapsRecentTo10(t *testing.T) {
 	require.Contains(t, out, "msg-19")
 	require.Contains(t, out, "msg-10")
 	require.NotContains(t, out, "msg-9")
+}
+
+// --------------------------------------------------------------------------
+// SubagentBranchStrategy tests
+// --------------------------------------------------------------------------
+
+type fakeSubagentRunner struct {
+	summary     string
+	err         error
+	seenSubgoal string
+	seenTools   []string
+}
+
+func (f *fakeSubagentRunner) RunSubagent(ctx context.Context, subgoal string, allowedTools []string, maxIters int) (string, error) {
+	f.seenSubgoal = subgoal
+	f.seenTools = append([]string(nil), allowedTools...)
+	return f.summary, f.err
+}
+
+func TestSubagentBranchStrategy_ReturnsSubagentSummary(t *testing.T) {
+	fr := &fakeSubagentRunner{summary: "the bash command is failing because the file path is wrong"}
+	s := SubagentBranchStrategy{}
+	dec, err := s.Apply(context.Background(), ApplyRequest{
+		Signal:         Signal{Pattern: PatternRepeatedActionError, Count: 3},
+		SubagentRunner: fr,
+	})
+	require.NoError(t, err)
+	require.Equal(t, ActionSubagentBranch, dec.Action)
+	require.Contains(t, dec.Explanation, "the bash command is failing")
+	require.Contains(t, fr.seenTools, "read_file")
+	require.NotContains(t, fr.seenTools, "bash")
+	require.NotContains(t, fr.seenTools, "write_file")
+}
+
+func TestSubagentBranchStrategy_NilRunner_ErrNoFallback(t *testing.T) {
+	s := SubagentBranchStrategy{}
+	_, err := s.Apply(context.Background(), ApplyRequest{
+		Signal: Signal{Pattern: PatternRepeatedActionError, Count: 3},
+	})
+	require.ErrorIs(t, err, ErrNoFallback)
+}
+
+func TestSubagentBranchStrategy_WrongPattern_ErrNoFallback(t *testing.T) {
+	fr := &fakeSubagentRunner{summary: "x"}
+	s := SubagentBranchStrategy{}
+	_, err := s.Apply(context.Background(), ApplyRequest{
+		Signal:         Signal{Pattern: PatternMonologue},
+		SubagentRunner: fr,
+	})
+	require.ErrorIs(t, err, ErrNoFallback)
+}
+
+func TestSubagentBranchStrategy_EmptySummary_ErrNoFallback(t *testing.T) {
+	fr := &fakeSubagentRunner{summary: ""}
+	s := SubagentBranchStrategy{}
+	_, err := s.Apply(context.Background(), ApplyRequest{
+		Signal:         Signal{Pattern: PatternRepeatedActionError, Count: 3},
+		SubagentRunner: fr,
+	})
+	require.ErrorIs(t, err, ErrNoFallback)
+}
+
+func TestSubagentBranchStrategy_RunnerError_PropagatesWrapped(t *testing.T) {
+	fr := &fakeSubagentRunner{err: errors.New("boom")}
+	s := SubagentBranchStrategy{}
+	_, err := s.Apply(context.Background(), ApplyRequest{
+		Signal:         Signal{Pattern: PatternRepeatedActionError, Count: 3},
+		SubagentRunner: fr,
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "subagent_branch")
+	require.Contains(t, err.Error(), "boom")
+}
+
+func TestSubagentBranchStrategy_PingPong_Fires(t *testing.T) {
+	fr := &fakeSubagentRunner{summary: "switch to a different approach"}
+	s := SubagentBranchStrategy{}
+	dec, err := s.Apply(context.Background(), ApplyRequest{
+		Signal:         Signal{Pattern: PatternPingPong, Count: 4},
+		SubagentRunner: fr,
+	})
+	require.NoError(t, err)
+	require.Equal(t, ActionSubagentBranch, dec.Action)
+	require.Contains(t, dec.Explanation, "SUBAGENT FINDING")
+}
+
+func TestSubagentBranchStrategy_ContextWindow_ErrNoFallback(t *testing.T) {
+	fr := &fakeSubagentRunner{summary: "something"}
+	s := SubagentBranchStrategy{}
+	_, err := s.Apply(context.Background(), ApplyRequest{
+		Signal:         Signal{Pattern: PatternContextWindowError},
+		SubagentRunner: fr,
+	})
+	require.ErrorIs(t, err, ErrNoFallback)
+}
+
+func TestSubagentBranchStrategy_DefaultMaxIter(t *testing.T) {
+	var capturedMaxIters int
+	fr := &captureMaxIterRunner{summary: "finding", captureMaxIters: &capturedMaxIters}
+	s := SubagentBranchStrategy{} // MaxIterations=0 → default 5
+	_, err := s.Apply(context.Background(), ApplyRequest{
+		Signal:         Signal{Pattern: PatternRepeatedActionError, Count: 3},
+		SubagentRunner: fr,
+	})
+	require.NoError(t, err)
+	require.Equal(t, 5, capturedMaxIters)
+}
+
+func TestSubagentBranchStrategy_CustomMaxIter(t *testing.T) {
+	var capturedMaxIters int
+	fr := &captureMaxIterRunner{summary: "finding", captureMaxIters: &capturedMaxIters}
+	s := SubagentBranchStrategy{MaxIterations: 3}
+	_, err := s.Apply(context.Background(), ApplyRequest{
+		Signal:         Signal{Pattern: PatternRepeatedActionError, Count: 3},
+		SubagentRunner: fr,
+	})
+	require.NoError(t, err)
+	require.Equal(t, 3, capturedMaxIters)
+}
+
+type captureMaxIterRunner struct {
+	summary         string
+	captureMaxIters *int
+}
+
+func (c *captureMaxIterRunner) RunSubagent(_ context.Context, _ string, _ []string, maxIters int) (string, error) {
+	*c.captureMaxIters = maxIters
+	return c.summary, nil
 }

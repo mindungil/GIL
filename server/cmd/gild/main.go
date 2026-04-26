@@ -74,6 +74,46 @@ func newServer(dbPath, sockPath, sessionsBase string) (*server, error) {
 						StopReason: "end_turn",
 					},
 				}), "mock-model", nil
+			case "run-memory-repomap":
+				// Scripted scenario for Phase 6 e2e: repomap → memory_update → write_file → end → milestone update.
+				return provider.NewMockToolProvider([]provider.MockTurn{
+					{
+						Text: "First, let me get a project map.",
+						ToolCalls: []provider.ToolCall{{
+							ID: "rm1", Name: "repomap", Input: json.RawMessage(`{}`),
+						}},
+						StopReason: "tool_use",
+					},
+					{
+						Text: "Recording the plan.",
+						ToolCalls: []provider.ToolCall{{
+							ID: "mu1", Name: "memory_update",
+							Input: json.RawMessage(`{"file":"activeContext","content":"creating hello.txt","replace":true}`),
+						}},
+						StopReason: "tool_use",
+					},
+					{
+						Text: "Creating hello.txt.",
+						ToolCalls: []provider.ToolCall{{
+							ID: "wf1", Name: "write_file",
+							Input: json.RawMessage(`{"path":"hello.txt","content":"hello\n"}`),
+						}},
+						StopReason: "tool_use",
+					},
+					{
+						Text:       "I'm done.",
+						StopReason: "end_turn",
+					},
+					{
+						// Milestone turn (post-verify): record completion in progress.md
+						Text: "Recording completion.",
+						ToolCalls: []provider.ToolCall{{
+							ID: "mu2", Name: "memory_update",
+							Input: json.RawMessage(`{"file":"progress","section":"Done","content":"- created hello.txt"}`),
+						}},
+						StopReason: "tool_use",
+					},
+				}), "mock-model", nil
 			default:
 				// Text-only Mock for InterviewService scenarios
 				return provider.NewMock([]string{

@@ -20,6 +20,7 @@ import (
 	"github.com/jedutools/gil/core/tool"
 	"github.com/jedutools/gil/core/verify"
 	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
+	"google.golang.org/protobuf/proto"
 )
 
 // Result is the final outcome of an AgentLoop run.
@@ -29,6 +30,7 @@ type Result struct {
 	Tokens     int64
 	VerifyAll  []verify.Result
 	FinalError error
+	FinalText  string // last assistant text emitted before the loop exited
 }
 
 // AskRequest carries the details surfaced to a human reviewer when
@@ -76,6 +78,10 @@ type AgentLoop struct {
 	// Compactor + budget. If nil, no compaction.
 	Compactor        *compact.Compactor
 	MaxContextTokens int // default 200_000 if zero; compaction triggers at 0.95 * this
+
+	// SeedUserMessage overrides the default "Begin. Use the tools..." first
+	// user message. Used by RunSubagent to inject a custom subgoal.
+	SeedUserMessage string
 
 	// internal: buffer of recent events for the detector (ring of last 200)
 	recent      []event.Event
@@ -127,10 +133,15 @@ func (a *AgentLoop) Run(ctx context.Context) (*Result, error) {
 		toolByName[t.Name()] = t
 	}
 
+	seedMessage := a.SeedUserMessage
+	if seedMessage == "" {
+		seedMessage = "Begin. Use the tools to satisfy the verification checks. When you believe you're done, stop calling tools."
+	}
 	messages := []provider.Message{{
 		Role:    provider.RoleUser,
-		Content: "Begin. Use the tools to satisfy the verification checks. When you believe you're done, stop calling tools.",
+		Content: seedMessage,
 	}}
+	var lastAssistantText string
 
 	if a.Checkpoint != nil {
 		if err := a.Checkpoint.Init(ctx); err != nil {
@@ -205,7 +216,7 @@ func (a *AgentLoop) Run(ctx context.Context) (*Result, error) {
 		})
 		if err != nil {
 			a.emit(event.SourceSystem, event.KindNote, "run_error", map[string]any{"err": err.Error()})
-			return &Result{Status: "error", Iterations: iter, FinalError: err}, err
+			return &Result{Status: "error", Iterations: iter, FinalError: err, FinalText: lastAssistantText}, err
 		}
 		totalTokens += resp.InputTokens + resp.OutputTokens
 
@@ -242,6 +253,7 @@ func (a *AgentLoop) Run(ctx context.Context) (*Result, error) {
 							Provider:       a.Provider,
 							AdversaryModel: a.AdversaryModel,
 							RecentMessages: snapshotMessages(messages, 10),
+							SubagentRunner: a,
 						})
 						if err == nil && dec.Action == stuck.ActionSwitchModel {
 							a.emit(event.SourceSystem, event.KindNote, "stuck_recovered", map[string]any{
@@ -265,6 +277,15 @@ func (a *AgentLoop) Run(ctx context.Context) (*Result, error) {
 							a.emit(event.SourceSystem, event.KindNote, "stuck_recovered", map[string]any{
 								"strategy":    a.StuckStrategy.Name(),
 								"action":      "adversary_consult",
+								"explanation": dec.Explanation,
+							})
+							a.extraSystemNote = dec.Explanation // same single-shot mechanism as AltToolOrder
+							recovered = true
+						}
+						if err == nil && dec.Action == stuck.ActionSubagentBranch {
+							a.emit(event.SourceSystem, event.KindNote, "stuck_recovered", map[string]any{
+								"strategy":    a.StuckStrategy.Name(),
+								"action":      "subagent_branch",
 								"explanation": dec.Explanation,
 							})
 							a.extraSystemNote = dec.Explanation // same single-shot mechanism as AltToolOrder
@@ -311,12 +332,16 @@ func (a *AgentLoop) Run(ctx context.Context) (*Result, error) {
 						Iterations: iter,
 						Tokens:     totalTokens,
 						FinalError: errors.New("aborted: 3 unrecovered stuck signals"),
+						FinalText:  lastAssistantText,
 					}, nil
 				}
 			}
 		}
 
 		// Append assistant turn (with tool_calls if any)
+		if resp.Text != "" {
+			lastAssistantText = resp.Text
+		}
 		messages = append(messages, provider.Message{
 			Role:      provider.RoleAssistant,
 			Content:   resp.Text,
@@ -410,7 +435,7 @@ func (a *AgentLoop) Run(ctx context.Context) (*Result, error) {
 						})
 					}
 				}
-				return &Result{Status: "done", Iterations: iter, Tokens: totalTokens, VerifyAll: results}, nil
+				return &Result{Status: "done", Iterations: iter, Tokens: totalTokens, VerifyAll: results, FinalText: lastAssistantText}, nil
 			}
 			// Feed verifier failures back as a user message and let agent continue.
 			messages = append(messages, provider.Message{
@@ -531,7 +556,62 @@ func (a *AgentLoop) Run(ctx context.Context) (*Result, error) {
 	}
 
 	a.emit(event.SourceSystem, event.KindNote, "run_max_iterations", map[string]any{"iterations": maxIter, "tokens": totalTokens})
-	return &Result{Status: "max_iterations", Iterations: maxIter, Tokens: totalTokens}, nil
+	return &Result{Status: "max_iterations", Iterations: maxIter, Tokens: totalTokens, FinalText: lastAssistantText}, nil
+}
+
+// RunSubagent satisfies stuck.SubagentRunner. It builds a fresh AgentLoop
+// using the parent's spec/provider/tools (filtered to allowedTools),
+// disables the parent's stuck/checkpoint/memory wiring, and runs it to
+// maxIters iterations. The sub-loop's FinalText becomes the summary.
+func (a *AgentLoop) RunSubagent(ctx context.Context, subgoal string, allowedTools []string, maxIters int) (string, error) {
+	// Filter parent's tools to the allowed subset.
+	allow := make(map[string]bool, len(allowedTools))
+	for _, t := range allowedTools {
+		allow[t] = true
+	}
+	var subTools []tool.Tool
+	for _, t := range a.Tools {
+		if allow[t.Name()] {
+			subTools = append(subTools, t)
+		}
+	}
+
+	// Build a sub-spec that overrides max iterations for the sub-loop only.
+	var subSpec *gilv1.FrozenSpec
+	if a.Spec != nil {
+		subSpec = proto.Clone(a.Spec).(*gilv1.FrozenSpec)
+	} else {
+		subSpec = &gilv1.FrozenSpec{}
+	}
+	if subSpec.Budget == nil {
+		subSpec.Budget = &gilv1.Budget{}
+	}
+	subSpec.Budget.MaxIterations = int32(maxIters)
+	if subSpec.Verification == nil {
+		subSpec.Verification = &gilv1.Verification{}
+	}
+	// No verifier checks for sub-loops: their goal is reconnaissance, not verify-pass.
+	subSpec.Verification.Checks = nil
+
+	sub := &AgentLoop{
+		Spec:            subSpec,
+		Provider:        a.Provider,
+		Model:           a.Model,
+		Tools:           subTools,
+		Verifier:        verify.NewRunner(""),
+		SeedUserMessage: subgoal,
+		// Deliberately leave Stuck/Checkpoint/Memory/Permission/AskCallback nil
+		// so the sub-loop is a clean, sandbox-free, no-side-effect investigator.
+	}
+
+	res, err := sub.Run(ctx)
+	if err != nil {
+		return "", err
+	}
+	if res == nil {
+		return "", nil
+	}
+	return res.FinalText, nil
 }
 
 func buildSystemPrompt(spec *gilv1.FrozenSpec, tools []tool.Tool, bank *memory.Bank) string {

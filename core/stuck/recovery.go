@@ -27,6 +27,16 @@ type CheckpointReader interface {
 	ListCommits(ctx context.Context) ([]checkpoint.CommitInfo, error)
 }
 
+// SubagentRunner is implemented by callers (e.g., AgentLoop) so the
+// SubagentBranchStrategy can spin up a constrained sub-engine without
+// importing core/runner (which would cycle).
+type SubagentRunner interface {
+	// RunSubagent executes a sub-loop with restricted tools and a derived
+	// subgoal message. Returns a 1-3 sentence summary of what the sub-agent
+	// observed/concluded, or an error.
+	RunSubagent(ctx context.Context, subgoal string, allowedTools []string, maxIters int) (summary string, err error)
+}
+
 // ApplyRequest carries the minimum read-only context a strategy needs.
 type ApplyRequest struct {
 	Signal       Signal
@@ -39,6 +49,9 @@ type ApplyRequest struct {
 	Provider       provider.Provider  // nil → strategy returns ErrNoFallback
 	AdversaryModel string             // if empty, falls back to CurrentModel
 	RecentMessages []provider.Message // last N messages for LLM context (10 is fine)
+
+	// SubagentRunner is used by SubagentBranchStrategy. nil → strategy returns ErrNoFallback.
+	SubagentRunner SubagentRunner
 }
 
 // Action enumerates the operations AgentLoop knows how to perform.
@@ -165,13 +178,53 @@ func buildAltToolOrderHint(sig Signal) string {
 	)
 }
 
-// SubagentBranchStrategy will dispatch a fresh sub-engine on the same goal.
-// Phase 6: requires sub-engine API.
-type SubagentBranchStrategy struct{}
+// SubagentBranchStrategy spins up a fresh sub-AgentLoop with READ-ONLY
+// tools (read_file + repomap + memory_load) and asks it to investigate
+// the project structure to suggest an escape from the stuck pattern.
+// The sub-loop's text result becomes the parent's next-iteration hint.
+//
+// gil-original (no harness reference). The motivation: when the main
+// loop is hammering on the same broken approach, give a fresh context
+// the chance to look around and report what's actually there.
+type SubagentBranchStrategy struct {
+	MaxIterations int // default 5
+}
 
-func (SubagentBranchStrategy) Name() string { return "subagent_branch" }
-func (SubagentBranchStrategy) Apply(ctx context.Context, req ApplyRequest) (Decision, error) {
-	return Decision{}, ErrNoFallback // Phase 6
+func (s SubagentBranchStrategy) Name() string { return "subagent_branch" }
+
+func (s SubagentBranchStrategy) Apply(ctx context.Context, req ApplyRequest) (Decision, error) {
+	// Only fire on action-level repetition (where re-investigation helps).
+	switch req.Signal.Pattern {
+	case PatternRepeatedActionObservation, PatternRepeatedActionError, PatternPingPong:
+		// ok
+	default:
+		return Decision{}, ErrNoFallback
+	}
+	if req.SubagentRunner == nil {
+		return Decision{}, ErrNoFallback
+	}
+	maxIter := s.MaxIterations
+	if maxIter <= 0 {
+		maxIter = 5
+	}
+
+	subgoal := fmt.Sprintf(
+		"The main agent is stuck (%s). Use ONLY read-only tools (read_file, repomap, memory_load) to investigate the workspace. Report a 1-3 sentence finding about WHY the current approach is failing and what the agent should try instead. Do not call write_file, bash, edit, or apply_patch.",
+		req.Signal.Pattern.String(),
+	)
+	allowed := []string{"read_file", "repomap", "memory_load"}
+
+	summary, err := req.SubagentRunner.RunSubagent(ctx, subgoal, allowed, maxIter)
+	if err != nil {
+		return Decision{}, fmt.Errorf("subagent_branch: %w", err)
+	}
+	if summary == "" {
+		return Decision{}, ErrNoFallback
+	}
+	return Decision{
+		Action:      ActionSubagentBranch,
+		Explanation: "SUBAGENT FINDING: " + summary,
+	}, nil
 }
 
 // ResetSectionStrategy rolls the workspace back to the second-newest

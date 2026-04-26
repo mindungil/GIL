@@ -1719,3 +1719,143 @@ func TestAgentLoop_Permission_AskCallback_Deny(t *testing.T) {
 	_, err = os.Stat(filepath.Join(workspace, "x.txt"))
 	require.True(t, os.IsNotExist(err), "file should not exist after deny")
 }
+
+// subagentRecordingProvider routes calls differently for the sub-loop vs the
+// parent loop. When the system prompt mentions "reconnaissance" (the subgoal
+// string), it returns a final answer. Otherwise it always loops a tool call
+// to trigger stuck detection.
+type subagentRecordingProvider struct {
+	mu            sync.Mutex
+	mainRequests  []provider.Request
+	subRequests   []provider.Request
+}
+
+func (p *subagentRecordingProvider) Name() string { return "subagent-recording" }
+func (p *subagentRecordingProvider) Complete(_ context.Context, req provider.Request) (provider.Response, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	// Detect sub-loop calls by the presence of "stuck" in the user message (SeedUserMessage).
+	var isSubLoop bool
+	for _, m := range req.Messages {
+		if strings.Contains(m.Content, "main agent is stuck") {
+			isSubLoop = true
+			break
+		}
+	}
+	if isSubLoop {
+		p.subRequests = append(p.subRequests, req)
+		return provider.Response{
+			Text:       "the command syntax is wrong, try using a relative path instead of absolute",
+			StopReason: "end_turn",
+		}, nil
+	}
+	p.mainRequests = append(p.mainRequests, req)
+	return provider.Response{
+		Text:       "looping",
+		ToolCalls:  []provider.ToolCall{{ID: "x", Name: "noop", Input: json.RawMessage(`{}`)}},
+		StopReason: "tool_use",
+	}, nil
+}
+
+// TestAgentLoop_SubagentBranch_InjectsFindingIntoSystemPrompt verifies that
+// SubagentBranchStrategy:
+//  1. Fires RunSubagent on the parent AgentLoop (calls the sub-provider).
+//  2. The sub-loop's text response becomes the SUBAGENT FINDING in the parent's system prompt.
+//  3. A stuck_recovered event is emitted with action=subagent_branch.
+func TestAgentLoop_SubagentBranch_InjectsFindingIntoSystemPrompt(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	rec := &subagentRecordingProvider{}
+
+	spec := &gilv1.FrozenSpec{
+		Goal: &gilv1.Goal{OneLiner: "loop forever"},
+		Verification: &gilv1.Verification{
+			Checks: []*gilv1.Check{{Name: "never", Kind: gilv1.CheckKind_SHELL, Command: "false", ExpectedExitCode: 0}},
+		},
+		Budget: &gilv1.Budget{MaxIterations: 20},
+	}
+
+	stream := event.NewStream()
+	sub := stream.Subscribe(512)
+	defer sub.Close()
+
+	loop := &AgentLoop{
+		Spec:           spec,
+		Provider:       rec,
+		Model:          "main-model",
+		Tools:          []tool.Tool{&noopTool{}},
+		Verifier:       verify.NewRunner(t.TempDir()),
+		Events:         stream,
+		StuckDetector:  &stuck.Detector{Window: 50},
+		StuckStrategy:  stuck.SubagentBranchStrategy{MaxIterations: 3},
+		StuckThreshold: 5,
+	}
+
+	var mu sync.Mutex
+	var collected []event.Event
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case e, ok := <-sub.Events():
+				if !ok {
+					return
+				}
+				mu.Lock()
+				collected = append(collected, e)
+				mu.Unlock()
+				if e.Type == "stuck_unrecovered" || e.Type == "run_done" || e.Type == "run_max_iterations" {
+					return
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	res, err := loop.Run(ctx)
+	require.NoError(t, err)
+	require.Contains(t, []string{"stuck", "max_iterations"}, res.Status)
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+	}
+
+	mu.Lock()
+	evs := collected
+	mu.Unlock()
+
+	// 1. At least one stuck_recovered event with action=subagent_branch.
+	var subagentRecov int
+	for _, e := range evs {
+		if e.Type != "stuck_recovered" {
+			continue
+		}
+		var d map[string]any
+		require.NoError(t, json.Unmarshal(e.Data, &d))
+		if d["action"] == "subagent_branch" {
+			subagentRecov++
+		}
+	}
+	require.Greater(t, subagentRecov, 0, "expected at least one subagent_branch recovery event")
+
+	// 2. The sub-loop was actually called (sub-provider saw requests).
+	rec.mu.Lock()
+	subReqs := len(rec.subRequests)
+	mainReqs := rec.mainRequests
+	rec.mu.Unlock()
+	require.Greater(t, subReqs, 0, "expected sub-loop provider calls")
+
+	// 3. At least one main-loop provider request contains "SUBAGENT FINDING" in system prompt.
+	var sawFinding bool
+	for _, req := range mainReqs {
+		if strings.Contains(req.System, "SUBAGENT FINDING") {
+			sawFinding = true
+			break
+		}
+	}
+	require.True(t, sawFinding, "expected at least one main-loop provider request to contain SUBAGENT FINDING in system prompt")
+}
