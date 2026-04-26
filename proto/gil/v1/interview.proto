@@ -1,0 +1,78 @@
+syntax = "proto3";
+
+package gil.v1;
+
+import "gil/v1/spec.proto";
+
+option go_package = "github.com/jedutools/gil/proto/gen/gil/v1;gilv1";
+
+service InterviewService {
+  // Start launches the interview for a session. The agent runs Sensing
+  // (using the user's first_input), advances to Conversation, and emits
+  // the first question. The stream remains open until the server closes
+  // it; further turns happen via Reply.
+  rpc Start(StartInterviewRequest) returns (stream InterviewEvent);
+
+  // Reply sends a user reply mid-interview. Returns the next agent event(s).
+  rpc Reply(ReplyRequest) returns (stream InterviewEvent);
+
+  // Confirm finalizes the spec and freezes it (writes spec.lock).
+  rpc Confirm(ConfirmRequest) returns (ConfirmResponse);
+
+  // GetSpec returns the current (possibly partial) spec for inspection.
+  rpc GetSpec(GetSpecRequest) returns (FrozenSpec);
+}
+
+message StartInterviewRequest {
+  string session_id = 1;
+  string first_input = 2;       // user's initial message
+  string provider = 3;           // "anthropic" | "mock" | future others
+  string model = 4;              // empty → use provider default
+}
+
+message ReplyRequest {
+  string session_id = 1;
+  string content = 2;
+}
+
+message ConfirmRequest {
+  string session_id = 1;
+}
+
+message ConfirmResponse {
+  string spec_id = 1;
+  string content_sha256 = 2;
+}
+
+message GetSpecRequest {
+  string session_id = 1;
+}
+
+message InterviewEvent {
+  oneof payload {
+    AgentTurn agent_turn = 1;
+    StageTransition stage = 2;
+    SpecUpdate spec_update = 3;
+    InterviewError error = 4;
+  }
+}
+
+message AgentTurn {
+  string content = 1;
+}
+
+message StageTransition {
+  string from = 1;
+  string to = 2;
+  string reason = 3;
+}
+
+message SpecUpdate {
+  string field_path = 1;         // e.g., "goal.one_liner"
+  string new_value = 2;
+}
+
+message InterviewError {
+  string code = 1;
+  string message = 2;
+}
