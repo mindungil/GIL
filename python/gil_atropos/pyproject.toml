@@ -1,0 +1,68 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gil-atropos"
+version = "0.1.0"
+description = "Atropos RL environment adapter for gil (autonomous coding harness)."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+  { name = "gil contributors" },
+]
+keywords = ["atropos", "rl", "hermes-agent", "gil", "coding-agent"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+  "grpcio>=1.59",
+  "grpcio-tools>=1.59",
+  "protobuf>=4.25",
+  "pydantic>=2.0",
+]
+
+[project.optional-dependencies]
+# Hermes-Agent / Atropos integration. NOTE: hermes-agent is not on PyPI;
+# install from git, e.g.:
+#   pip install "hermes-agent @ git+https://github.com/NousResearch/hermes-agent.git"
+# Same goes for atroposlib (pulled in by hermes-agent).
+atropos = [
+  "hermes-agent",
+]
+# Optional dataset loading
+datasets = [
+  "datasets>=2.14",
+]
+dev = [
+  "pytest>=7.4",
+  "pytest-asyncio>=0.23",
+]
+
+[project.scripts]
+gil-atropos-eval = "gil_atropos.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/jedutools/gil"
+Repository = "https://github.com/jedutools/gil"
+
+# Flat layout: this directory IS the gil_atropos package. Map it explicitly
+# so setuptools doesn't try to "discover" packages from CWD (which would
+# include tests/, proto/ at the wrong level).
+[tool.setuptools]
+package-dir = { gil_atropos = ".", "gil_atropos.proto" = "proto" }
+packages = ["gil_atropos", "gil_atropos.proto"]
+
+[tool.setuptools.package-data]
+gil_atropos = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
