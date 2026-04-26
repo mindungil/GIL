@@ -52,6 +52,7 @@ func Root() *cobra.Command {
 		SilenceErrors: true,
 	}
 	root.AddCommand(daemonCmd())
+	root.AddCommand(authCmd())
 	root.AddCommand(newCmd())
 	root.AddCommand(statusCmd())
 	root.AddCommand(interviewCmd())
