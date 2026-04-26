@@ -6,6 +6,7 @@ require (
 	github.com/jedutools/gil/core v0.0.0-00010101000000-000000000000
 	github.com/jedutools/gil/proto v0.0.0
 	github.com/jedutools/gil/runtime v0.0.0-00010101000000-000000000000
+	github.com/oklog/ulid/v2 v2.1.1
 	github.com/stretchr/testify v1.11.1
 	google.golang.org/grpc v1.65.0
 	google.golang.org/protobuf v1.34.2
@@ -23,7 +24,6 @@ require (
 	github.com/mailru/easyjson v0.7.7 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
-	github.com/oklog/ulid/v2 v2.1.1 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/tidwall/gjson v1.18.0 // indirect

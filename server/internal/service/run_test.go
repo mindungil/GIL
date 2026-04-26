@@ -25,6 +25,7 @@ import (
 	"github.com/jedutools/gil/core/specstore"
 	"github.com/jedutools/gil/core/tool"
 	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
+	"github.com/jedutools/gil/runtime/docker"
 	"github.com/jedutools/gil/runtime/local"
 )
 
@@ -371,9 +372,30 @@ func TestBuildTools_LocalSandbox_Behavior(t *testing.T) {
 	})
 }
 
-func TestBuildTools_Docker_Returns_NotSupported(t *testing.T) {
+func TestBuildTools_Docker_RequiresDocker(t *testing.T) {
+	if docker.Available() {
+		t.Skip("docker is installed; cannot test missing-docker path")
+	}
+	_, err := buildTools("/work", &gilv1.Workspace{Backend: gilv1.WorkspaceBackend_DOCKER})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "DOCKER requires docker")
+}
+
+func TestBuildTools_Docker_ReturnsTools_WhenDockerAvailable(t *testing.T) {
+	if !docker.Available() {
+		t.Skip("docker not installed")
+	}
+	tools, err := buildTools("/work", &gilv1.Workspace{Backend: gilv1.WorkspaceBackend_DOCKER})
+	require.NoError(t, err)
+	require.Len(t, tools, 4)
+	bash, ok := tools[0].(*tool.Bash)
+	require.True(t, ok, "first tool should be *tool.Bash")
+	// Wrapper is nil at buildTools time; executeRun sets it after container start.
+	require.Nil(t, bash.Wrapper, "Wrapper should be nil at buildTools time for DOCKER")
+}
+
+func TestBuildTools_SSH_VM_Returns_NotSupported(t *testing.T) {
 	unsupported := []gilv1.WorkspaceBackend{
-		gilv1.WorkspaceBackend_DOCKER,
 		gilv1.WorkspaceBackend_SSH,
 		gilv1.WorkspaceBackend_VM,
 	}

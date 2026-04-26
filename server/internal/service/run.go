@@ -25,6 +25,7 @@ import (
 	"github.com/jedutools/gil/core/tool"
 	"github.com/jedutools/gil/core/verify"
 	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
+	"github.com/jedutools/gil/runtime/docker"
 	"github.com/jedutools/gil/runtime/local"
 )
 
@@ -108,8 +109,20 @@ func buildTools(workspaceDir string, ws *gilv1.Workspace) ([]tool.Tool, error) {
 			&tool.ReadFile{WorkingDir: workspaceDir},
 			&tool.Repomap{Root: workspaceDir},
 		}, nil
-	case gilv1.WorkspaceBackend_DOCKER, gilv1.WorkspaceBackend_SSH, gilv1.WorkspaceBackend_VM:
-		return nil, fmt.Errorf("workspace backend %s not yet supported (Phase 6)", backend.String())
+	case gilv1.WorkspaceBackend_DOCKER:
+		if !docker.Available() {
+			return nil, fmt.Errorf("workspace backend DOCKER requires docker, but it is not in PATH")
+		}
+		// Tools are returned bare; executeRun wraps the Bash tool with
+		// docker.Wrapper after starting the session container.
+		return []tool.Tool{
+			&tool.Bash{WorkingDir: workspaceDir},
+			&tool.WriteFile{WorkingDir: workspaceDir},
+			&tool.ReadFile{WorkingDir: workspaceDir},
+			&tool.Repomap{Root: workspaceDir},
+		}, nil
+	case gilv1.WorkspaceBackend_SSH, gilv1.WorkspaceBackend_VM:
+		return nil, fmt.Errorf("workspace backend %s not yet supported (Phase 8+)", backend.String())
 	default:
 		return nil, fmt.Errorf("unknown workspace backend: %v", backend)
 	}
@@ -256,6 +269,38 @@ func (s *RunService) executeRun(
 	ver *verify.Runner,
 	workspaceDir string,
 ) (*gilv1.StartRunResponse, error) {
+	// DOCKER backend: spin up a per-session container and rewire the Bash tool.
+	if spec.Workspace != nil && spec.Workspace.Backend == gilv1.WorkspaceBackend_DOCKER {
+		image := "alpine:latest"
+		if spec.Workspace.Path != "" {
+			image = spec.Workspace.Path
+		}
+		dockerContainer := &docker.Container{
+			Name:      "gil-" + sessionID,
+			Image:     image,
+			HostMount: workspaceDir,
+		}
+		if err := dockerContainer.Start(ctx); err != nil {
+			_ = s.repo.UpdateStatus(ctx, sessionID, "stopped")
+			return nil, status.Errorf(codes.Internal, "docker start: %v", err)
+		}
+		defer func() {
+			// Best-effort cleanup with a short timeout context.
+			stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			_ = dockerContainer.Stop(stopCtx)
+		}()
+		// Rewire the Bash tool's Wrapper to point at the running container.
+		for _, t := range tools {
+			if b, ok := t.(*tool.Bash); ok {
+				b.Wrapper = &docker.Wrapper{
+					Container: dockerContainer.Name,
+					WorkDir:   "/workspace",
+				}
+			}
+		}
+	}
+
 	// Create per-session event stream + persister.
 	eventDir := filepath.Join(s.sessionDir(sessionID), "events")
 	persister, err := event.NewPersister(eventDir)
