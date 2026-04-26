@@ -74,7 +74,27 @@ func (m *Model) renderSessionDetail(w, h int) string {
 	if s.CurrentTokens > 0 {
 		fmt.Fprintf(&sb, "  Tokens:       %d\n", s.CurrentTokens)
 	}
-	sb.WriteString("\n  (event tail — Phase 7 next task)\n")
+	sb.WriteString("\n  Events (live tail):\n")
+	if len(m.events) == 0 {
+		if s.Status == "RUNNING" {
+			sb.WriteString("  (no events yet — waiting for next…)\n")
+		} else {
+			sb.WriteString("  (session not running; live tail unavailable)\n")
+		}
+	} else {
+		// Show last 20 events that fit in the remaining pane height.
+		show := 20
+		if h-15 < show {
+			show = max(0, h-15)
+		}
+		start := len(m.events) - show
+		if start < 0 {
+			start = 0
+		}
+		for _, line := range m.events[start:] {
+			sb.WriteString("  " + line + "\n")
+		}
+	}
 	return sb.String()
 }
 
