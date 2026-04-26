@@ -4,6 +4,8 @@
 
 ## 현재 페이즈
 
+**Phase 5: Run Engine 개선** (완료 — 2026-04-25). 다음 → Phase 6.
+
 **Phase 0: 설계** (완료)
 
 - [x] 사용자 요구사항 추출 (Q&A)
@@ -52,12 +54,25 @@
 - [x] gil events 명령 (Phase 5 stub 처리 포함)
 - [x] E2E phase04 — autonomous hello.txt run with mock provider
 
-**Phase 5: Run Engine 개선** (대기)
-- [ ] 진짜 sandbox (bwrap/Seatbelt)
-- [ ] Shadow git checkpoint
-- [ ] Stuck detection + 자가 회복
-- [ ] 비동기 run + Tail event stream
-- [ ] core/event session 통합
+**Phase 5: Run Engine 개선** (완료 — 2026-04-25)
+- [x] secret masking on event persistence (core/event)
+- [x] AgentLoop emits live events to optional Stream
+- [x] per-session event Stream + Persister wired into RunService.Start
+- [x] RunService.Tail 실제 구현 (live subscribe; replay = Phase 6)
+- [x] gil events --tail 실제 출력 (RFC3339 + source/kind/type/data)
+- [x] gil run --detach + 라이브 iteration/tokens (status enrich)
+- [x] core/stuck Detector (OpenHands 5 패턴)
+- [x] core/stuck Recovery 인터페이스 + ModelEscalateStrategy (others Phase 6)
+- [x] AgentLoop 통합 stuck detection + 3회 미회복 시 abort
+- [x] runtime/local bwrap Sandbox (ReadOnly / WorkspaceWrite / FullAccess)
+- [x] core/tool: Bash CommandWrapper + WriteFile ReadOnly
+- [x] RunService respects spec.workspace.backend (LOCAL_SANDBOX → bwrap)
+- [x] core/checkpoint Shadow Git (separate .git outside workspace)
+- [x] AgentLoop checkpoints per tool-using step
+- [x] gil restore <id> <step> + Restore RPC + SDK
+- [x] InterviewService per-stage models (slot/adversary/audit fallback)
+- [x] e2e phase05 (async + checkpoint + restore + sandbox sanity)
+- [x] make install 타겟
 
 **Phase 6: 컨텍스트/메모리** (대기)
 - [ ] `core/compact` 캐시 보존 압축
@@ -95,6 +110,7 @@
 | 2026-04-26 | Phase 2 (인터뷰 엔진) 완료 — 데몬 자동 spawn + Anthropic provider + InterviewService gRPC + gil interview/spec CLI. 13 tasks. adversary/self-audit는 Phase 3로 이연. |
 | 2026-04-26 | Phase 3 (인터뷰 엔진 실작동) 완료 — SlotFiller + Adversary + SelfAuditGate + RunReplyTurn 오케스트레이션 + gil resume. 7 tasks. cross-restart resume + per-stage 모델 분리 + retry/backoff은 Phase 4로 이연. |
 | 2026-04-26 | Phase 4 (Run Engine) 완료 — Tool/Bash/WriteFile/ReadFile + verify.Runner + provider Retry + AgentLoop (Anthropic native tool use) + RunService gRPC + gil run/events. 9 tasks. e2e4가 mock으로 hello.txt 자율 생성 + verifier 통과 시연. Phase 5: sandbox + shadow git + stuck recovery + async run. |
+| 2026-04-25 | Phase 5 (Run Engine 개선) 완료 — 18 tasks. secret masking + AgentLoop event emit + per-session Stream/Persister + RunService.Tail real + gil events --tail real + gil run --detach + 라이브 iteration/tokens + 5-pattern Stuck Detector + ModelEscalate recovery + 3-strike abort + bwrap Sandbox + WorkspaceBackend 라우팅 + Shadow Git checkpoint + gil restore + per-stage interview models + e2e5 + make install. e2e-all 5 페이즈 통과. Phase 6: 컨텍스트/메모리/리포맵. |
 
 ## 차용 출처 (코드/패턴)
 
@@ -151,6 +167,20 @@
 - **e2e4 시연**: GIL_MOCK_MODE=run-hello로 gild 띄우고, frozen spec 인젝션 후 `gil run`이 mock provider 통해 write_file 호출 → hello.txt 생성 → verifier 통과 → "done"
 - **검증**: `make e2e-all` 4 phase (e2e + e2e2 + e2e3 + e2e4) 모두 통과
 - **다음 단계**: Phase 5 — 진짜 OS sandbox (bwrap/Seatbelt) + shadow git checkpoint per step + stuck detection + 자가 회복 + 비동기 run + core/event session 통합
+
+## Phase 5 산출물 요약 (2026-04-25)
+
+- **Live event observability**: AgentLoop가 매 iteration/provider/tool/verify 단계마다 Event를 emit; per-session Stream + JSONL Persister; secret masking (sk-ant-/Bearer/password 등)이 디스크 쓰기 직전에 적용
+- **Async run**: `gil run <id> --detach` → 즉시 `Status: started` 반환; goroutine이 background 실행; `gil status`가 RUNNING 세션의 ITER/TOKENS 라이브 표시
+- **Live tail**: `gil events <id> --tail`이 RunService.Tail로 구독; RFC3339 timestamp + SOURCE + KIND + type + data_json 포맷
+- **Stuck detection**: `core/stuck.Detector` 5 패턴 (RepeatedActionObservation/RepeatedActionError/Monologue/PingPong/ContextWindow); AgentLoop가 매 iteration 검사; ModelEscalateStrategy로 회복 시도; 3회 미회복 시 `Result.Status="stuck"` abort
+- **Sandbox**: `runtime/local.Sandbox` (bwrap) ReadOnly/WorkspaceWrite/FullAccess 모드; `core/tool.CommandWrapper` 인터페이스로 Bash 옵션 wrap; `WriteFile.ReadOnly` 강제; RunService가 `spec.workspace.backend == LOCAL_SANDBOX`일 때 자동 적용 (DOCKER/SSH/VM은 Phase 6)
+- **Shadow Git checkpoints**: `core/checkpoint.ShadowGit` — 워크스페이스 외부의 별도 .git (`~/.gil/sessions/<id>/shadow/<hash>/.git`); AgentLoop가 매 tool-using iteration + 최종 done 시점에 commit; 사용자 repo는 무오염
+- **Restore**: `gil restore <id> <step>` (1 = oldest, -1 = latest); RunService.Restore RPC; running 세션은 거부 (FailedPrecondition)
+- **Per-stage interview models**: `StartInterviewRequest`에 slot_model/adversary_model/audit_model 추가; 빈 값은 main으로 fallback; `NewEngineWithSubmodels` 4번째 인자 audit (이전엔 main 재사용)
+- **검증**: `make e2e-all` 5 페이즈 모두 통과 (e2e5 = 비동기 + tail + checkpoint + restore sanity)
+- **make install**: `bin/gil` `bin/gild` → `/usr/local/bin/`
+- **다음 단계**: Phase 6 — `core/compact` (캐시 보존 압축, Hermes 패턴), `core/memory` 6 markdown 뱅크, `core/repomap` (tree-sitter + PageRank), Stuck recovery 4종 풀 구현, macOS Seatbelt sandbox
 
 ## 미해결 / 추후 결정
 
