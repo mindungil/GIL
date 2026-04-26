@@ -2,27 +2,25 @@ package cmd
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/spf13/cobra"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 
+	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
 	"github.com/jedutools/gil/sdk"
 )
 
 // eventsCmd returns the `gil events <session-id>` command.
-// With --tail it subscribes to the live event stream (Phase 5+).
-// In Phase 4 the server returns Unimplemented; this command surfaces that
-// gracefully so users know the feature is in progress.
+// With --tail it subscribes to the live event stream from RunService.Tail.
+// Replay-from-disk (no --tail) is deferred to Phase 6.
 func eventsCmd() *cobra.Command {
 	var socket string
 	var tail bool
 	c := &cobra.Command{
 		Use:   "events <session-id>",
-		Short: "Stream events from a session (currently --tail only; Phase 5+)",
+		Short: "Stream events from a live run session",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			sessionID := args[0]
@@ -31,7 +29,7 @@ func eventsCmd() *cobra.Command {
 				ctx = context.Background()
 			}
 			if !tail {
-				return fmt.Errorf("only --tail is supported in Phase 4")
+				return fmt.Errorf("replay-from-disk not yet implemented (Phase 6); use --tail to stream live events")
 			}
 			if err := ensureDaemon(socket, defaultBase()); err != nil {
 				return fmt.Errorf("ensure daemon: %w", err)
@@ -44,28 +42,10 @@ func eventsCmd() *cobra.Command {
 
 			stream, err := cli.TailRun(ctx, sessionID)
 			if err != nil {
-				if isUnimplemented(err) {
-					fmt.Fprintln(cmd.OutOrStdout(), "Event tailing is not yet implemented (Phase 5).")
-					return nil
-				}
 				return fmt.Errorf("tail: %w", err)
 			}
 
-			out := cmd.OutOrStdout()
-			for {
-				evt, err := stream.Recv()
-				if err == io.EOF {
-					return nil
-				}
-				if err != nil {
-					if isUnimplemented(err) {
-						fmt.Fprintln(out, "Event tailing is not yet implemented (Phase 5).")
-						return nil
-					}
-					return fmt.Errorf("recv: %w", err)
-				}
-				fmt.Fprintf(out, "[#%d %s] %s\n", evt.GetId(), evt.GetType(), string(evt.GetDataJson()))
-			}
+			return tailEvents(ctx, stream, cmd.OutOrStdout())
 		},
 	}
 	c.Flags().StringVar(&socket, "socket", defaultSocket(), "gild UDS socket path")
@@ -73,14 +53,30 @@ func eventsCmd() *cobra.Command {
 	return c
 }
 
-// isUnimplemented returns true if err is a gRPC Unimplemented status (server
-// stub during Phase 4).
-func isUnimplemented(err error) bool {
-	if err == nil {
-		return false
+// tailEvents reads events from stream and prints them to out until EOF or error.
+func tailEvents(ctx context.Context, stream gilv1.RunService_TailClient, out io.Writer) error {
+	for {
+		evt, err := stream.Recv()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("recv: %w", err)
+		}
+
+		ts := "-"
+		if t := evt.GetTimestamp(); t != nil {
+			ts = t.AsTime().UTC().Format(time.RFC3339)
+		}
+
+		source := evt.GetSource().String()
+		kind := evt.GetKind().String()
+
+		data := string(evt.GetDataJson())
+		if data == "" {
+			data = "{}"
+		}
+
+		fmt.Fprintf(out, "%s %s %s %s %s\n", ts, source, kind, evt.GetType(), data)
 	}
-	if st, ok := status.FromError(err); ok && st.Code() == codes.Unimplemented {
-		return true
-	}
-	return errors.Is(err, errors.New("unimplemented")) // fallback for non-status errors
 }
