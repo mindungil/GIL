@@ -1,4 +1,4 @@
-.PHONY: tidy test gen build install clean e2e e2e2 e2e3 e2e4 e2e5 e2e6 e2e7 e2e8 e2e9 e2e-all
+.PHONY: tidy test gen build install clean e2e e2e2 e2e3 e2e4 e2e5 e2e6 e2e7 e2e8 e2e9 e2e10-modal e2e-all python-protos python-test
 
 tidy:
 	@for m in core runtime proto server cli tui sdk mcp; do \
@@ -56,7 +56,20 @@ e2e8: build
 e2e9: build
 	@bash tests/e2e/phase09_test.sh
 
-e2e-all: e2e e2e2 e2e3 e2e4 e2e5 e2e6 e2e7 e2e8 e2e9
+e2e10-modal: build
+	@bash tests/e2e/phase10_modal_test.sh
+
+e2e-all: e2e e2e2 e2e3 e2e4 e2e5 e2e6 e2e7 e2e8 e2e9 e2e10-modal
 
 clean:
 	@rm -rf bin
+
+# --- Python (gil_atropos) -------------------------------------------------
+
+# Compile gRPC stubs into python/gil_atropos/proto/ (requires grpcio-tools).
+python-protos:
+	@cd python/gil_atropos && python3 -m gil_atropos.compile_protos --proto-root ../../proto
+
+# Smoke tests for the Python adapter (requires pytest).
+python-test:
+	@cd python/gil_atropos && python3 -m pytest tests -v
