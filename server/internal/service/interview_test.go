@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"database/sql"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -192,4 +193,83 @@ func TestInterviewService_GetSpec_NotFound_ReturnsError(t *testing.T) {
 	spec, err := svc.GetSpec(context.Background(), &gilv1.GetSpecRequest{SessionId: "nonexistent"})
 	require.Error(t, err)
 	require.Nil(t, spec)
+}
+
+func TestInterviewService_Confirm_RequiresAllSlots(t *testing.T) {
+	svc, repo, _ := newInterviewSvc(t, []string{
+		`{"domain":"x","domain_confidence":0.5}`,
+		`What is your goal?`,
+	})
+	ctx := context.Background()
+
+	s, err := repo.Create(ctx, session.CreateInput{WorkingDir: "/x"})
+	require.NoError(t, err)
+
+	stream := &fakeInterviewStream{ctx: ctx}
+	require.NoError(t, svc.Start(&gilv1.StartInterviewRequest{
+		SessionId: s.ID, FirstInput: "x", Provider: "mock",
+	}, stream))
+
+	// Without filling required slots, Confirm should fail
+	_, err = svc.Confirm(ctx, &gilv1.ConfirmRequest{SessionId: s.ID})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "missing required slots")
+}
+
+func TestInterviewService_Confirm_SavesAndCleansUp(t *testing.T) {
+	svc, repo, sessionsBase := newInterviewSvc(t, []string{
+		`{"domain":"x","domain_confidence":0.5}`,
+		`What is your goal?`,
+	})
+	ctx := context.Background()
+
+	s, err := repo.Create(ctx, session.CreateInput{WorkingDir: "/x"})
+	require.NoError(t, err)
+
+	stream := &fakeInterviewStream{ctx: ctx}
+	require.NoError(t, svc.Start(&gilv1.StartInterviewRequest{
+		SessionId: s.ID, FirstInput: "x", Provider: "mock",
+	}, stream))
+
+	// Manually fill required slots in the in-memory state (simulating Reply progress)
+	svc.mu.Lock()
+	slot := svc.states[s.ID]
+	svc.mu.Unlock()
+	require.NotNil(t, slot)
+
+	slot.state.Spec.SpecId = "01TEST"
+	slot.state.Spec.SessionId = s.ID
+	slot.state.Spec.Goal = &gilv1.Goal{
+		OneLiner:               "build a CLI",
+		SuccessCriteriaNatural: []string{"a", "b", "c"},
+	}
+	slot.state.Spec.Constraints = &gilv1.Constraints{TechStack: []string{"go"}}
+	slot.state.Spec.Verification = &gilv1.Verification{
+		Checks: []*gilv1.Check{{Name: "build", Kind: gilv1.CheckKind_SHELL, Command: "go build"}},
+	}
+	slot.state.Spec.Workspace = &gilv1.Workspace{Backend: gilv1.WorkspaceBackend_LOCAL_SANDBOX}
+	slot.state.Spec.Models = &gilv1.ModelConfig{Main: &gilv1.ModelChoice{Provider: "anthropic", ModelId: "claude-opus-4-7"}}
+	slot.state.Spec.Risk = &gilv1.RiskProfile{Autonomy: gilv1.AutonomyDial_FULL}
+
+	resp, err := svc.Confirm(ctx, &gilv1.ConfirmRequest{SessionId: s.ID})
+	require.NoError(t, err)
+	require.NotEmpty(t, resp.ContentSha256)
+	require.Len(t, resp.ContentSha256, 64) // SHA-256 hex
+
+	// Session status updated
+	got, err := repo.Get(ctx, s.ID)
+	require.NoError(t, err)
+	require.Equal(t, "frozen", got.Status)
+
+	// In-memory state cleaned up
+	svc.mu.Lock()
+	_, exists := svc.states[s.ID]
+	svc.mu.Unlock()
+	require.False(t, exists, "in-memory state should be deleted after Confirm")
+
+	// spec.yaml + spec.lock exist on disk
+	_, err = os.Stat(filepath.Join(sessionsBase, s.ID, "spec.yaml"))
+	require.NoError(t, err)
+	_, err = os.Stat(filepath.Join(sessionsBase, s.ID, "spec.lock"))
+	require.NoError(t, err)
 }

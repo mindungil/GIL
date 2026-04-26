@@ -9,6 +9,7 @@ import (
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/jedutools/gil/core/interview"
 	"github.com/jedutools/gil/core/provider"
@@ -163,6 +164,12 @@ func (s *InterviewService) Confirm(ctx context.Context, req *gilv1.ConfirmReques
 	if err := s.repo.UpdateStatus(ctx, req.SessionId, "frozen"); err != nil {
 		return nil, status.Errorf(codes.Internal, "update status: %v", err)
 	}
+
+	// Clean up in-memory state — spec is now persisted on disk
+	s.mu.Lock()
+	delete(s.states, req.SessionId)
+	s.mu.Unlock()
+
 	return &gilv1.ConfirmResponse{
 		SpecId:        slot.state.Spec.SpecId,
 		ContentSha256: hex,
@@ -176,7 +183,8 @@ func (s *InterviewService) GetSpec(ctx context.Context, req *gilv1.GetSpecReques
 	slot, ok := s.states[req.SessionId]
 	s.mu.Unlock()
 	if ok {
-		return slot.state.Spec, nil
+		// Return defensive copy — slot.state.Spec is mutated by Reply
+		return proto.Clone(slot.state.Spec).(*gilv1.FrozenSpec), nil
 	}
 	// Fallback to disk
 	store := specstore.NewStore(s.sessionDir(req.SessionId))
