@@ -19,8 +19,9 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	RunService_Start_FullMethodName = "/gil.v1.RunService/Start"
-	RunService_Tail_FullMethodName  = "/gil.v1.RunService/Tail"
+	RunService_Start_FullMethodName   = "/gil.v1.RunService/Start"
+	RunService_Tail_FullMethodName    = "/gil.v1.RunService/Tail"
+	RunService_Restore_FullMethodName = "/gil.v1.RunService/Restore"
 )
 
 // RunServiceClient is the client API for RunService service.
@@ -35,6 +36,9 @@ type RunServiceClient interface {
 	// (Phase 4 stub: returns Unimplemented or empty stream until event
 	// integration completes in Phase 5.)
 	Tail(ctx context.Context, in *TailRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[Event], error)
+	// Restore rolls the session's workspace back to the Nth checkpoint snapshot.
+	// The session must not be currently running.
+	Restore(ctx context.Context, in *RestoreRequest, opts ...grpc.CallOption) (*RestoreResponse, error)
 }
 
 type runServiceClient struct {
@@ -74,6 +78,16 @@ func (c *runServiceClient) Tail(ctx context.Context, in *TailRequest, opts ...gr
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type RunService_TailClient = grpc.ServerStreamingClient[Event]
 
+func (c *runServiceClient) Restore(ctx context.Context, in *RestoreRequest, opts ...grpc.CallOption) (*RestoreResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RestoreResponse)
+	err := c.cc.Invoke(ctx, RunService_Restore_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // RunServiceServer is the server API for RunService service.
 // All implementations should embed UnimplementedRunServiceServer
 // for forward compatibility.
@@ -86,6 +100,9 @@ type RunServiceServer interface {
 	// (Phase 4 stub: returns Unimplemented or empty stream until event
 	// integration completes in Phase 5.)
 	Tail(*TailRequest, grpc.ServerStreamingServer[Event]) error
+	// Restore rolls the session's workspace back to the Nth checkpoint snapshot.
+	// The session must not be currently running.
+	Restore(context.Context, *RestoreRequest) (*RestoreResponse, error)
 }
 
 // UnimplementedRunServiceServer should be embedded to have
@@ -100,6 +117,9 @@ func (UnimplementedRunServiceServer) Start(context.Context, *StartRunRequest) (*
 }
 func (UnimplementedRunServiceServer) Tail(*TailRequest, grpc.ServerStreamingServer[Event]) error {
 	return status.Error(codes.Unimplemented, "method Tail not implemented")
+}
+func (UnimplementedRunServiceServer) Restore(context.Context, *RestoreRequest) (*RestoreResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Restore not implemented")
 }
 func (UnimplementedRunServiceServer) testEmbeddedByValue() {}
 
@@ -150,6 +170,24 @@ func _RunService_Tail_Handler(srv interface{}, stream grpc.ServerStream) error {
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type RunService_TailServer = grpc.ServerStreamingServer[Event]
 
+func _RunService_Restore_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RestoreRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunServiceServer).Restore(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RunService_Restore_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunServiceServer).Restore(ctx, req.(*RestoreRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // RunService_ServiceDesc is the grpc.ServiceDesc for RunService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -160,6 +198,10 @@ var RunService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Start",
 			Handler:    _RunService_Start_Handler,
+		},
+		{
+			MethodName: "Restore",
+			Handler:    _RunService_Restore_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

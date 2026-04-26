@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"net"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -16,6 +18,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/test/bufconn"
 
+	"github.com/jedutools/gil/core/checkpoint"
 	"github.com/jedutools/gil/core/event"
 	"github.com/jedutools/gil/core/provider"
 	"github.com/jedutools/gil/core/session"
@@ -295,6 +298,13 @@ func TestRunService_Start_Detach_ReturnsStarted(t *testing.T) {
 		iters, _, ok := svc.Progress(s.ID)
 		return ok && iters > 0
 	}, 2*time.Second, 10*time.Millisecond, "expected progress to be tracked for detached run")
+
+	// Wait for the background goroutine to finish before TempDir cleanup fires.
+	// Without this, the shadow git objects may still be open, causing cleanup errors.
+	assert.Eventually(t, func() bool {
+		sess, err := repo.Get(ctx, s.ID)
+		return err == nil && sess.Status != "running"
+	}, 5*time.Second, 20*time.Millisecond, "expected detached run to finish within 5s")
 }
 
 func TestBuildTools_LocalNative_NoSandbox(t *testing.T) {
@@ -371,4 +381,124 @@ func TestBuildTools_Docker_Returns_NotSupported(t *testing.T) {
 			require.Contains(t, err.Error(), "not yet supported")
 		})
 	}
+}
+
+func TestRunService_Restore_RollsBackWorkspace(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not in PATH")
+	}
+
+	workDir := t.TempDir()
+	svc, repo, sessionsBase := newRunSvc(t, nil)
+	ctx := context.Background()
+
+	s, err := repo.Create(ctx, session.CreateInput{WorkingDir: workDir})
+	require.NoError(t, err)
+	require.NoError(t, repo.UpdateStatus(ctx, s.ID, "frozen"))
+	makeFrozenSpec(t, sessionsBase, s.ID, workDir)
+
+	// Manually build a shadow with two commits.
+	shadowBase := filepath.Join(sessionsBase, s.ID, "shadow")
+	sg := checkpoint.New(workDir, shadowBase)
+	require.NoError(t, sg.Init(ctx))
+
+	require.NoError(t, os.WriteFile(filepath.Join(workDir, "file.txt"), []byte("v1"), 0o644))
+	_, err = sg.Commit(ctx, "iter 1")
+	require.NoError(t, err)
+
+	require.NoError(t, os.WriteFile(filepath.Join(workDir, "file.txt"), []byte("v2"), 0o644))
+	_, err = sg.Commit(ctx, "iter 2")
+	require.NoError(t, err)
+
+	// Mark session frozen (not running) so Restore accepts it.
+	require.NoError(t, repo.UpdateStatus(ctx, s.ID, "frozen"))
+
+	// Restore to step=1 (oldest) → file should be "v1".
+	resp, err := svc.Restore(ctx, &gilv1.RestoreRequest{SessionId: s.ID, Step: 1})
+	require.NoError(t, err)
+	require.Equal(t, int32(2), resp.TotalCheckpoints)
+	require.Equal(t, "iter 1", resp.CommitMessage)
+
+	got, err := os.ReadFile(filepath.Join(workDir, "file.txt"))
+	require.NoError(t, err)
+	require.Equal(t, "v1", string(got))
+
+	// Restore to step=-1 (latest) → file should be "v2".
+	resp2, err := svc.Restore(ctx, &gilv1.RestoreRequest{SessionId: s.ID, Step: -1})
+	require.NoError(t, err)
+	require.Equal(t, int32(2), resp2.TotalCheckpoints)
+	require.Equal(t, "iter 2", resp2.CommitMessage)
+
+	got2, err := os.ReadFile(filepath.Join(workDir, "file.txt"))
+	require.NoError(t, err)
+	require.Equal(t, "v2", string(got2))
+}
+
+func TestRunService_Restore_RejectsRunning(t *testing.T) {
+	svc, repo, _ := newRunSvc(t, nil)
+	ctx := context.Background()
+
+	s, err := repo.Create(ctx, session.CreateInput{WorkingDir: t.TempDir()})
+	require.NoError(t, err)
+	require.NoError(t, repo.UpdateStatus(ctx, s.ID, "running"))
+
+	_, err = svc.Restore(ctx, &gilv1.RestoreRequest{SessionId: s.ID, Step: 1})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "FailedPrecondition")
+}
+
+func TestRunService_Restore_NoCheckpoints(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not in PATH")
+	}
+
+	workDir := t.TempDir()
+	svc, repo, sessionsBase := newRunSvc(t, nil)
+	ctx := context.Background()
+
+	s, err := repo.Create(ctx, session.CreateInput{WorkingDir: workDir})
+	require.NoError(t, err)
+	require.NoError(t, repo.UpdateStatus(ctx, s.ID, "frozen"))
+	makeFrozenSpec(t, sessionsBase, s.ID, workDir)
+
+	// Init shadow but commit nothing.
+	shadowBase := filepath.Join(sessionsBase, s.ID, "shadow")
+	sg := checkpoint.New(workDir, shadowBase)
+	require.NoError(t, sg.Init(ctx))
+
+	_, err = svc.Restore(ctx, &gilv1.RestoreRequest{SessionId: s.ID, Step: 1})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "no checkpoints")
+}
+
+func TestRunService_Restore_OutOfRange(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not in PATH")
+	}
+
+	workDir := t.TempDir()
+	svc, repo, sessionsBase := newRunSvc(t, nil)
+	ctx := context.Background()
+
+	s, err := repo.Create(ctx, session.CreateInput{WorkingDir: workDir})
+	require.NoError(t, err)
+	require.NoError(t, repo.UpdateStatus(ctx, s.ID, "frozen"))
+	makeFrozenSpec(t, sessionsBase, s.ID, workDir)
+
+	shadowBase := filepath.Join(sessionsBase, s.ID, "shadow")
+	sg := checkpoint.New(workDir, shadowBase)
+	require.NoError(t, sg.Init(ctx))
+
+	require.NoError(t, os.WriteFile(filepath.Join(workDir, "file.txt"), []byte("v1"), 0o644))
+	_, err = sg.Commit(ctx, "iter 1")
+	require.NoError(t, err)
+
+	require.NoError(t, os.WriteFile(filepath.Join(workDir, "file.txt"), []byte("v2"), 0o644))
+	_, err = sg.Commit(ctx, "iter 2")
+	require.NoError(t, err)
+
+	// step=5 when only 2 checkpoints exist.
+	_, err = svc.Restore(ctx, &gilv1.RestoreRequest{SessionId: s.ID, Step: 5})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "OutOfRange")
 }

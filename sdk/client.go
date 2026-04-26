@@ -166,3 +166,13 @@ func (c *Client) StartRun(ctx context.Context, sessionID, providerName, model st
 func (c *Client) TailRun(ctx context.Context, sessionID string) (gilv1.RunService_TailClient, error) {
 	return c.runs.Tail(ctx, &gilv1.TailRequest{SessionId: sessionID})
 }
+
+// RestoreRun rolls back the session's workspace to the given checkpoint step.
+// Positive step counts oldest-first (step=1 → oldest); negative counts
+// newest-first (step=-1 → most recent).
+func (c *Client) RestoreRun(ctx context.Context, sessionID string, step int32) (*gilv1.RestoreResponse, error) {
+	return c.runs.Restore(ctx, &gilv1.RestoreRequest{
+		SessionId: sessionID,
+		Step:      step,
+	})
+}

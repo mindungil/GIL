@@ -11,6 +11,7 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/jedutools/gil/core/checkpoint"
 	"github.com/jedutools/gil/core/event"
 	"github.com/jedutools/gil/core/provider"
 	"github.com/jedutools/gil/core/runner"
@@ -155,11 +156,11 @@ func (s *RunService) Start(ctx context.Context, req *gilv1.StartRunRequest) (*gi
 		go func() {
 			// Use a background context: the gRPC ctx cancels when Start returns.
 			bgCtx := context.Background()
-			_, _ = s.executeRun(bgCtx, req.SessionId, spec, prov, model, tools, ver)
+			_, _ = s.executeRun(bgCtx, req.SessionId, spec, prov, model, tools, ver, workspaceDir)
 		}()
 		return &gilv1.StartRunResponse{Status: "started"}, nil
 	}
-	return s.executeRun(ctx, req.SessionId, spec, prov, model, tools, ver)
+	return s.executeRun(ctx, req.SessionId, spec, prov, model, tools, ver, workspaceDir)
 }
 
 // executeRun performs the actual agent loop execution and cleanup. It is called
@@ -172,6 +173,7 @@ func (s *RunService) executeRun(
 	model string,
 	tools []tool.Tool,
 	ver *verify.Runner,
+	workspaceDir string,
 ) (*gilv1.StartRunResponse, error) {
 	// Create per-session event stream + persister.
 	eventDir := filepath.Join(s.sessionDir(sessionID), "events")
@@ -230,6 +232,9 @@ func (s *RunService) executeRun(
 	loop := runner.NewAgentLoop(spec, prov, model, tools, ver)
 	loop.Events = stream
 
+	shadowBase := filepath.Join(s.sessionDir(sessionID), "shadow")
+	loop.Checkpoint = checkpoint.New(workspaceDir, shadowBase)
+
 	res, runErr := loop.Run(ctx)
 
 	// Drain both subscribers before syncing to disk (order-independent).
@@ -265,6 +270,66 @@ func (s *RunService) executeRun(
 		resp.ErrorMessage = res.FinalError.Error()
 	}
 	return resp, nil
+}
+
+// Restore rolls back the session's workspace to the given checkpoint step.
+// Positive step counts oldest-first (step=1 → oldest); negative counts
+// newest-first (step=-1 → most recent). step=0 is invalid.
+func (s *RunService) Restore(ctx context.Context, req *gilv1.RestoreRequest) (*gilv1.RestoreResponse, error) {
+	if req.Step == 0 {
+		return nil, status.Errorf(codes.InvalidArgument, "step must be non-zero (1-indexed; negatives count from latest)")
+	}
+	sess, err := s.repo.Get(ctx, req.SessionId)
+	if err != nil {
+		if errors.Is(err, session.ErrNotFound) {
+			return nil, status.Errorf(codes.NotFound, "session %q not found", req.SessionId)
+		}
+		return nil, status.Errorf(codes.Internal, "session lookup: %v", err)
+	}
+	// Refuse restore on running sessions to avoid concurrent workspace mutation.
+	if sess.Status == "running" {
+		return nil, status.Errorf(codes.FailedPrecondition,
+			"cannot restore session %q while running; stop it first", req.SessionId)
+	}
+	workspaceDir := sess.WorkingDir
+	spec, err := specstore.NewStore(s.sessionDir(req.SessionId)).Load()
+	if err == nil && spec.Workspace != nil && spec.Workspace.Path != "" {
+		workspaceDir = spec.Workspace.Path
+	}
+	shadowBase := filepath.Join(s.sessionDir(req.SessionId), "shadow")
+	sg := checkpoint.New(workspaceDir, shadowBase)
+	commits, err := sg.ListCommits(ctx)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "list checkpoints: %v", err)
+	}
+	if len(commits) == 0 {
+		return nil, status.Errorf(codes.FailedPrecondition,
+			"session %q has no checkpoints", req.SessionId)
+	}
+	// commits is newest-first. Resolve step:
+	//   step  1 → oldest (commits[len-1])
+	//   step  N → commits[len-N]
+	//   step -1 → newest (commits[0])
+	//   step -N → commits[N-1]
+	var idx int
+	if req.Step > 0 {
+		idx = len(commits) - int(req.Step)
+	} else {
+		idx = int(-req.Step) - 1
+	}
+	if idx < 0 || idx >= len(commits) {
+		return nil, status.Errorf(codes.OutOfRange,
+			"step %d out of range (have %d checkpoints)", req.Step, len(commits))
+	}
+	target := commits[idx]
+	if err := sg.Restore(ctx, target.SHA); err != nil {
+		return nil, status.Errorf(codes.Internal, "restore: %v", err)
+	}
+	return &gilv1.RestoreResponse{
+		CommitSha:        target.SHA,
+		CommitMessage:    target.Message,
+		TotalCheckpoints: int32(len(commits)),
+	}, nil
 }
 
 // toProtoEvent converts a core event.Event to its proto representation.
