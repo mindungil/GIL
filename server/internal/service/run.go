@@ -244,6 +244,7 @@ func (s *RunService) executeRun(
 	tools = append(tools,
 		&tool.MemoryUpdate{Bank: bank},
 		&tool.MemoryLoad{Bank: bank},
+		&tool.Edit{WorkingDir: workspaceDir},
 	)
 
 	loop := runner.NewAgentLoop(spec, prov, model, tools, ver)
