@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -30,6 +31,7 @@ func startGildForTest(t *testing.T) (sock string, cleanup func()) {
 
 	g := grpc.NewServer()
 	gilv1.RegisterSessionServiceServer(g, &testSessionServer{})
+	gilv1.RegisterInterviewServiceServer(g, &testInterviewServer{})
 	go g.Serve(lis)
 
 	require.Eventually(t, func() bool {
@@ -72,6 +74,54 @@ func (s *testSessionServer) List(ctx context.Context, req *gilv1.ListRequest) (*
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return &gilv1.ListResponse{Sessions: append([]*gilv1.Session(nil), s.sessions...)}, nil
+}
+
+// testInterviewServer is a minimal in-test stub of InterviewService.
+type testInterviewServer struct {
+	gilv1.UnimplementedInterviewServiceServer
+}
+
+func (s *testInterviewServer) Start(req *gilv1.StartInterviewRequest, stream gilv1.InterviewService_StartServer) error {
+	stream.Send(&gilv1.InterviewEvent{
+		Payload: &gilv1.InterviewEvent_Stage{
+			Stage: &gilv1.StageTransition{
+				From:   "sensing",
+				To:     "conversation",
+				Reason: "test",
+			},
+		},
+	})
+	return stream.Send(&gilv1.InterviewEvent{
+		Payload: &gilv1.InterviewEvent_AgentTurn{
+			AgentTurn: &gilv1.AgentTurn{
+				Content: "What do you want?",
+			},
+		},
+	})
+}
+
+func (s *testInterviewServer) Reply(req *gilv1.ReplyRequest, stream gilv1.InterviewService_ReplyServer) error {
+	return stream.Send(&gilv1.InterviewEvent{
+		Payload: &gilv1.InterviewEvent_AgentTurn{
+			AgentTurn: &gilv1.AgentTurn{
+				Content: "got: " + req.Content,
+			},
+		},
+	})
+}
+
+func (s *testInterviewServer) GetSpec(ctx context.Context, req *gilv1.GetSpecRequest) (*gilv1.FrozenSpec, error) {
+	return &gilv1.FrozenSpec{
+		SpecId:    "test-spec-id",
+		SessionId: req.SessionId,
+	}, nil
+}
+
+func (s *testInterviewServer) Confirm(ctx context.Context, req *gilv1.ConfirmRequest) (*gilv1.ConfirmResponse, error) {
+	return &gilv1.ConfirmResponse{
+		SpecId:         "test-spec-id",
+		ContentSha256:  strings.Repeat("a", 64),
+	}, nil
 }
 
 func TestNew_OutputsSessionID(t *testing.T) {

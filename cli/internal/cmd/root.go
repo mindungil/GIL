@@ -31,5 +31,7 @@ func Root() *cobra.Command {
 	root.AddCommand(daemonCmd())
 	root.AddCommand(newCmd())
 	root.AddCommand(statusCmd())
+	root.AddCommand(interviewCmd())
+	root.AddCommand(specCmd())
 	return root
 }
