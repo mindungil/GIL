@@ -1,0 +1,39 @@
+syntax = "proto3";
+
+package gil.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/jedutools/gil/proto/gen/gil/v1;gilv1";
+
+message Event {
+  int64 id = 1;
+  google.protobuf.Timestamp timestamp = 2;
+  EventSource source = 3;
+  EventKind kind = 4;
+  string type = 5;
+  bytes data_json = 6;
+  int64 cause = 7;
+  EventMetrics metrics = 8;
+}
+
+enum EventSource {
+  SOURCE_UNSPECIFIED = 0;
+  AGENT = 1;
+  USER = 2;
+  ENVIRONMENT = 3;
+  SYSTEM = 4;
+}
+
+enum EventKind {
+  KIND_UNSPECIFIED = 0;
+  ACTION = 1;
+  OBSERVATION = 2;
+  NOTE = 3;
+}
+
+message EventMetrics {
+  int64 tokens = 1;
+  double cost_usd = 2;
+  int64 latency_ms = 3;
+}

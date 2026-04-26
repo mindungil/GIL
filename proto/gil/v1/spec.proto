@@ -1,0 +1,134 @@
+syntax = "proto3";
+
+package gil.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/jedutools/gil/proto/gen/gil/v1;gilv1";
+
+message FrozenSpec {
+  string spec_id = 1;
+  string session_id = 2;
+  google.protobuf.Timestamp frozen_at = 3;
+  string content_sha256 = 4;
+
+  Goal goal = 10;
+  Constraints constraints = 11;
+  Verification verification = 12;
+  Workspace workspace = 13;
+  ModelConfig models = 14;
+  Budget budget = 15;
+  Tools tools = 16;
+  RiskProfile risk = 17;
+  repeated Microagent microagents = 18;
+  Setup setup = 20;
+}
+
+message Goal {
+  string one_liner = 1;
+  string detailed = 2;
+  repeated string success_criteria_natural = 3;
+  repeated string non_goals = 4;
+}
+
+message Constraints {
+  repeated string tech_stack = 1;
+  repeated string forbidden = 2;
+  string license = 3;
+  string code_style = 4;
+}
+
+message Verification {
+  repeated Check checks = 1;
+  int32 max_retries_per_check = 2;
+  int64 per_check_timeout_seconds = 3;
+}
+
+message Check {
+  string name = 1;
+  CheckKind kind = 2;
+  string command = 3;
+  int32 expected_exit_code = 4;
+}
+
+enum CheckKind {
+  CHECK_KIND_UNSPECIFIED = 0;
+  SHELL = 1;
+  FILE_EXISTS = 2;
+  HTTP = 3;
+  REGEX_MATCH = 4;
+  CUSTOM_SCRIPT = 5;
+}
+
+message Workspace {
+  WorkspaceBackend backend = 1;
+  string path = 2;
+}
+
+enum WorkspaceBackend {
+  BACKEND_UNSPECIFIED = 0;
+  LOCAL_NATIVE = 1;
+  LOCAL_SANDBOX = 2;
+  DOCKER = 3;
+  SSH = 4;
+  VM = 5;
+}
+
+message ModelConfig {
+  ModelChoice main = 1;
+  ModelChoice weak = 2;
+  ModelChoice editor = 3;
+  ModelChoice adversary = 4;
+  ModelChoice interview = 5;
+}
+
+message ModelChoice {
+  string provider = 1;
+  string model_id = 2;
+}
+
+message Budget {
+  int64 max_total_tokens = 1;
+  double max_total_cost_usd = 2;
+  int64 max_wall_clock_seconds = 3;
+  int32 max_iterations = 4;
+  int32 max_subagent_depth = 5;
+  bool grace_call_on_exhaustion = 6;
+}
+
+message Tools {
+  bool bash = 1;
+  bool file_ops = 2;
+  bool web_search = 3;
+  bool web_fetch = 4;
+  bool repomap = 5;
+  bool exec_code = 6;
+  repeated string mcp_servers = 10;
+}
+
+message RiskProfile {
+  AutonomyDial autonomy = 1;
+  bool adversary_reviewer_enabled = 2;
+  bool stuck_detector_enabled = 3;
+}
+
+enum AutonomyDial {
+  AUTONOMY_UNSPECIFIED = 0;
+  PLAN_ONLY = 1;
+  ASK_PER_ACTION = 2;
+  ASK_DESTRUCTIVE_ONLY = 3;
+  FULL = 4;
+}
+
+message Microagent {
+  string name = 1;
+  string trigger_type = 2;
+  repeated string keywords = 3;
+  string content = 4;
+}
+
+message Setup {
+  repeated string commands = 1;
+  int64 timeout_seconds = 2;
+  bool fail_fast = 3;
+}

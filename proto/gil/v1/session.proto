@@ -1,0 +1,54 @@
+syntax = "proto3";
+
+package gil.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/jedutools/gil/proto/gen/gil/v1;gilv1";
+
+message Session {
+  string id = 1;
+  SessionStatus status = 2;
+  google.protobuf.Timestamp created_at = 3;
+  google.protobuf.Timestamp updated_at = 4;
+  string spec_id = 5;
+  string working_dir = 6;
+  string goal_hint = 7;
+  int64 total_tokens = 8;
+  double total_cost_usd = 9;
+}
+
+enum SessionStatus {
+  SESSION_STATUS_UNSPECIFIED = 0;
+  CREATED = 1;
+  INTERVIEWING = 2;
+  FROZEN = 3;
+  RUNNING = 4;
+  AUTO_PAUSED = 5;
+  DONE = 6;
+  STOPPED = 7;
+}
+
+service SessionService {
+  rpc Create(CreateRequest) returns (Session);
+  rpc Get(GetRequest) returns (Session);
+  rpc List(ListRequest) returns (ListResponse);
+}
+
+message CreateRequest {
+  string working_dir = 1;
+  string goal_hint = 2;
+}
+
+message GetRequest {
+  string id = 1;
+}
+
+message ListRequest {
+  int32 limit = 1;
+  string status_filter = 2;
+}
+
+message ListResponse {
+  repeated Session sessions = 1;
+}
