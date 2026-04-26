@@ -10,6 +10,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
 )
@@ -17,6 +19,7 @@ import (
 // testSessionServer is a minimal implementation of SessionServiceServer for testing.
 type testSessionServer struct {
 	gilv1.UnimplementedSessionServiceServer
+	failGetWith codes.Code // if non-zero, Get returns this code
 }
 
 // Create returns a test session.
@@ -31,6 +34,9 @@ func (s *testSessionServer) Create(ctx context.Context, req *gilv1.CreateRequest
 
 // Get returns a test session by ID.
 func (s *testSessionServer) Get(ctx context.Context, req *gilv1.GetRequest) (*gilv1.Session, error) {
+	if s.failGetWith != codes.OK {
+		return nil, status.Errorf(s.failGetWith, "test injected error")
+	}
 	return &gilv1.Session{
 		Id:     req.Id,
 		Status: gilv1.SessionStatus_CREATED,
@@ -55,6 +61,12 @@ func (s *testSessionServer) List(ctx context.Context, req *gilv1.ListRequest) (*
 
 func startTestServer(t *testing.T) (string, func()) {
 	t.Helper()
+	sock, stop, _ := startTestServerWithCtrl(t)
+	return sock, stop
+}
+
+func startTestServerWithCtrl(t *testing.T) (string, func(), *testSessionServer) {
+	t.Helper()
 	dir := t.TempDir()
 	sockPath := filepath.Join(dir, "gild.sock")
 
@@ -66,8 +78,9 @@ func startTestServer(t *testing.T) (string, func()) {
 	lis, err := net.Listen("unix", sockPath)
 	require.NoError(t, err)
 
+	srv := &testSessionServer{}
 	g := grpc.NewServer()
-	gilv1.RegisterSessionServiceServer(g, &testSessionServer{})
+	gilv1.RegisterSessionServiceServer(g, srv)
 	go g.Serve(lis)
 
 	// Wait for the server to be ready
@@ -83,7 +96,7 @@ func startTestServer(t *testing.T) (string, func()) {
 	return sockPath, func() {
 		g.GracefulStop()
 		_ = lis.Close()
-	}
+	}, srv
 }
 
 func TestClient_Dial_AndCreateSession(t *testing.T) {
@@ -129,4 +142,19 @@ func TestClient_ListSessions(t *testing.T) {
 	require.Equal(t, "test-id-1", sessions[0].ID)
 	require.Equal(t, "test-id-2", sessions[1].ID)
 	require.Equal(t, "RUNNING", sessions[1].Status)
+}
+
+func TestClient_GetSession_NotFound(t *testing.T) {
+	sock, stop, srv := startTestServerWithCtrl(t)
+	defer stop()
+
+	srv.failGetWith = codes.NotFound
+
+	cli, err := Dial(sock)
+	require.NoError(t, err)
+	defer cli.Close()
+
+	_, err = cli.GetSession(context.Background(), "any")
+	require.Error(t, err)
+	require.Equal(t, codes.NotFound, status.Code(err))
 }

@@ -89,8 +89,12 @@ func (c *Client) ListSessions(ctx context.Context, limit int) ([]*Session, error
 	return out, nil
 }
 
-// fromProto converts a protobuf Session to an SDK Session.
+// fromProto converts a proto Session to the SDK Session value type.
+// Returns nil if the input is nil.
 func fromProto(s *gilv1.Session) *Session {
+	if s == nil {
+		return nil
+	}
 	return &Session{
 		ID:         s.Id,
 		Status:     s.Status.String(),
