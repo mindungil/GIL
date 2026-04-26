@@ -15,6 +15,7 @@ import (
 	"github.com/jedutools/gil/core/checkpoint"
 	"github.com/jedutools/gil/core/compact"
 	"github.com/jedutools/gil/core/event"
+	"github.com/jedutools/gil/core/instructions"
 	"github.com/jedutools/gil/core/memory"
 	"github.com/jedutools/gil/core/permission"
 	"github.com/jedutools/gil/core/provider"
@@ -184,7 +185,7 @@ func TestAgentLoop_SystemPromptIncludesChecks(t *testing.T) {
 			},
 		},
 	}
-	prompt := buildSystemPrompt(spec, tools, nil)
+	prompt := buildSystemPrompt(spec, tools, nil, "")
 	require.Contains(t, prompt, "build hello")
 	require.Contains(t, prompt, "exists")
 	require.Contains(t, prompt, "test -f hello")
@@ -842,7 +843,7 @@ func TestAgentLoop_PrependsMemoryBank_FullWhenSmall(t *testing.T) {
 	require.NoError(t, bank.Write(memory.FileProjectBrief, "Build a CLI\n"))
 
 	spec := &gilv1.FrozenSpec{Goal: &gilv1.Goal{OneLiner: "test"}, Verification: &gilv1.Verification{}}
-	sysPrompt := buildSystemPrompt(spec, nil, bank)
+	sysPrompt := buildSystemPrompt(spec, nil, bank, "")
 	require.Contains(t, sysPrompt, "## Memory Bank")
 	require.Contains(t, sysPrompt, "### projectbrief.md")
 	require.Contains(t, sysPrompt, "Build a CLI")
@@ -861,7 +862,7 @@ func TestAgentLoop_PrependsMemoryBank_OnlyProgressWhenLarge(t *testing.T) {
 	require.NoError(t, bank.Write(memory.FileProgress, "## Done\n- progress shown\n"))
 
 	spec := &gilv1.FrozenSpec{Goal: &gilv1.Goal{OneLiner: "test"}, Verification: &gilv1.Verification{}}
-	sysPrompt := buildSystemPrompt(spec, nil, bank)
+	sysPrompt := buildSystemPrompt(spec, nil, bank, "")
 	require.Contains(t, sysPrompt, "## Memory Bank")
 	require.Contains(t, sysPrompt, "exceeds inline budget")
 	require.Contains(t, sysPrompt, "### progress.md")
@@ -875,7 +876,7 @@ func TestAgentLoop_PrependsMemoryBank_OnlyProgressWhenLarge(t *testing.T) {
 
 func TestAgentLoop_NilBank_NoMemorySection(t *testing.T) {
 	spec := &gilv1.FrozenSpec{Goal: &gilv1.Goal{OneLiner: "test"}, Verification: &gilv1.Verification{}}
-	sysPrompt := buildSystemPrompt(spec, nil, nil)
+	sysPrompt := buildSystemPrompt(spec, nil, nil, "")
 	require.NotContains(t, sysPrompt, "## Memory Bank")
 	require.NotContains(t, sysPrompt, "memory_load")
 }
@@ -884,7 +885,7 @@ func TestAgentLoop_EmptyBank_NoMemorySection(t *testing.T) {
 	// Bank exists but has no files written yet
 	bank := memory.New(filepath.Join(t.TempDir(), "memory")) // Init NOT called
 	spec := &gilv1.FrozenSpec{Goal: &gilv1.Goal{OneLiner: "test"}, Verification: &gilv1.Verification{}}
-	sysPrompt := buildSystemPrompt(spec, nil, bank)
+	sysPrompt := buildSystemPrompt(spec, nil, bank, "")
 	require.NotContains(t, sysPrompt, "## Memory Bank")
 }
 
@@ -1858,4 +1859,199 @@ func TestAgentLoop_SubagentBranch_InjectsFindingIntoSystemPrompt(t *testing.T) {
 		}
 	}
 	require.True(t, sawFinding, "expected at least one main-loop provider request to contain SUBAGENT FINDING in system prompt")
+}
+
+// systemRecordingProvider captures every Request.System the runner passes
+// in. Used by the AGENTS.md injection tests to assert what landed in the
+// system block on the very first iteration.
+type systemRecordingProvider struct {
+	mu       sync.Mutex
+	systems  []string
+	stop     bool
+	endAfter int // emit StopReason="end_turn" after this many calls
+}
+
+func (p *systemRecordingProvider) Name() string { return "system-recording" }
+func (p *systemRecordingProvider) Complete(_ context.Context, req provider.Request) (provider.Response, error) {
+	p.mu.Lock()
+	p.systems = append(p.systems, req.System)
+	calls := len(p.systems)
+	p.mu.Unlock()
+	if calls >= p.endAfter {
+		return provider.Response{Text: "done", StopReason: "end_turn"}, nil
+	}
+	// Default: end immediately so the loop terminates quickly.
+	return provider.Response{Text: "ok", StopReason: "end_turn"}, nil
+}
+
+func TestAgentLoop_DiscoversAGENTSMDFromWorkspace(t *testing.T) {
+	ws := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "AGENTS.md"),
+		[]byte("# AGENTS\nUse tabs not spaces.\n"), 0o644))
+
+	prov := &systemRecordingProvider{endAfter: 1}
+	spec := &gilv1.FrozenSpec{
+		Goal:         &gilv1.Goal{OneLiner: "test"},
+		Verification: &gilv1.Verification{}, // empty checks → vacuous pass
+		Budget:       &gilv1.Budget{MaxIterations: 2},
+	}
+	stream := event.NewStream()
+	sub := stream.Subscribe(64)
+
+	loop := &AgentLoop{
+		Spec:      spec,
+		Provider:  prov,
+		Model:     "x",
+		Verifier:  verify.NewRunner(t.TempDir()),
+		Events:    stream,
+		Workspace: ws,
+	}
+	res, err := loop.Run(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "done", res.Status)
+
+	prov.mu.Lock()
+	require.NotEmpty(t, prov.systems)
+	first := prov.systems[0]
+	prov.mu.Unlock()
+	require.Contains(t, first, "## Project Instructions")
+	require.Contains(t, first, "Use tabs not spaces")
+	require.Contains(t, first, "--- BEGIN workspace: AGENTS.md ---")
+
+	// Drain events and verify system_instructions_loaded was emitted.
+	var sawLoaded bool
+	for {
+		select {
+		case e, ok := <-sub.Events():
+			if !ok {
+				goto done
+			}
+			if e.Type == "system_instructions_loaded" {
+				sawLoaded = true
+			}
+		default:
+			goto done
+		}
+	}
+done:
+	require.True(t, sawLoaded, "expected system_instructions_loaded event")
+}
+
+func TestAgentLoop_NoWorkspaceMeansNoDiscovery(t *testing.T) {
+	prov := &systemRecordingProvider{endAfter: 1}
+	spec := &gilv1.FrozenSpec{
+		Goal:         &gilv1.Goal{OneLiner: "test"},
+		Verification: &gilv1.Verification{},
+		Budget:       &gilv1.Budget{MaxIterations: 2},
+	}
+	stream := event.NewStream()
+	sub := stream.Subscribe(64)
+
+	loop := &AgentLoop{
+		Spec:     spec,
+		Provider: prov,
+		Model:    "x",
+		Verifier: verify.NewRunner(t.TempDir()),
+		Events:   stream,
+		// Workspace deliberately left empty.
+	}
+	_, err := loop.Run(context.Background())
+	require.NoError(t, err)
+
+	prov.mu.Lock()
+	first := prov.systems[0]
+	prov.mu.Unlock()
+	require.NotContains(t, first, "## Project Instructions")
+
+	// No event should have been emitted.
+	var sawLoaded bool
+	for {
+		select {
+		case e, ok := <-sub.Events():
+			if !ok {
+				goto done2
+			}
+			if e.Type == "system_instructions_loaded" {
+				sawLoaded = true
+			}
+		default:
+			goto done2
+		}
+	}
+done2:
+	require.False(t, sawLoaded, "system_instructions_loaded should not fire without workspace")
+}
+
+func TestAgentLoop_InstructionSourcesOverrideSkipsDiscovery(t *testing.T) {
+	// Even with a Workspace set, an explicit InstructionSources slice
+	// should bypass discovery (no on-disk read) and render directly.
+	ws := t.TempDir()
+	// Plant an AGENTS.md that should NOT be picked up because the
+	// override takes precedence.
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "AGENTS.md"),
+		[]byte("ON DISK\n"), 0o644))
+
+	prov := &systemRecordingProvider{endAfter: 1}
+	spec := &gilv1.FrozenSpec{
+		Goal:         &gilv1.Goal{OneLiner: "t"},
+		Verification: &gilv1.Verification{},
+		Budget:       &gilv1.Budget{MaxIterations: 2},
+	}
+
+	loop := &AgentLoop{
+		Spec:      spec,
+		Provider:  prov,
+		Model:     "x",
+		Verifier:  verify.NewRunner(t.TempDir()),
+		Workspace: ws,
+		InstructionSources: []instructions.Source{
+			{Path: "/virtual/AGENTS.md", Origin: "workspace", Body: "FROM OVERRIDE\n"},
+		},
+	}
+	_, err := loop.Run(context.Background())
+	require.NoError(t, err)
+
+	prov.mu.Lock()
+	first := prov.systems[0]
+	prov.mu.Unlock()
+	require.Contains(t, first, "FROM OVERRIDE")
+	require.NotContains(t, first, "ON DISK")
+}
+
+func TestAgentLoop_MemoryBankAppearsAfterInstructions(t *testing.T) {
+	ws := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "AGENTS.md"),
+		[]byte("INSTR_MARKER\n"), 0o644))
+
+	bankDir := filepath.Join(t.TempDir(), "memory")
+	bank := memory.New(bankDir)
+	require.NoError(t, bank.Init())
+	require.NoError(t, bank.Write(memory.FileProgress, "BANK_MARKER\n"))
+
+	prov := &systemRecordingProvider{endAfter: 1}
+	spec := &gilv1.FrozenSpec{
+		Goal:         &gilv1.Goal{OneLiner: "t"},
+		Verification: &gilv1.Verification{},
+		Budget:       &gilv1.Budget{MaxIterations: 2},
+	}
+	loop := &AgentLoop{
+		Spec:      spec,
+		Provider:  prov,
+		Model:     "x",
+		Verifier:  verify.NewRunner(t.TempDir()),
+		Memory:    bank,
+		Workspace: ws,
+	}
+	_, err := loop.Run(context.Background())
+	require.NoError(t, err)
+
+	prov.mu.Lock()
+	first := prov.systems[0]
+	prov.mu.Unlock()
+
+	instrIdx := strings.Index(first, "INSTR_MARKER")
+	bankIdx := strings.Index(first, "BANK_MARKER")
+	require.Greater(t, instrIdx, 0, "expected AGENTS.md content in system prompt")
+	require.Greater(t, bankIdx, 0, "expected memory bank content in system prompt")
+	require.Less(t, instrIdx, bankIdx, "instructions must precede memory bank in the system prompt")
 }

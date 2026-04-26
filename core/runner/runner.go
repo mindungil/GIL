@@ -13,6 +13,7 @@ import (
 	"github.com/jedutools/gil/core/checkpoint"
 	"github.com/jedutools/gil/core/compact"
 	"github.com/jedutools/gil/core/event"
+	"github.com/jedutools/gil/core/instructions"
 	"github.com/jedutools/gil/core/memory"
 	"github.com/jedutools/gil/core/permission"
 	"github.com/jedutools/gil/core/provider"
@@ -83,6 +84,32 @@ type AgentLoop struct {
 	// user message. Used by RunSubagent to inject a custom subgoal.
 	SeedUserMessage string
 
+	// Workspace, when non-empty, is the root from which AGENTS.md /
+	// CLAUDE.md / .cursor/rules/*.mdc are discovered at Run() startup and
+	// injected into the system prompt between the base prompt and the
+	// memory bank. Empty disables discovery silently — the runner does
+	// NOT fall back to cwd because gild owns the per-session workspace
+	// and a wrong default would leak the wrong project's conventions
+	// into the model.
+	Workspace string
+
+	// InstructionSources, when non-nil, overrides discovery: the runner
+	// renders these directly. Used by tests and by callers that want to
+	// pre-seed instructions from somewhere other than the on-disk walk.
+	InstructionSources []instructions.Source
+
+	// InstructionDiscoverOptions, when set, is passed through to the
+	// instructions.Discover call at Run() startup. Defaults are sensible
+	// (StopAtGitRoot=true, no global/home dirs); callers that want to
+	// include $XDG_CONFIG_HOME/gil/AGENTS.md should set GlobalConfigDir
+	// here.
+	InstructionDiscoverOptions instructions.DiscoverOptions
+
+	// instructionsRendered is the resolved + rendered string built once at
+	// Run() startup; reused across iterations so the cache prefix stays
+	// stable for prompt-caching providers.
+	instructionsRendered string
+
 	// internal: buffer of recent events for the detector (ring of last 200)
 	recent      []event.Event
 	recentMax   int
@@ -121,7 +148,13 @@ func (a *AgentLoop) Run(ctx context.Context) (*Result, error) {
 		maxIter = int(a.Spec.Budget.MaxIterations)
 	}
 
-	system := buildSystemPrompt(a.Spec, a.Tools, a.Memory)
+	// Resolve project-level instructions (AGENTS.md / CLAUDE.md /
+	// cursor rules) once per run. The result lives between the base
+	// system prompt and the memory bank and is invariant for the life of
+	// the run — important so the cache prefix stays stable across
+	// iterations on prompt-caching providers (Anthropic system block).
+	a.loadInstructions()
+	system := buildSystemPrompt(a.Spec, a.Tools, a.Memory, a.instructionsRendered)
 	tools := make([]provider.ToolDef, 0, len(a.Tools))
 	toolByName := map[string]tool.Tool{}
 	for _, t := range a.Tools {
@@ -614,7 +647,7 @@ func (a *AgentLoop) RunSubagent(ctx context.Context, subgoal string, allowedTool
 	return res.FinalText, nil
 }
 
-func buildSystemPrompt(spec *gilv1.FrozenSpec, tools []tool.Tool, bank *memory.Bank) string {
+func buildSystemPrompt(spec *gilv1.FrozenSpec, tools []tool.Tool, bank *memory.Bank, instructionsSection string) string {
 	goal := "(no goal specified)"
 	if spec != nil && spec.Goal != nil {
 		goal = spec.Goal.OneLiner
@@ -651,18 +684,83 @@ Strategy:
 
 Be decisive. Don't ask the user — they're not present. Make reasonable assumptions and act.`, goal, checkList, toolList)
 
+	// Order is fixed: base → instructions (AGENTS.md/CLAUDE.md/cursor)
+	// → memory bank. Instructions sit between base and bank because
+	// they're persistent project context (model should read them once
+	// per run, never per-iteration), whereas the bank can churn between
+	// iterations as the agent updates progress.md.
+	out := base
+	if instructionsSection != "" {
+		out += "\n\n## Project Instructions\n\nThe following content was discovered from AGENTS.md, CLAUDE.md, and/or .cursor/rules/*.mdc files in this workspace and its ancestors. Treat it as durable project conventions and persona signals from the user.\n\n" + instructionsSection
+	}
 	if bank == nil {
-		return base
+		return out
 	}
 	bankSection, err := buildMemoryBankSection(bank)
 	if err != nil {
 		// Soft failure: skip prepend, log nothing here (caller may emit event)
-		return base
+		return out
 	}
 	if bankSection == "" {
-		return base
+		return out
 	}
-	return base + "\n\n" + bankSection
+	return out + "\n\n" + bankSection
+}
+
+// loadInstructions populates a.instructionsRendered exactly once per
+// AgentLoop. Called from Run() before the first iteration. When neither
+// Workspace nor InstructionSources is provided the call is a no-op and
+// no event is emitted.
+func (a *AgentLoop) loadInstructions() {
+	// Pre-rendered override beats discovery.
+	if len(a.InstructionSources) > 0 {
+		a.instructionsRendered = instructions.Render(a.InstructionSources, a.InstructionDiscoverOptions.MaxBytes)
+		a.emit(event.SourceSystem, event.KindNote, "system_instructions_loaded", map[string]any{
+			"sources": len(a.InstructionSources),
+			"bytes":   len(a.instructionsRendered),
+			"source":  "override",
+		})
+		return
+	}
+	// No workspace → silently skip discovery (do NOT default to cwd).
+	if a.Workspace == "" {
+		return
+	}
+
+	opts := a.InstructionDiscoverOptions
+	opts.Workspace = a.Workspace
+	// Default to stop-at-git-root unless caller explicitly set otherwise.
+	// We can't distinguish "false because zero value" from "false because
+	// caller asked for full walk", so the convention is: callers either
+	// accept the default (true) or set StopAtGitRoot=true explicitly. The
+	// rare "walk all the way up" case sets it to false, which we honour.
+	if !opts.StopAtGitRoot && opts.GlobalConfigDir == "" && opts.HomeDir == "" {
+		// Heuristic: if the caller hasn't set anything, prefer git-root
+		// stop because monorepos are the common case.
+		opts.StopAtGitRoot = true
+	}
+
+	srcs, err := instructions.Discover(opts)
+	if err != nil {
+		a.emit(event.SourceSystem, event.KindNote, "system_instructions_error", map[string]any{
+			"err": err.Error(),
+		})
+		return
+	}
+	if len(srcs) == 0 {
+		return
+	}
+	a.instructionsRendered = instructions.Render(srcs, opts.MaxBytes)
+	paths := make([]string, 0, len(srcs))
+	for _, s := range srcs {
+		paths = append(paths, s.Path)
+	}
+	a.emit(event.SourceSystem, event.KindNote, "system_instructions_loaded", map[string]any{
+		"sources": len(srcs),
+		"bytes":   len(a.instructionsRendered),
+		"paths":   paths,
+		"source":  "discover",
+	})
 }
 
 const bankFullThresholdTokens = 4000
