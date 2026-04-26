@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	_ "modernc.org/sqlite"
@@ -15,6 +16,28 @@ import (
 	"github.com/jedutools/gil/core/session"
 	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
 )
+
+// recordingProvider wraps a Mock and records the model field of every Complete call.
+type recordingProvider struct {
+	mu    sync.Mutex
+	calls []string
+	*provider.Mock
+}
+
+func (r *recordingProvider) Complete(ctx context.Context, req provider.Request) (provider.Response, error) {
+	r.mu.Lock()
+	r.calls = append(r.calls, req.Model)
+	r.mu.Unlock()
+	return r.Mock.Complete(ctx, req)
+}
+
+func (r *recordingProvider) modelsUsed() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]string, len(r.calls))
+	copy(out, r.calls)
+	return out
+}
 
 // fakeInterviewStream implements grpc.ServerStreamingServer[InterviewEvent].
 type fakeInterviewStream struct {
@@ -322,4 +345,116 @@ func TestInterviewService_Confirm_SavesAndCleansUp(t *testing.T) {
 	require.NoError(t, err)
 	_, err = os.Stat(filepath.Join(sessionsBase, s.ID, "spec.lock"))
 	require.NoError(t, err)
+}
+
+// TestChooseModel_Fallback verifies the chooseModel helper: returns override
+// when non-empty, fallback when override is empty.
+func TestChooseModel_Fallback(t *testing.T) {
+	require.Equal(t, "override", chooseModel("override", "fallback"))
+	require.Equal(t, "fallback", chooseModel("", "fallback"))
+	require.Equal(t, "fallback", chooseModel("", "fallback"))
+	require.Equal(t, "", chooseModel("", ""))
+}
+
+// newInterviewSvcWithRecorder builds a service where the provider factory
+// returns the supplied recordingProvider, allowing callers to inspect which
+// model strings were used in each Complete call.
+func newInterviewSvcWithRecorder(t *testing.T, rec *recordingProvider) (*InterviewService, *session.Repo) {
+	t.Helper()
+	dir := t.TempDir()
+	db, err := sql.Open("sqlite", filepath.Join(dir, "t.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { db.Close() })
+	require.NoError(t, session.Migrate(db))
+	repo := session.NewRepo(db)
+
+	factory := func(name string) (provider.Provider, string, error) {
+		return rec, "default-model", nil
+	}
+	svc := NewInterviewService(repo, filepath.Join(dir, "sessions"), factory)
+	return svc, repo
+}
+
+// TestInterviewService_Start_UsesMainModel verifies that when only Model is
+// set (sub-model fields empty), every LLM call uses that model.
+func TestInterviewService_Start_UsesMainModel(t *testing.T) {
+	rec := &recordingProvider{
+		Mock: provider.NewMock([]string{
+			`{"domain":"web-saas","domain_confidence":0.9,"tech_hints":[],"scale_hint":"medium","ambiguity":"none"}`,
+			`What problem are you solving?`,
+		}),
+	}
+	svc, repo := newInterviewSvcWithRecorder(t, rec)
+	ctx := context.Background()
+
+	s, err := repo.Create(ctx, session.CreateInput{WorkingDir: "/x"})
+	require.NoError(t, err)
+
+	stream := &fakeInterviewStream{ctx: ctx}
+	err = svc.Start(&gilv1.StartInterviewRequest{
+		SessionId:  s.ID,
+		FirstInput: "build a CLI",
+		Provider:   "mock",
+		Model:      "M",
+		// SlotModel, AdversaryModel, AuditModel all empty → fall back to "M"
+	}, stream)
+	require.NoError(t, err)
+
+	calls := rec.modelsUsed()
+	require.NotEmpty(t, calls)
+	for _, m := range calls {
+		require.Equal(t, "M", m, "all calls should use the main model when sub-models are empty")
+	}
+}
+
+// TestInterviewService_Start_OverrideUsesProvidedModel verifies that when
+// SlotModel is set to "SLOT", slot extraction calls use "SLOT" while the
+// main model "MAIN" is used for sensing and question generation.
+func TestInterviewService_Start_OverrideUsesProvidedModel(t *testing.T) {
+	// Start phase: sensing (MAIN) + first question (MAIN) = 2 MAIN calls
+	// Reply phase: slotfill (SLOT) + next question (MAIN) = 1 SLOT + 1 MAIN
+	rec := &recordingProvider{
+		Mock: provider.NewMock([]string{
+			`{"domain":"web-saas","domain_confidence":0.9,"tech_hints":[],"scale_hint":"medium","ambiguity":"none"}`,
+			`What problem are you solving?`,
+			`{"updates":[]}`, // slotfill no-op
+			`Tell me more.`,  // next question
+		}),
+	}
+	svc, repo := newInterviewSvcWithRecorder(t, rec)
+	ctx := context.Background()
+
+	s, err := repo.Create(ctx, session.CreateInput{WorkingDir: "/x"})
+	require.NoError(t, err)
+
+	startStream := &fakeInterviewStream{ctx: ctx}
+	err = svc.Start(&gilv1.StartInterviewRequest{
+		SessionId:  s.ID,
+		FirstInput: "build a CLI",
+		Provider:   "mock",
+		Model:      "MAIN",
+		SlotModel:  "SLOT",
+	}, startStream)
+	require.NoError(t, err)
+
+	// Start phase: verify all calls used "MAIN"
+	afterStart := rec.modelsUsed()
+	for _, m := range afterStart {
+		require.Equal(t, "MAIN", m, "start phase should only call MAIN (sensing + first question)")
+	}
+
+	// Reply phase: triggers slotfill with "SLOT"
+	replyStream := &fakeReplyStream{ctx: ctx}
+	err = svc.Reply(&gilv1.ReplyRequest{SessionId: s.ID, Content: "it's a tool"}, replyStream)
+	require.NoError(t, err)
+
+	afterReply := rec.modelsUsed()
+	// Must contain at least one "SLOT" call from slotfill
+	var foundSlot bool
+	for _, m := range afterReply[len(afterStart):] {
+		if m == "SLOT" {
+			foundSlot = true
+		}
+	}
+	require.True(t, foundSlot, "reply phase must use SLOT model for slot extraction")
 }

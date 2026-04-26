@@ -27,7 +27,10 @@ message StartInterviewRequest {
   string session_id = 1;
   string first_input = 2;       // user's initial message
   string provider = 3;           // "anthropic" | "mock" | future others
-  string model = 4;              // empty → use provider default
+  string model = 4;              // empty → use provider default (main / question generation)
+  string slot_model = 5;        // slot extraction; empty → falls back to model
+  string adversary_model = 6;   // critique; empty → falls back to model
+  string audit_model = 7;       // self-audit gate; empty → falls back to model
 }
 
 message ReplyRequest {

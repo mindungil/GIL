@@ -35,7 +35,7 @@ func resumeCmd() *cobra.Command {
 			defer cli.Close()
 
 			out := cmd.OutOrStdout()
-			stream, err := cli.StartInterview(ctx, sessionID, "", providerName, model)
+			stream, err := cli.StartInterview(ctx, sessionID, "", providerName, model, sdk.InterviewModels{})
 			if err != nil {
 				return fmt.Errorf("resume: %w", err)
 			}

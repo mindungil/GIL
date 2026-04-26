@@ -104,16 +104,19 @@ func (s *InterviewService) Start(req *gilv1.StartInterviewRequest, stream gilv1.
 		return status.Errorf(codes.Internal, "update status: %v", err)
 	}
 
-	// Build provider + engine
-	prov, model, err := s.providerFactory(req.Provider)
+	// Build provider + engines with per-stage model selection.
+	// Each sub-engine uses its dedicated model, falling back to mainModel when empty.
+	prov, defaultModel, err := s.providerFactory(req.Provider)
 	if err != nil {
 		return status.Errorf(codes.InvalidArgument, "provider: %v", err)
 	}
-	if req.Model != "" {
-		model = req.Model
-	}
-	eng := interview.NewEngine(prov, model)
-	richEng := interview.NewEngineWithSubmodels(prov, model, model, model) // single-model for Phase 3
+	mainModel := chooseModel(req.Model, defaultModel)
+	slotModel := chooseModel(req.SlotModel, mainModel)
+	adversaryModel := chooseModel(req.AdversaryModel, mainModel)
+	auditModel := chooseModel(req.AuditModel, mainModel)
+
+	eng := interview.NewEngine(prov, mainModel)
+	richEng := interview.NewEngineWithSubmodels(prov, mainModel, slotModel, adversaryModel, auditModel)
 	st := interview.NewState()
 
 	s.mu.Lock()
@@ -216,6 +219,14 @@ func (s *InterviewService) Confirm(ctx context.Context, req *gilv1.ConfirmReques
 		SpecId:        slot.state.Spec.SpecId,
 		ContentSha256: hex,
 	}, nil
+}
+
+// chooseModel returns override when non-empty, otherwise fallback.
+func chooseModel(override, fallback string) string {
+	if override != "" {
+		return override
+	}
+	return fallback
 }
 
 // GetSpec returns the current (possibly partial) spec.

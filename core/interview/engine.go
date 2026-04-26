@@ -104,14 +104,17 @@ type EngineWithSubmodels struct {
 }
 
 // NewEngineWithSubmodels returns an EngineWithSubmodels using the given
-// provider for all sub-engines. mainModel is used for question generation
-// and self-audit; slotModel for slot extraction; adversaryModel for critique.
-func NewEngineWithSubmodels(p provider.Provider, mainModel, slotModel, adversaryModel string) *EngineWithSubmodels {
+// provider for all sub-engines.
+//   - mainModel: question generation (Engine.NextQuestion, RunSensing)
+//   - slotModel: slot extraction (SlotFiller)
+//   - adversaryModel: critique (Adversary)
+//   - auditModel: self-audit gate (SelfAuditGate)
+func NewEngineWithSubmodels(p provider.Provider, mainModel, slotModel, adversaryModel, auditModel string) *EngineWithSubmodels {
 	return &EngineWithSubmodels{
 		Engine:     NewEngine(p, mainModel),
 		slotFiller: NewSlotFiller(p, slotModel),
 		adversary:  NewAdversary(p, adversaryModel),
-		audit:      NewSelfAuditGate(p, mainModel),
+		audit:      NewSelfAuditGate(p, auditModel),
 	}
 }
 

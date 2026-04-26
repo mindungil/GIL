@@ -82,7 +82,7 @@ func interviewCmd() *cobra.Command {
 			}
 			firstLine = strings.TrimSpace(firstLine)
 
-			startStream, err := cli.StartInterview(ctx, sessionID, firstLine, providerName, model)
+			startStream, err := cli.StartInterview(ctx, sessionID, firstLine, providerName, model, sdk.InterviewModels{})
 			if err != nil {
 				return fmt.Errorf("start: %w", err)
 			}

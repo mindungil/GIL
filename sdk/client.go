@@ -111,18 +111,30 @@ func fromProto(s *gilv1.Session) *Session {
 	}
 }
 
+// InterviewModels lets callers specify per-stage models for an interview.
+// Empty fields fall back to the request's primary Model field.
+type InterviewModels struct {
+	SlotModel      string // slot extraction; empty → falls back to Model
+	AdversaryModel string // critique; empty → falls back to Model
+	AuditModel     string // self-audit gate; empty → falls back to Model
+}
+
 // StartInterview begins an interview for sessionID. Returns a server stream
 // that emits agent events (stage transitions, agent turns, errors). The caller
 // must drain the stream until io.EOF or first AgentTurn before calling Reply.
 //
 // providerName is "anthropic", "mock", or "" (server default = anthropic).
 // model is provider-specific (empty → server default for that provider).
-func (c *Client) StartInterview(ctx context.Context, sessionID, firstInput, providerName, model string) (gilv1.InterviewService_StartClient, error) {
+// models is optional; pass zero value (sdk.InterviewModels{}) to use model for all stages.
+func (c *Client) StartInterview(ctx context.Context, sessionID, firstInput, providerName, model string, models InterviewModels) (gilv1.InterviewService_StartClient, error) {
 	return c.interviews.Start(ctx, &gilv1.StartInterviewRequest{
-		SessionId:  sessionID,
-		FirstInput: firstInput,
-		Provider:   providerName,
-		Model:      model,
+		SessionId:      sessionID,
+		FirstInput:     firstInput,
+		Provider:       providerName,
+		Model:          model,
+		SlotModel:      models.SlotModel,
+		AdversaryModel: models.AdversaryModel,
+		AuditModel:     models.AuditModel,
 	})
 }
 

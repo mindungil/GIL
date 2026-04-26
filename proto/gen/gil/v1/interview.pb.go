@@ -22,13 +22,16 @@ const (
 )
 
 type StartInterviewRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	SessionId     string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
-	FirstInput    string                 `protobuf:"bytes,2,opt,name=first_input,json=firstInput,proto3" json:"first_input,omitempty"` // user's initial message
-	Provider      string                 `protobuf:"bytes,3,opt,name=provider,proto3" json:"provider,omitempty"`                       // "anthropic" | "mock" | future others
-	Model         string                 `protobuf:"bytes,4,opt,name=model,proto3" json:"model,omitempty"`                             // empty → use provider default
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	SessionId      string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	FirstInput     string                 `protobuf:"bytes,2,opt,name=first_input,json=firstInput,proto3" json:"first_input,omitempty"`             // user's initial message
+	Provider       string                 `protobuf:"bytes,3,opt,name=provider,proto3" json:"provider,omitempty"`                                   // "anthropic" | "mock" | future others
+	Model          string                 `protobuf:"bytes,4,opt,name=model,proto3" json:"model,omitempty"`                                         // empty → use provider default (main / question generation)
+	SlotModel      string                 `protobuf:"bytes,5,opt,name=slot_model,json=slotModel,proto3" json:"slot_model,omitempty"`                // slot extraction; empty → falls back to model
+	AdversaryModel string                 `protobuf:"bytes,6,opt,name=adversary_model,json=adversaryModel,proto3" json:"adversary_model,omitempty"` // critique; empty → falls back to model
+	AuditModel     string                 `protobuf:"bytes,7,opt,name=audit_model,json=auditModel,proto3" json:"audit_model,omitempty"`             // self-audit gate; empty → falls back to model
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *StartInterviewRequest) Reset() {
@@ -85,6 +88,27 @@ func (x *StartInterviewRequest) GetProvider() string {
 func (x *StartInterviewRequest) GetModel() string {
 	if x != nil {
 		return x.Model
+	}
+	return ""
+}
+
+func (x *StartInterviewRequest) GetSlotModel() string {
+	if x != nil {
+		return x.SlotModel
+	}
+	return ""
+}
+
+func (x *StartInterviewRequest) GetAdversaryModel() string {
+	if x != nil {
+		return x.AdversaryModel
+	}
+	return ""
+}
+
+func (x *StartInterviewRequest) GetAuditModel() string {
+	if x != nil {
+		return x.AuditModel
 	}
 	return ""
 }
@@ -607,14 +631,19 @@ var File_gil_v1_interview_proto protoreflect.FileDescriptor
 
 const file_gil_v1_interview_proto_rawDesc = "" +
 	"\n" +
-	"\x16gil/v1/interview.proto\x12\x06gil.v1\x1a\x11gil/v1/spec.proto\"\x89\x01\n" +
+	"\x16gil/v1/interview.proto\x12\x06gil.v1\x1a\x11gil/v1/spec.proto\"\xf2\x01\n" +
 	"\x15StartInterviewRequest\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x1f\n" +
 	"\vfirst_input\x18\x02 \x01(\tR\n" +
 	"firstInput\x12\x1a\n" +
 	"\bprovider\x18\x03 \x01(\tR\bprovider\x12\x14\n" +
-	"\x05model\x18\x04 \x01(\tR\x05model\"G\n" +
+	"\x05model\x18\x04 \x01(\tR\x05model\x12\x1d\n" +
+	"\n" +
+	"slot_model\x18\x05 \x01(\tR\tslotModel\x12'\n" +
+	"\x0fadversary_model\x18\x06 \x01(\tR\x0eadversaryModel\x12\x1f\n" +
+	"\vaudit_model\x18\a \x01(\tR\n" +
+	"auditModel\"G\n" +
 	"\fReplyRequest\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x18\n" +

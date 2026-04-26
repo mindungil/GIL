@@ -225,7 +225,7 @@ func TestClient_StartInterview_StreamsEvents(t *testing.T) {
 	require.NoError(t, err)
 	defer cli.Close()
 
-	stream, err := cli.StartInterview(context.Background(), "sess-1", "build a CLI", "mock", "")
+	stream, err := cli.StartInterview(context.Background(), "sess-1", "build a CLI", "mock", "", InterviewModels{})
 	require.NoError(t, err)
 
 	// First event: stage transition
