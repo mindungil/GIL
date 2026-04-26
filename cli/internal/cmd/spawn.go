@@ -38,10 +38,15 @@ func ensureDaemonAt(socket, base, gildPath string) error {
 	if err := os.MkdirAll(base, 0o700); err != nil {
 		return fmt.Errorf("ensureDaemon mkdir base: %w", err)
 	}
+	devnull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
+	if err != nil {
+		return fmt.Errorf("ensureDaemon open /dev/null: %w", err)
+	}
+	defer devnull.Close()
 	cmd := exec.Command(gildPath, "--foreground", "--base", base)
-	cmd.Stdout = nil
-	cmd.Stderr = nil
-	cmd.Stdin = nil
+	cmd.Stdin = devnull
+	cmd.Stdout = devnull
+	cmd.Stderr = devnull
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("ensureDaemon spawn: %w", err)
 	}
