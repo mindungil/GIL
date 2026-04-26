@@ -4,8 +4,11 @@ package runner
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"time"
 
+	"github.com/jedutools/gil/core/event"
 	"github.com/jedutools/gil/core/provider"
 	"github.com/jedutools/gil/core/tool"
 	"github.com/jedutools/gil/core/verify"
@@ -28,6 +31,7 @@ type AgentLoop struct {
 	Model    string
 	Tools    []tool.Tool
 	Verifier *verify.Runner
+	Events   *event.Stream  // optional; if nil, no events emitted
 }
 
 // NewAgentLoop constructs a loop.
@@ -61,6 +65,14 @@ func (a *AgentLoop) Run(ctx context.Context) (*Result, error) {
 
 	var totalTokens int64
 	for iter := 1; iter <= maxIter; iter++ {
+		a.emit(event.SourceSystem, event.KindNote, "iteration_start", map[string]any{"iter": iter})
+
+		a.emit(event.SourceAgent, event.KindAction, "provider_request", map[string]any{
+			"model":   a.Model,
+			"msgs":    len(messages),
+			"tools":   len(tools),
+		})
+
 		resp, err := a.Provider.Complete(ctx, provider.Request{
 			Model:     a.Model,
 			System:    system,
@@ -69,9 +81,18 @@ func (a *AgentLoop) Run(ctx context.Context) (*Result, error) {
 			MaxTokens: 4096,
 		})
 		if err != nil {
+			a.emit(event.SourceSystem, event.KindNote, "run_error", map[string]any{"err": err.Error()})
 			return &Result{Status: "error", Iterations: iter, FinalError: err}, err
 		}
 		totalTokens += resp.InputTokens + resp.OutputTokens
+
+		a.emit(event.SourceAgent, event.KindObservation, "provider_response", map[string]any{
+			"text_len":      len(resp.Text),
+			"tool_calls":    len(resp.ToolCalls),
+			"input_tokens":  resp.InputTokens,
+			"output_tokens": resp.OutputTokens,
+			"stop_reason":   resp.StopReason,
+		})
 
 		// Append assistant turn (with tool_calls if any)
 		messages = append(messages, provider.Message{
@@ -82,8 +103,17 @@ func (a *AgentLoop) Run(ctx context.Context) (*Result, error) {
 
 		if len(resp.ToolCalls) == 0 {
 			// No more tool calls — assume agent thinks it's done. Run verifier.
+			a.emit(event.SourceSystem, event.KindAction, "verify_run", nil)
 			results, allPass := a.Verifier.RunAll(ctx, a.Spec.GetVerification().GetChecks())
+			for _, vr := range results {
+				a.emit(event.SourceEnvironment, event.KindObservation, "verify_result", map[string]any{
+					"name":      vr.Name,
+					"passed":    vr.Passed,
+					"exit_code": vr.ExitCode,
+				})
+			}
 			if allPass {
+				a.emit(event.SourceSystem, event.KindNote, "run_done", map[string]any{"iterations": iter, "tokens": totalTokens})
 				return &Result{Status: "done", Iterations: iter, Tokens: totalTokens, VerifyAll: results}, nil
 			}
 			// Feed verifier failures back as a user message and let agent continue.
@@ -97,12 +127,22 @@ func (a *AgentLoop) Run(ctx context.Context) (*Result, error) {
 		// Execute each tool call, build tool_result blocks for next user message
 		toolResults := make([]provider.ToolResult, 0, len(resp.ToolCalls))
 		for _, tc := range resp.ToolCalls {
+			a.emit(event.SourceAgent, event.KindAction, "tool_call", map[string]any{
+				"name":  tc.Name,
+				"input": truncateJSON(tc.Input, 512),
+			})
+
 			t, ok := toolByName[tc.Name]
 			if !ok {
 				toolResults = append(toolResults, provider.ToolResult{
 					ToolUseID: tc.ID,
 					Content:   fmt.Sprintf("unknown tool: %s", tc.Name),
 					IsError:   true,
+				})
+				a.emit(event.SourceEnvironment, event.KindObservation, "tool_result", map[string]any{
+					"name":     tc.Name,
+					"is_error": true,
+					"content":  "unknown tool",
 				})
 				continue
 			}
@@ -117,12 +157,22 @@ func (a *AgentLoop) Run(ctx context.Context) (*Result, error) {
 					Content:   "tool error: " + msg,
 					IsError:   true,
 				})
+				a.emit(event.SourceEnvironment, event.KindObservation, "tool_result", map[string]any{
+					"name":     tc.Name,
+					"is_error": true,
+					"content":  truncateString(msg, 512),
+				})
 				continue
 			}
 			toolResults = append(toolResults, provider.ToolResult{
 				ToolUseID: tc.ID,
 				Content:   r.Content,
 				IsError:   r.IsError,
+			})
+			a.emit(event.SourceEnvironment, event.KindObservation, "tool_result", map[string]any{
+				"name":     tc.Name,
+				"is_error": r.IsError,
+				"content":  truncateString(r.Content, 512),
 			})
 		}
 		messages = append(messages, provider.Message{
@@ -131,6 +181,7 @@ func (a *AgentLoop) Run(ctx context.Context) (*Result, error) {
 		})
 	}
 
+	a.emit(event.SourceSystem, event.KindNote, "run_max_iterations", map[string]any{"iterations": maxIter, "tokens": totalTokens})
 	return &Result{Status: "max_iterations", Iterations: maxIter, Tokens: totalTokens}, nil
 }
 
@@ -191,4 +242,33 @@ func formatVerifyFeedback(results []verify.Result) string {
 	}
 	out += "\nKeep going — fix the failing checks."
 	return out
+}
+
+// emit appends an event to a.Events if non-nil. Marshals data to JSON.
+func (a *AgentLoop) emit(source event.Source, kind event.Kind, eventType string, data any) {
+	if a.Events == nil {
+		return
+	}
+	var dataJSON []byte
+	if data != nil {
+		dataJSON, _ = json.Marshal(data)
+	}
+	_, _ = a.Events.Append(event.Event{
+		Timestamp: time.Now().UTC(),
+		Source:    source,
+		Kind:      kind,
+		Type:      eventType,
+		Data:      dataJSON,
+	})
+}
+
+func truncateString(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "..."
+}
+
+func truncateJSON(b []byte, max int) string {
+	return truncateString(string(b), max)
 }

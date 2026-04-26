@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
+	"github.com/jedutools/gil/core/event"
 	"github.com/jedutools/gil/core/provider"
 	"github.com/jedutools/gil/core/tool"
 	"github.com/jedutools/gil/core/verify"
@@ -160,4 +162,70 @@ func TestAgentLoop_SystemPromptIncludesChecks(t *testing.T) {
 	require.Contains(t, prompt, "exists")
 	require.Contains(t, prompt, "test -f hello")
 	require.Contains(t, prompt, "bash")
+}
+
+func TestAgentLoop_EmitsEventsToStream(t *testing.T) {
+	dir := t.TempDir()
+	mock := provider.NewMockToolProvider([]provider.MockTurn{
+		{Text: "Creating", ToolCalls: []provider.ToolCall{
+			{ID: "c1", Name: "write_file", Input: json.RawMessage(`{"path":"hello.txt","content":"hello"}`)},
+		}, StopReason: "tool_use"},
+		{Text: "Done", StopReason: "end_turn"},
+	})
+
+	spec := &gilv1.FrozenSpec{
+		Goal:         &gilv1.Goal{OneLiner: "create file"},
+		Verification: &gilv1.Verification{Checks: []*gilv1.Check{{Name: "exists", Kind: gilv1.CheckKind_SHELL, Command: "test -f " + dir + "/hello.txt"}}},
+		Budget:       &gilv1.Budget{MaxIterations: 5},
+	}
+	tools := []tool.Tool{&tool.WriteFile{WorkingDir: dir}, &tool.Bash{WorkingDir: dir}}
+
+	stream := event.NewStream()
+	sub := stream.Subscribe(64)
+	defer sub.Close()
+
+	loop := &AgentLoop{
+		Spec:     spec,
+		Provider: mock,
+		Model:    "test",
+		Tools:    tools,
+		Verifier: verify.NewRunner(dir),
+		Events:   stream,
+	}
+
+	go func() {
+		_, _ = loop.Run(context.Background())
+	}()
+
+	// Collect events for up to 2 seconds
+	collected := []event.Event{}
+	timeout := time.After(2 * time.Second)
+collectLoop:
+	for {
+		select {
+		case e, ok := <-sub.Events():
+			if !ok {
+				break collectLoop
+			}
+			collected = append(collected, e)
+			if e.Type == "run_done" || e.Type == "run_max_iterations" || e.Type == "run_error" {
+				break collectLoop
+			}
+		case <-timeout:
+			break collectLoop
+		}
+	}
+
+	require.NotEmpty(t, collected, "expected events to be emitted")
+
+	types := map[string]int{}
+	for _, e := range collected {
+		types[e.Type]++
+	}
+	require.Greater(t, types["iteration_start"], 0, "got events: %+v", types)
+	require.Greater(t, types["provider_request"], 0)
+	require.Greater(t, types["tool_call"], 0)
+	require.Greater(t, types["tool_result"], 0)
+	require.Greater(t, types["verify_result"], 0)
+	require.Greater(t, types["run_done"], 0)
 }
