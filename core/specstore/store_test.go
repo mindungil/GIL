@@ -1,6 +1,7 @@
 package specstore
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
@@ -77,11 +78,11 @@ func TestStore_VerifyDetectsTamper(t *testing.T) {
 	require.NoError(t, s.Save(fs))
 	require.NoError(t, s.Freeze())
 
-	// 직접 yaml 수정
+	// Tamper: change a real field value in yaml that survives round-trip
 	yamlPath := filepath.Join(dir, "spec.yaml")
 	data, err := os.ReadFile(yamlPath)
 	require.NoError(t, err)
-	tampered := append(data, []byte("\n# user-injected garbage\n")...)
+	tampered := bytes.Replace(data, []byte("oneLiner: x"), []byte("oneLiner: tampered"), 1)
 	require.NoError(t, os.WriteFile(yamlPath, tampered, 0o644))
 
 	_, err = s.Load()

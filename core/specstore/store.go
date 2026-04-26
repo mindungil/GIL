@@ -3,8 +3,6 @@
 package specstore
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -65,7 +63,7 @@ func (s *Store) Save(fs *gilv1.FrozenSpec) error {
 	return nil
 }
 
-// Load reads spec.yaml and, if spec.lock exists, verifies the YAML content hash.
+// Load reads spec.yaml and, if spec.lock exists, verifies the proto hash.
 // Returns ErrNotFound if missing, ErrLockMismatch on tamper.
 func (s *Store) Load() (*gilv1.FrozenSpec, error) {
 	data, err := os.ReadFile(s.yamlPath())
@@ -80,16 +78,20 @@ func (s *Store) Load() (*gilv1.FrozenSpec, error) {
 		return nil, fmt.Errorf("specstore.Load unmarshal: %w", err)
 	}
 	if s.IsFrozen() {
-		if err := s.verifyYAMLLock(data); err != nil {
-			return nil, err
+		ok, err := spec.VerifyLock(fs)
+		if err != nil {
+			return nil, fmt.Errorf("specstore.Load verify: %w", err)
+		}
+		if !ok {
+			return nil, ErrLockMismatch
 		}
 	}
 	return fs, nil
 }
 
-// Freeze loads the current spec, computes its SHA-256, persists the hash
-// in fs.ContentSha256, re-saves spec.yaml with the hash field set, and writes
-// spec.lock containing the YAML content hash for tamper detection.
+// Freeze loads the current spec, computes its proto hash via spec.Freeze,
+// persists the hash in fs.ContentSha256, re-saves spec.yaml with the hash
+// field set, and writes spec.lock containing the proto hash hex for tamper detection.
 func (s *Store) Freeze() error {
 	if s.IsFrozen() {
 		return nil // already frozen, idempotent
@@ -98,7 +100,7 @@ func (s *Store) Freeze() error {
 	if err != nil {
 		return err
 	}
-	_, err = spec.Freeze(fs)
+	hex, err := spec.Freeze(fs)
 	if err != nil {
 		return fmt.Errorf("specstore.Freeze: %w", err)
 	}
@@ -110,9 +112,8 @@ func (s *Store) Freeze() error {
 	if err := os.WriteFile(s.yamlPath(), data, 0o644); err != nil {
 		return fmt.Errorf("specstore.Freeze write yaml: %w", err)
 	}
-	// Compute and store YAML content hash for tamper detection.
-	yamlHash := sha256sum(data)
-	if err := os.WriteFile(s.lockPath(), []byte(yamlHash), 0o644); err != nil {
+	// Write proto hash hex for tamper detection.
+	if err := os.WriteFile(s.lockPath(), []byte(hex), 0o644); err != nil {
 		return fmt.Errorf("specstore.Freeze write lock: %w", err)
 	}
 	return nil
@@ -147,24 +148,4 @@ func yamlToProto(data []byte) (*gilv1.FrozenSpec, error) {
 		return nil, err
 	}
 	return fs, nil
-}
-
-// sha256sum computes the SHA-256 hex digest of data.
-func sha256sum(data []byte) string {
-	sum := sha256.Sum256(data)
-	return hex.EncodeToString(sum[:])
-}
-
-// verifyYAMLLock checks that the YAML content hash matches spec.lock.
-func (s *Store) verifyYAMLLock(yamlData []byte) error {
-	lockBytes, err := os.ReadFile(s.lockPath())
-	if err != nil {
-		return fmt.Errorf("specstore.verifyYAMLLock read lock: %w", err)
-	}
-	expectedHash := string(lockBytes)
-	actualHash := sha256sum(yamlData)
-	if actualHash != expectedHash {
-		return ErrLockMismatch
-	}
-	return nil
 }
