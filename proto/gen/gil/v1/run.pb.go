@@ -408,6 +408,110 @@ func (x *RestoreResponse) GetTotalCheckpoints() int32 {
 	return 0
 }
 
+type AnswerPermissionRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SessionId     string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	RequestId     string                 `protobuf:"bytes,2,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
+	Allow         bool                   `protobuf:"varint,3,opt,name=allow,proto3" json:"allow,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AnswerPermissionRequest) Reset() {
+	*x = AnswerPermissionRequest{}
+	mi := &file_gil_v1_run_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AnswerPermissionRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AnswerPermissionRequest) ProtoMessage() {}
+
+func (x *AnswerPermissionRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_gil_v1_run_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AnswerPermissionRequest.ProtoReflect.Descriptor instead.
+func (*AnswerPermissionRequest) Descriptor() ([]byte, []int) {
+	return file_gil_v1_run_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *AnswerPermissionRequest) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
+func (x *AnswerPermissionRequest) GetRequestId() string {
+	if x != nil {
+		return x.RequestId
+	}
+	return ""
+}
+
+func (x *AnswerPermissionRequest) GetAllow() bool {
+	if x != nil {
+		return x.Allow
+	}
+	return false
+}
+
+type AnswerPermissionResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Delivered     bool                   `protobuf:"varint,1,opt,name=delivered,proto3" json:"delivered,omitempty"` // false when no pending request matches the id (e.g., already timed out)
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AnswerPermissionResponse) Reset() {
+	*x = AnswerPermissionResponse{}
+	mi := &file_gil_v1_run_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AnswerPermissionResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AnswerPermissionResponse) ProtoMessage() {}
+
+func (x *AnswerPermissionResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_gil_v1_run_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AnswerPermissionResponse.ProtoReflect.Descriptor instead.
+func (*AnswerPermissionResponse) Descriptor() ([]byte, []int) {
+	return file_gil_v1_run_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *AnswerPermissionResponse) GetDelivered() bool {
+	if x != nil {
+		return x.Delivered
+	}
+	return false
+}
+
 var File_gil_v1_run_proto protoreflect.FileDescriptor
 
 const file_gil_v1_run_proto_rawDesc = "" +
@@ -445,12 +549,21 @@ const file_gil_v1_run_proto_rawDesc = "" +
 	"\n" +
 	"commit_sha\x18\x01 \x01(\tR\tcommitSha\x12%\n" +
 	"\x0ecommit_message\x18\x02 \x01(\tR\rcommitMessage\x12+\n" +
-	"\x11total_checkpoints\x18\x03 \x01(\x05R\x10totalCheckpoints2\xb2\x01\n" +
+	"\x11total_checkpoints\x18\x03 \x01(\x05R\x10totalCheckpoints\"m\n" +
+	"\x17AnswerPermissionRequest\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x1d\n" +
+	"\n" +
+	"request_id\x18\x02 \x01(\tR\trequestId\x12\x14\n" +
+	"\x05allow\x18\x03 \x01(\bR\x05allow\"8\n" +
+	"\x18AnswerPermissionResponse\x12\x1c\n" +
+	"\tdelivered\x18\x01 \x01(\bR\tdelivered2\x89\x02\n" +
 	"\n" +
 	"RunService\x12:\n" +
 	"\x05Start\x12\x17.gil.v1.StartRunRequest\x1a\x18.gil.v1.StartRunResponse\x12,\n" +
 	"\x04Tail\x12\x13.gil.v1.TailRequest\x1a\r.gil.v1.Event0\x01\x12:\n" +
-	"\aRestore\x12\x16.gil.v1.RestoreRequest\x1a\x17.gil.v1.RestoreResponseB1Z/github.com/jedutools/gil/proto/gen/gil/v1;gilv1b\x06proto3"
+	"\aRestore\x12\x16.gil.v1.RestoreRequest\x1a\x17.gil.v1.RestoreResponse\x12U\n" +
+	"\x10AnswerPermission\x12\x1f.gil.v1.AnswerPermissionRequest\x1a .gil.v1.AnswerPermissionResponseB1Z/github.com/jedutools/gil/proto/gen/gil/v1;gilv1b\x06proto3"
 
 var (
 	file_gil_v1_run_proto_rawDescOnce sync.Once
@@ -464,26 +577,30 @@ func file_gil_v1_run_proto_rawDescGZIP() []byte {
 	return file_gil_v1_run_proto_rawDescData
 }
 
-var file_gil_v1_run_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
+var file_gil_v1_run_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
 var file_gil_v1_run_proto_goTypes = []any{
-	(*StartRunRequest)(nil),  // 0: gil.v1.StartRunRequest
-	(*StartRunResponse)(nil), // 1: gil.v1.StartRunResponse
-	(*VerifyResult)(nil),     // 2: gil.v1.VerifyResult
-	(*TailRequest)(nil),      // 3: gil.v1.TailRequest
-	(*RestoreRequest)(nil),   // 4: gil.v1.RestoreRequest
-	(*RestoreResponse)(nil),  // 5: gil.v1.RestoreResponse
-	(*Event)(nil),            // 6: gil.v1.Event
+	(*StartRunRequest)(nil),          // 0: gil.v1.StartRunRequest
+	(*StartRunResponse)(nil),         // 1: gil.v1.StartRunResponse
+	(*VerifyResult)(nil),             // 2: gil.v1.VerifyResult
+	(*TailRequest)(nil),              // 3: gil.v1.TailRequest
+	(*RestoreRequest)(nil),           // 4: gil.v1.RestoreRequest
+	(*RestoreResponse)(nil),          // 5: gil.v1.RestoreResponse
+	(*AnswerPermissionRequest)(nil),  // 6: gil.v1.AnswerPermissionRequest
+	(*AnswerPermissionResponse)(nil), // 7: gil.v1.AnswerPermissionResponse
+	(*Event)(nil),                    // 8: gil.v1.Event
 }
 var file_gil_v1_run_proto_depIdxs = []int32{
 	2, // 0: gil.v1.StartRunResponse.verify_results:type_name -> gil.v1.VerifyResult
 	0, // 1: gil.v1.RunService.Start:input_type -> gil.v1.StartRunRequest
 	3, // 2: gil.v1.RunService.Tail:input_type -> gil.v1.TailRequest
 	4, // 3: gil.v1.RunService.Restore:input_type -> gil.v1.RestoreRequest
-	1, // 4: gil.v1.RunService.Start:output_type -> gil.v1.StartRunResponse
-	6, // 5: gil.v1.RunService.Tail:output_type -> gil.v1.Event
-	5, // 6: gil.v1.RunService.Restore:output_type -> gil.v1.RestoreResponse
-	4, // [4:7] is the sub-list for method output_type
-	1, // [1:4] is the sub-list for method input_type
+	6, // 4: gil.v1.RunService.AnswerPermission:input_type -> gil.v1.AnswerPermissionRequest
+	1, // 5: gil.v1.RunService.Start:output_type -> gil.v1.StartRunResponse
+	8, // 6: gil.v1.RunService.Tail:output_type -> gil.v1.Event
+	5, // 7: gil.v1.RunService.Restore:output_type -> gil.v1.RestoreResponse
+	7, // 8: gil.v1.RunService.AnswerPermission:output_type -> gil.v1.AnswerPermissionResponse
+	5, // [5:9] is the sub-list for method output_type
+	1, // [1:5] is the sub-list for method input_type
 	1, // [1:1] is the sub-list for extension type_name
 	1, // [1:1] is the sub-list for extension extendee
 	0, // [0:1] is the sub-list for field type_name
@@ -501,7 +618,7 @@ func file_gil_v1_run_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_gil_v1_run_proto_rawDesc), len(file_gil_v1_run_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   6,
+			NumMessages:   8,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

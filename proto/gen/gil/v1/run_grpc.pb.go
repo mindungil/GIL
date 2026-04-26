@@ -19,9 +19,10 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	RunService_Start_FullMethodName   = "/gil.v1.RunService/Start"
-	RunService_Tail_FullMethodName    = "/gil.v1.RunService/Tail"
-	RunService_Restore_FullMethodName = "/gil.v1.RunService/Restore"
+	RunService_Start_FullMethodName            = "/gil.v1.RunService/Start"
+	RunService_Tail_FullMethodName             = "/gil.v1.RunService/Tail"
+	RunService_Restore_FullMethodName          = "/gil.v1.RunService/Restore"
+	RunService_AnswerPermission_FullMethodName = "/gil.v1.RunService/AnswerPermission"
 )
 
 // RunServiceClient is the client API for RunService service.
@@ -39,6 +40,9 @@ type RunServiceClient interface {
 	// Restore rolls the session's workspace back to the Nth checkpoint snapshot.
 	// The session must not be currently running.
 	Restore(ctx context.Context, in *RestoreRequest, opts ...grpc.CallOption) (*RestoreResponse, error)
+	// AnswerPermission delivers a yes/no response to a pending permission_ask.
+	// delivered=false means the request_id wasn't pending (timed out or unknown).
+	AnswerPermission(ctx context.Context, in *AnswerPermissionRequest, opts ...grpc.CallOption) (*AnswerPermissionResponse, error)
 }
 
 type runServiceClient struct {
@@ -88,6 +92,16 @@ func (c *runServiceClient) Restore(ctx context.Context, in *RestoreRequest, opts
 	return out, nil
 }
 
+func (c *runServiceClient) AnswerPermission(ctx context.Context, in *AnswerPermissionRequest, opts ...grpc.CallOption) (*AnswerPermissionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AnswerPermissionResponse)
+	err := c.cc.Invoke(ctx, RunService_AnswerPermission_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // RunServiceServer is the server API for RunService service.
 // All implementations should embed UnimplementedRunServiceServer
 // for forward compatibility.
@@ -103,6 +117,9 @@ type RunServiceServer interface {
 	// Restore rolls the session's workspace back to the Nth checkpoint snapshot.
 	// The session must not be currently running.
 	Restore(context.Context, *RestoreRequest) (*RestoreResponse, error)
+	// AnswerPermission delivers a yes/no response to a pending permission_ask.
+	// delivered=false means the request_id wasn't pending (timed out or unknown).
+	AnswerPermission(context.Context, *AnswerPermissionRequest) (*AnswerPermissionResponse, error)
 }
 
 // UnimplementedRunServiceServer should be embedded to have
@@ -120,6 +137,9 @@ func (UnimplementedRunServiceServer) Tail(*TailRequest, grpc.ServerStreamingServ
 }
 func (UnimplementedRunServiceServer) Restore(context.Context, *RestoreRequest) (*RestoreResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Restore not implemented")
+}
+func (UnimplementedRunServiceServer) AnswerPermission(context.Context, *AnswerPermissionRequest) (*AnswerPermissionResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method AnswerPermission not implemented")
 }
 func (UnimplementedRunServiceServer) testEmbeddedByValue() {}
 
@@ -188,6 +208,24 @@ func _RunService_Restore_Handler(srv interface{}, ctx context.Context, dec func(
 	return interceptor(ctx, in, info, handler)
 }
 
+func _RunService_AnswerPermission_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AnswerPermissionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunServiceServer).AnswerPermission(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RunService_AnswerPermission_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunServiceServer).AnswerPermission(ctx, req.(*AnswerPermissionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // RunService_ServiceDesc is the grpc.ServiceDesc for RunService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -202,6 +240,10 @@ var RunService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Restore",
 			Handler:    _RunService_Restore_Handler,
+		},
+		{
+			MethodName: "AnswerPermission",
+			Handler:    _RunService_AnswerPermission_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

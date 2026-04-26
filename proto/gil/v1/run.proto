@@ -20,6 +20,10 @@ service RunService {
   // Restore rolls the session's workspace back to the Nth checkpoint snapshot.
   // The session must not be currently running.
   rpc Restore(RestoreRequest) returns (RestoreResponse);
+
+  // AnswerPermission delivers a yes/no response to a pending permission_ask.
+  // delivered=false means the request_id wasn't pending (timed out or unknown).
+  rpc AnswerPermission(AnswerPermissionRequest) returns (AnswerPermissionResponse);
 }
 
 message StartRunRequest {
@@ -62,4 +66,14 @@ message RestoreResponse {
   string commit_sha     = 1;
   string commit_message = 2;
   int32  total_checkpoints = 3;
+}
+
+message AnswerPermissionRequest {
+  string session_id  = 1;
+  string request_id  = 2;
+  bool   allow       = 3;
+}
+
+message AnswerPermissionResponse {
+  bool delivered = 1;  // false when no pending request matches the id (e.g., already timed out)
 }

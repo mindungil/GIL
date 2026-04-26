@@ -25,6 +25,8 @@ type Model struct {
 
 	activeTail *tailHandle // current Tail subscription; nil when none
 	events     []string    // ring buffer of formatted event lines for the active session
+
+	pendingAsk *pendingAskMsg // when non-nil, permission modal is shown
 }
 
 // startTailingSelected cancels any existing tail subscription and starts a new

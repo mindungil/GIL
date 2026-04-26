@@ -8,6 +8,15 @@ import (
 )
 
 var (
+	modalBorder = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("11")).
+			Padding(1, 2).
+			Background(lipgloss.Color("0")).
+			Foreground(lipgloss.Color("15"))
+)
+
+var (
 	titleStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12"))
 	selectedRow = lipgloss.NewStyle().Foreground(lipgloss.Color("0")).Background(lipgloss.Color("12"))
 	paneBorder  = lipgloss.NewStyle().Border(lipgloss.NormalBorder(), false, true, false, false).
@@ -17,6 +26,15 @@ var (
 
 // View implements tea.Model.
 func (m *Model) View() string {
+	base := m.viewBase()
+	if m.pendingAsk == nil {
+		return base
+	}
+	return overlayModal(base, m.pendingAsk, m.width)
+}
+
+// viewBase renders the normal TUI without any modal overlay.
+func (m *Model) viewBase() string {
 	if m.width == 0 {
 		// First render before WindowSizeMsg
 		return "loading…"
@@ -39,6 +57,17 @@ func (m *Model) View() string {
 	title := titleStyle.Render(" gil ") + lipgloss.NewStyle().Faint(true).Render(" — autonomous coding harness")
 	status := m.renderStatus()
 	return lipgloss.JoinVertical(lipgloss.Left, title, body, status)
+}
+
+// overlayModal appends a permission-request dialog below the base view.
+// (A true center-overlay would require terminal cell arithmetic; the
+// appended-box approach is sufficient for Phase 7 — Phase 8 can refine.)
+func overlayModal(base string, ask *pendingAskMsg, w int) string {
+	box := modalBorder.Render(fmt.Sprintf(
+		"Permission Request\n\nTool:  %s\nKey:   %s\n\n[y] Allow   [n] Deny   [esc] Deny",
+		ask.Tool, truncate(ask.Key, max(w-20, 10)),
+	))
+	return lipgloss.JoinVertical(lipgloss.Left, base, "", box)
 }
 
 func (m *Model) renderSessionList(w, h int) string {

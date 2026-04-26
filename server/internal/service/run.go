@@ -2,11 +2,14 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
 	"sync"
+	"time"
 
+	"github.com/oklog/ulid/v2"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -42,8 +45,9 @@ type RunService struct {
 	providerFactory ProviderFactory
 
 	mu          sync.Mutex
-	runStreams  map[string]*event.Stream    // per-session live event streams
-	runProgress map[string]*runProgressSnap // per-session live progress counters
+	runStreams  map[string]*event.Stream              // per-session live event streams
+	runProgress map[string]*runProgressSnap           // per-session live progress counters
+	pendingAsks map[string]map[string]chan bool        // sessionID → requestID → answer chan
 }
 
 // NewRunService constructs the service.
@@ -54,6 +58,7 @@ func NewRunService(repo *session.Repo, sessionsBase string, factory ProviderFact
 		providerFactory: factory,
 		runStreams:      make(map[string]*event.Stream),
 		runProgress:     make(map[string]*runProgressSnap),
+		pendingAsks:     make(map[string]map[string]chan bool),
 	}
 }
 
@@ -167,6 +172,78 @@ func (s *RunService) Start(ctx context.Context, req *gilv1.StartRunRequest) (*gi
 	return s.executeRun(ctx, req.SessionId, spec, prov, model, tools, ver, workspaceDir)
 }
 
+// makeAskCallback returns an AskCallback for use in AgentLoop. When the agent
+// encounters a Decision=Ask, this callback: generates a ULID request_id,
+// stores a per-request channel in pendingAsks, emits a permission_ask event
+// (so TUI subscribers can display a modal), then blocks for up to 60s waiting
+// for an AnswerPermission RPC. Timeout = deny, matching Phase 7 semantics.
+func (s *RunService) makeAskCallback(sessionID string, stream *event.Stream) func(context.Context, runner.AskRequest) bool {
+	return func(ctx context.Context, req runner.AskRequest) bool {
+		reqID := ulid.Make().String()
+		ch := make(chan bool, 1)
+
+		s.mu.Lock()
+		if s.pendingAsks[sessionID] == nil {
+			s.pendingAsks[sessionID] = make(map[string]chan bool)
+		}
+		s.pendingAsks[sessionID][reqID] = ch
+		s.mu.Unlock()
+
+		// Emit permission_ask event so TUI subscribers see it.
+		data, _ := json.Marshal(map[string]any{
+			"request_id": reqID,
+			"tool":       req.Tool,
+			"key":        req.Key,
+		})
+		_, _ = stream.Append(event.Event{
+			Timestamp: time.Now().UTC(),
+			Source:    event.SourceSystem,
+			Kind:      event.KindNote,
+			Type:      "permission_ask",
+			Data:      data,
+		})
+
+		defer func() {
+			s.mu.Lock()
+			delete(s.pendingAsks[sessionID], reqID)
+			s.mu.Unlock()
+		}()
+
+		select {
+		case allow := <-ch:
+			return allow
+		case <-ctx.Done():
+			return false
+		case <-time.After(60 * time.Second):
+			return false // timeout = deny (matches Phase 7 default-deny semantics)
+		}
+	}
+}
+
+// AnswerPermission delivers a yes/no answer to a pending permission_ask channel.
+// Returns delivered=false when the request_id is not pending (already answered,
+// timed out, or never existed). This is not an error — it is a normal race outcome.
+func (s *RunService) AnswerPermission(ctx context.Context, req *gilv1.AnswerPermissionRequest) (*gilv1.AnswerPermissionResponse, error) {
+	s.mu.Lock()
+	chs, ok := s.pendingAsks[req.SessionId]
+	var ch chan bool
+	if ok {
+		ch = chs[req.RequestId]
+	}
+	s.mu.Unlock()
+
+	if ch == nil {
+		return &gilv1.AnswerPermissionResponse{Delivered: false}, nil
+	}
+	select {
+	case ch <- req.Allow:
+		return &gilv1.AnswerPermissionResponse{Delivered: true}, nil
+	default:
+		// Already answered (channel buffer=1).
+		return &gilv1.AnswerPermissionResponse{Delivered: false}, nil
+	}
+}
+
 // executeRun performs the actual agent loop execution and cleanup. It is called
 // either directly (synchronous path) or from a detached goroutine.
 func (s *RunService) executeRun(
@@ -259,6 +336,10 @@ func (s *RunService) executeRun(
 		autonomy = spec.Risk.Autonomy
 	}
 	loop.Permission = permission.FromAutonomy(autonomy)
+
+	// Wire the interactive Ask callback: emits permission_ask events and blocks
+	// waiting for an AnswerPermission RPC. Times out to deny after 60s.
+	loop.AskCallback = s.makeAskCallback(sessionID, stream)
 
 	shadowBase := filepath.Join(s.sessionDir(sessionID), "shadow")
 	loop.Checkpoint = checkpoint.New(workspaceDir, shadowBase)

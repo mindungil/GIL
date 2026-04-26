@@ -188,3 +188,17 @@ func (c *Client) RestoreRun(ctx context.Context, sessionID string, step int32) (
 		Step:      step,
 	})
 }
+
+// AnswerPermission sends a yes/no response to a pending permission_ask.
+// delivered=false means the request_id wasn't pending (timed out or unknown).
+func (c *Client) AnswerPermission(ctx context.Context, sessionID, requestID string, allow bool) (bool, error) {
+	resp, err := c.runs.AnswerPermission(ctx, &gilv1.AnswerPermissionRequest{
+		SessionId: sessionID,
+		RequestId: requestID,
+		Allow:     allow,
+	})
+	if err != nil {
+		return false, err
+	}
+	return resp.Delivered, nil
+}

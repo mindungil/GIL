@@ -475,6 +475,70 @@ func TestRunService_Restore_NoCheckpoints(t *testing.T) {
 	require.Contains(t, err.Error(), "no checkpoints")
 }
 
+func TestRunService_AnswerPermission_NotPending(t *testing.T) {
+	svc, _, _ := newRunSvc(t, nil)
+	resp, err := svc.AnswerPermission(context.Background(), &gilv1.AnswerPermissionRequest{
+		SessionId: "nonexistent",
+		RequestId: "no",
+		Allow:     true,
+	})
+	require.NoError(t, err)
+	require.False(t, resp.Delivered, "nonexistent request should return delivered=false")
+}
+
+func TestRunService_AnswerPermission_Delivered(t *testing.T) {
+	svc, _, _ := newRunSvc(t, nil)
+	sessID := "test-session"
+	reqID := "test-req"
+
+	// Manually plant a pending channel to simulate an in-flight permission ask.
+	ch := make(chan bool, 1)
+	svc.mu.Lock()
+	svc.pendingAsks[sessID] = map[string]chan bool{reqID: ch}
+	svc.mu.Unlock()
+
+	resp, err := svc.AnswerPermission(context.Background(), &gilv1.AnswerPermissionRequest{
+		SessionId: sessID,
+		RequestId: reqID,
+		Allow:     true,
+	})
+	require.NoError(t, err)
+	require.True(t, resp.Delivered)
+
+	// Channel should have received the answer.
+	select {
+	case allow := <-ch:
+		require.True(t, allow)
+	default:
+		t.Fatal("expected answer in channel but it was empty")
+	}
+}
+
+func TestRunService_AnswerPermission_DoubleSend_SecondNotDelivered(t *testing.T) {
+	svc, _, _ := newRunSvc(t, nil)
+	sessID := "s2"
+	reqID := "r2"
+
+	ch := make(chan bool, 1)
+	svc.mu.Lock()
+	svc.pendingAsks[sessID] = map[string]chan bool{reqID: ch}
+	svc.mu.Unlock()
+
+	// First answer → delivered.
+	resp1, err := svc.AnswerPermission(context.Background(), &gilv1.AnswerPermissionRequest{
+		SessionId: sessID, RequestId: reqID, Allow: true,
+	})
+	require.NoError(t, err)
+	require.True(t, resp1.Delivered)
+
+	// Second answer → not delivered (buffer already full).
+	resp2, err := svc.AnswerPermission(context.Background(), &gilv1.AnswerPermissionRequest{
+		SessionId: sessID, RequestId: reqID, Allow: false,
+	})
+	require.NoError(t, err)
+	require.False(t, resp2.Delivered)
+}
+
 func TestRunService_Restore_OutOfRange(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not in PATH")

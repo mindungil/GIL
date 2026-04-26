@@ -31,6 +31,13 @@ type Result struct {
 	FinalError error
 }
 
+// AskRequest carries the details surfaced to a human reviewer when
+// Permission returns DecisionAsk and AskCallback is non-nil.
+type AskRequest struct {
+	Tool string
+	Key  string
+}
+
 // AgentLoop drives Spec to completion.
 type AgentLoop struct {
 	Spec     *gilv1.FrozenSpec
@@ -56,6 +63,11 @@ type AgentLoop struct {
 
 	// Permission, when non-nil, gates each tool call. nil → no gating (Allow all).
 	Permission *permission.Evaluator
+
+	// AskCallback, when non-nil AND Permission returns Ask, is called to ask
+	// for human permission. Returning true treats the call as Allow; false as
+	// Deny. Called synchronously from the run goroutine; should respect ctx.
+	AskCallback func(ctx context.Context, req AskRequest) bool
 
 	// Memory bank, optional. If non-nil, the system prompt prepends bank
 	// contents (full when small, progress-only when large).
@@ -420,8 +432,16 @@ func (a *AgentLoop) Run(ctx context.Context) (*Result, error) {
 				key := permissionKeyFor(tc.Name, tc.Input)
 				decision := a.Permission.Evaluate(tc.Name, key)
 				if decision != permission.DecisionAllow {
-					// Deny + Ask both refuse the call (Ask = Deny in non-interactive Phase 7;
-					// Phase 8 TUI integration adds a real Ask path).
+					// When decision is Ask and AskCallback is wired, call it.
+					// If it returns true we treat the call as Allow (fall through);
+					// if false (or no callback), treat as Deny.
+					if decision == permission.DecisionAsk && a.AskCallback != nil {
+						if a.AskCallback(ctx, AskRequest{Tool: tc.Name, Key: key}) {
+							// Human approved — fall through to actual tool dispatch.
+							goto dispatchTool
+						}
+					}
+					// Deny path (DecisionDeny, or Ask with no callback, or Ask+callback=false).
 					reason := "permission denied"
 					if decision == permission.DecisionAsk {
 						reason = "permission requires interactive ask (not supported in this run mode); treating as deny"
@@ -445,6 +465,7 @@ func (a *AgentLoop) Run(ctx context.Context) (*Result, error) {
 					continue
 				}
 			}
+		dispatchTool:
 
 			t, ok := toolByName[tc.Name]
 			if !ok {

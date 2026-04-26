@@ -33,7 +33,17 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if len(m.events) > eventBufferSize {
 				m.events = m.events[len(m.events)-eventBufferSize:]
 			}
+			// Check for permission_ask events and surface the modal.
+			if ask := parsePermissionAsk(msg.sessID, msg.ev.GetType(), msg.ev.GetDataJson()); ask != nil {
+				m.pendingAsk = ask
+			}
 			return m, nextEventCmd(msg.handle)
+		}
+		return m, nil
+
+	case askAnswerMsg:
+		if msg.err != "" {
+			m.err = msg.err
 		}
 		return m, nil
 
@@ -55,6 +65,20 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
+		// When a permission modal is open, intercept ALL keys and handle y/n/esc.
+		if m.pendingAsk != nil {
+			ask := m.pendingAsk
+			switch msg.String() {
+			case "y", "Y":
+				m.pendingAsk = nil
+				return m, answerCmd(m.client, ask.SessionID, ask.RequestID, true)
+			case "n", "N", "esc":
+				m.pendingAsk = nil
+				return m, answerCmd(m.client, ask.SessionID, ask.RequestID, false)
+			}
+			// Swallow other keys while modal is open.
+			return m, nil
+		}
 		switch {
 		case key.Matches(msg, m.keys.Quit):
 			return m, tea.Quit

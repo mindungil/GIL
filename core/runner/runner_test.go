@@ -1658,3 +1658,64 @@ func TestPermissionKeyFor(t *testing.T) {
 		require.Equal(t, c.want, got, "tool=%s input=%s", c.tool, c.input)
 	}
 }
+
+func TestAgentLoop_Permission_AskCallback_Allow(t *testing.T) {
+	// Permission says Ask (empty rules → default Ask); callback returns true → tool actually runs.
+	workspace := t.TempDir()
+	prov := provider.NewMockToolProvider([]provider.MockTurn{
+		{Text: "asking", ToolCalls: []provider.ToolCall{{
+			ID: "x", Name: "write_file", Input: json.RawMessage(`{"path":"x.txt","content":"hi"}`),
+		}}, StopReason: "tool_use"},
+		{Text: "done", StopReason: "end_turn"},
+	})
+	spec := &gilv1.FrozenSpec{Goal: &gilv1.Goal{OneLiner: "test"}, Verification: &gilv1.Verification{}}
+	var asked int
+	loop := &AgentLoop{
+		Spec: spec, Provider: prov, Model: "m",
+		Tools:    []tool.Tool{&tool.WriteFile{WorkingDir: workspace}},
+		Verifier: verify.NewRunner(workspace),
+		// Empty rules → default Ask
+		Permission: &permission.Evaluator{},
+		AskCallback: func(ctx context.Context, r AskRequest) bool {
+			asked++
+			return true // human approves
+		},
+	}
+	res, err := loop.Run(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "done", res.Status)
+	require.Equal(t, 1, asked)
+	// File was written — callback approval propagated correctly.
+	_, err = os.Stat(filepath.Join(workspace, "x.txt"))
+	require.NoError(t, err)
+}
+
+func TestAgentLoop_Permission_AskCallback_Deny(t *testing.T) {
+	// Permission says Ask; callback returns false → tool is denied, run still completes.
+	workspace := t.TempDir()
+	prov := provider.NewMockToolProvider([]provider.MockTurn{
+		{Text: "asking", ToolCalls: []provider.ToolCall{{
+			ID: "x", Name: "write_file", Input: json.RawMessage(`{"path":"x.txt","content":"hi"}`),
+		}}, StopReason: "tool_use"},
+		{Text: "denied", StopReason: "end_turn"},
+	})
+	spec := &gilv1.FrozenSpec{Goal: &gilv1.Goal{OneLiner: "test"}, Verification: &gilv1.Verification{}}
+	var asked int
+	loop := &AgentLoop{
+		Spec: spec, Provider: prov, Model: "m",
+		Tools:    []tool.Tool{&tool.WriteFile{WorkingDir: workspace}},
+		Verifier: verify.NewRunner(workspace),
+		Permission: &permission.Evaluator{},
+		AskCallback: func(ctx context.Context, r AskRequest) bool {
+			asked++
+			return false // human denies
+		},
+	}
+	res, err := loop.Run(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "done", res.Status)
+	require.Equal(t, 1, asked)
+	// File was NOT written — deny was respected.
+	_, err = os.Stat(filepath.Join(workspace, "x.txt"))
+	require.True(t, os.IsNotExist(err), "file should not exist after deny")
+}
