@@ -1,0 +1,179 @@
+## .goreleaser.yaml — gil release configuration
+##
+## Multi-module workspace
+## ----------------------
+## gil is a Go workspace (go.work) with four entry-point modules:
+##   cli/cmd/gil   server/cmd/gild   tui/cmd/giltui   mcp/cmd/gilmcp
+## GoReleaser's `go` builder runs `go build` from `dir`, so each build
+## block points at the module's directory and uses its own go.mod with
+## the in-tree `replace` directives. The `prebuilt` builder would also
+## work but is GoReleaser Pro only — sticking with the OSS `go` builder
+## keeps `make release` runnable on any contributor's machine.
+##
+## Snapshot vs release
+## -------------------
+## - `make release`  →  goreleaser release --snapshot --clean --skip=publish
+##   Builds the full 4-binary x 4-platform matrix locally; nothing leaves
+##   the machine. Use this to verify the config before tagging.
+## - On a `vX.Y.Z` tag, .github/workflows/release.yml runs
+##   `goreleaser release --clean` which publishes archives + nfpms +
+##   updates the homebrew tap.
+
+version: 2
+project_name: gil
+
+before:
+  hooks:
+    - bash -c "cd cli    && go mod download"
+    - bash -c "cd server && go mod download"
+    - bash -c "cd tui    && go mod download"
+    - bash -c "cd mcp    && go mod download"
+
+builds:
+  - id: gil
+    binary: gil
+    dir: cli
+    main: ./cmd/gil
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X main.version={{ .Version }}
+      - -X main.commit={{ .Commit }}
+      - -X main.date={{ .Date }}
+
+  - id: gild
+    binary: gild
+    dir: server
+    main: ./cmd/gild
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X main.version={{ .Version }}
+      - -X main.commit={{ .Commit }}
+      - -X main.date={{ .Date }}
+
+  - id: giltui
+    binary: giltui
+    dir: tui
+    main: ./cmd/giltui
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X main.version={{ .Version }}
+      - -X main.commit={{ .Commit }}
+      - -X main.date={{ .Date }}
+
+  - id: gilmcp
+    binary: gilmcp
+    dir: mcp
+    main: ./cmd/gilmcp
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X main.version={{ .Version }}
+      - -X main.commit={{ .Commit }}
+      - -X main.date={{ .Date }}
+
+archives:
+  # One bundle per (os, arch) containing all four binaries — that's the
+  # convenience shape we want users to download.
+  - id: gil-bundle
+    ids: [gil, gild, giltui, gilmcp]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    formats: [tar.gz]
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: 'checksums.txt'
+
+snapshot:
+  version_template: '{{ incpatch .Version }}-snapshot'
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^chore:'
+      - '^ci:'
+      - 'Merge pull request'
+
+nfpms:
+  - id: gil-linux
+    package_name: gil
+    ids: [gil, gild, giltui, gilmcp]
+    file_name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    vendor: jedutools
+    homepage: https://github.com/jedutools/gil
+    maintainer: jedutools <jedutools@gmail.com>
+    description: |-
+      gil — autonomous coding harness (CLI, server, TUI, MCP).
+      Bundles gil, gild, giltui, and gilmcp.
+    license: MIT
+    formats:
+      - deb
+      - rpm
+    bindir: /usr/bin
+    section: devel
+    priority: optional
+    contents:
+      - src: ./LICENSE
+        dst: /usr/share/doc/gil/LICENSE
+      - src: ./README.md
+        dst: /usr/share/doc/gil/README.md
+
+brews:
+  - name: gil
+    ids: [gil-bundle]
+    repository:
+      owner: jedutools
+      name: homebrew-tap
+      branch: main
+      # Token is injected via env; see .github/workflows/release.yml.
+      # token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    homepage: https://github.com/jedutools/gil
+    description: Autonomous coding harness (CLI, server, TUI, MCP).
+    license: MIT
+    commit_author:
+      name: gil-release-bot
+      email: jedutools@gmail.com
+    install: |
+      bin.install "gil"
+      bin.install "gild"
+      bin.install "giltui"
+      bin.install "gilmcp"
+    test: |
+      system "#{bin}/gil", "--help"
+
+release:
+  github:
+    owner: jedutools
+    name: gil
+  draft: true
+  prerelease: auto
+  name_template: 'gil v{{ .Version }}'
