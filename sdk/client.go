@@ -12,11 +12,12 @@ import (
 	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
 )
 
-// Client is a gRPC client for the Gil SessionService and InterviewService.
+// Client is a gRPC client for the Gil SessionService, InterviewService, and RunService.
 type Client struct {
 	conn       *grpc.ClientConn
 	sessions   gilv1.SessionServiceClient
 	interviews gilv1.InterviewServiceClient
+	runs       gilv1.RunServiceClient
 }
 
 // Dial connects to a Gil gRPC server at the given Unix socket path.
@@ -35,6 +36,7 @@ func Dial(sockPath string) (*Client, error) {
 		conn:       conn,
 		sessions:   gilv1.NewSessionServiceClient(conn),
 		interviews: gilv1.NewInterviewServiceClient(conn),
+		runs:       gilv1.NewRunServiceClient(conn),
 	}, nil
 }
 
@@ -142,4 +144,19 @@ func (c *Client) ConfirmInterview(ctx context.Context, sessionID string) (specID
 // GetSpec returns the current (possibly partial) spec for sessionID.
 func (c *Client) GetSpec(ctx context.Context, sessionID string) (*gilv1.FrozenSpec, error) {
 	return c.interviews.GetSpec(ctx, &gilv1.GetSpecRequest{SessionId: sessionID})
+}
+
+// StartRun executes the agent loop synchronously and returns the result.
+// providerName: "anthropic" | "mock" | "" (server default).
+func (c *Client) StartRun(ctx context.Context, sessionID, providerName, model string) (*gilv1.StartRunResponse, error) {
+	return c.runs.Start(ctx, &gilv1.StartRunRequest{
+		SessionId: sessionID,
+		Provider:  providerName,
+		Model:     model,
+	})
+}
+
+// TailRun subscribes to the session's event stream (Phase 5 stub on server).
+func (c *Client) TailRun(ctx context.Context, sessionID string) (gilv1.RunService_TailClient, error) {
+	return c.runs.Tail(ctx, &gilv1.TailRequest{SessionId: sessionID})
 }

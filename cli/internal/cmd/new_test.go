@@ -32,6 +32,7 @@ func startGildForTest(t *testing.T) (sock string, cleanup func()) {
 	g := grpc.NewServer()
 	gilv1.RegisterSessionServiceServer(g, &testSessionServer{})
 	gilv1.RegisterInterviewServiceServer(g, &testInterviewServer{})
+	gilv1.RegisterRunServiceServer(g, &testRunServer{})
 	go g.Serve(lis)
 
 	require.Eventually(t, func() bool {
@@ -81,6 +82,11 @@ type testInterviewServer struct {
 	gilv1.UnimplementedInterviewServiceServer
 }
 
+// testRunServer is a minimal in-test stub of RunService.
+type testRunServer struct {
+	gilv1.UnimplementedRunServiceServer
+}
+
 func (s *testInterviewServer) Start(req *gilv1.StartInterviewRequest, stream gilv1.InterviewService_StartServer) error {
 	stream.Send(&gilv1.InterviewEvent{
 		Payload: &gilv1.InterviewEvent_Stage{
@@ -121,6 +127,16 @@ func (s *testInterviewServer) Confirm(ctx context.Context, req *gilv1.ConfirmReq
 	return &gilv1.ConfirmResponse{
 		SpecId:         "test-spec-id",
 		ContentSha256:  strings.Repeat("a", 64),
+	}, nil
+}
+
+// Start implements RunService.Start for testing.
+func (s *testRunServer) Start(ctx context.Context, req *gilv1.StartRunRequest) (*gilv1.StartRunResponse, error) {
+	return &gilv1.StartRunResponse{
+		Status:     "done",
+		Iterations: 1,
+		Tokens:     50,
+		VerifyResults: []*gilv1.VerifyResult{{Name: "ok", Passed: true}},
 	}, nil
 }
 

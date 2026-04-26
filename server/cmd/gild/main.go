@@ -72,6 +72,7 @@ func newServer(dbPath, sockPath, sessionsBase string) (*server, error) {
 	repo := session.NewRepo(db)
 	gilv1.RegisterSessionServiceServer(g, service.NewSessionService(repo))
 	gilv1.RegisterInterviewServiceServer(g, service.NewInterviewService(repo, sessionsBase, factory))
+	gilv1.RegisterRunServiceServer(g, service.NewRunService(repo, sessionsBase, factory))
 
 	return &server{grpc: g, lis: lis, db: db}, nil
 }

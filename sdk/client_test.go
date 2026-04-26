@@ -27,6 +27,11 @@ type testInterviewServer struct {
 	gilv1.UnimplementedInterviewServiceServer
 }
 
+// testRunServer is a minimal implementation of RunServiceServer for testing.
+type testRunServer struct {
+	gilv1.UnimplementedRunServiceServer
+}
+
 // Create returns a test session.
 func (s *testSessionServer) Create(ctx context.Context, req *gilv1.CreateRequest) (*gilv1.Session, error) {
 	return &gilv1.Session{
@@ -98,6 +103,18 @@ func (s *testInterviewServer) GetSpec(ctx context.Context, req *gilv1.GetSpecReq
 	}, nil
 }
 
+// Start implements RunService.Start for testing.
+func (s *testRunServer) Start(ctx context.Context, req *gilv1.StartRunRequest) (*gilv1.StartRunResponse, error) {
+	return &gilv1.StartRunResponse{
+		Status:     "done",
+		Iterations: 2,
+		Tokens:     100,
+		VerifyResults: []*gilv1.VerifyResult{
+			{Name: "exists", Passed: true, ExitCode: 0},
+		},
+	}, nil
+}
+
 func startTestServer(t *testing.T) (string, func()) {
 	t.Helper()
 	sock, stop, _ := startTestServerWithCtrl(t)
@@ -121,6 +138,7 @@ func startTestServerWithCtrl(t *testing.T) (string, func(), *testSessionServer) 
 	g := grpc.NewServer()
 	gilv1.RegisterSessionServiceServer(g, srv)
 	gilv1.RegisterInterviewServiceServer(g, &testInterviewServer{})
+	gilv1.RegisterRunServiceServer(g, &testRunServer{})
 	go g.Serve(lis)
 
 	// Wait for the server to be ready
@@ -249,4 +267,19 @@ func TestClient_GetSpec(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "test-spec-id", fs.SpecId)
 	require.Equal(t, "sess-1", fs.SessionId)
+}
+
+func TestClient_StartRun(t *testing.T) {
+	sock, stop := startTestServer(t)
+	defer stop()
+
+	cli, err := Dial(sock)
+	require.NoError(t, err)
+	defer cli.Close()
+
+	resp, err := cli.StartRun(context.Background(), "sess-1", "mock", "")
+	require.NoError(t, err)
+	require.Equal(t, "done", resp.Status)
+	require.Equal(t, int32(2), resp.Iterations)
+	require.Len(t, resp.VerifyResults, 1)
 }
