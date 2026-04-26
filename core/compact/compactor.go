@@ -8,7 +8,6 @@ package compact
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	"github.com/jedutools/gil/core/provider"
 )
@@ -67,8 +66,8 @@ func (c *Compactor) Compact(ctx context.Context, msgs []provider.Message) ([]pro
 	middle := msgs[headKeep : len(msgs)-tailKeep]
 	tail := msgs[len(msgs)-tailKeep:]
 
-	// Build summary prompt — inline for T1; T2 will extract to template.go.
-	prompt := buildSummaryPrompt(middle)
+	// Build summary prompt from structured template.
+	prompt := BuildSummaryPrompt(middle)
 	resp, err := c.Provider.Complete(ctx, provider.Request{
 		Model: c.Model,
 		Messages: []provider.Message{{
@@ -146,16 +145,3 @@ func estimateTokens(msgs []provider.Message) int64 {
 	return total
 }
 
-// buildSummaryPrompt builds a simple inline prompt. T2 replaces this with template.go.
-func buildSummaryPrompt(middle []provider.Message) string {
-	var sb strings.Builder
-	sb.WriteString("Summarize the following conversation segment as concise markdown.\n\nSegment:\n")
-	for _, m := range middle {
-		sb.WriteString("[")
-		sb.WriteString(string(m.Role))
-		sb.WriteString("] ")
-		sb.WriteString(m.Content)
-		sb.WriteString("\n")
-	}
-	return sb.String()
-}
