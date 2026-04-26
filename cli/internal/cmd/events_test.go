@@ -11,6 +11,7 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/jedutools/gil/core/cliutil"
 	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
 )
 
@@ -108,5 +109,7 @@ func TestEvents_NoTailFlag_Errors(t *testing.T) {
 	cmd.SetArgs([]string{"sess-1"})
 	err := cmd.ExecuteContext(context.Background())
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "--tail")
+	var ue *cliutil.UserError
+	require.ErrorAs(t, err, &ue)
+	require.Contains(t, ue.Hint, "--tail")
 }
