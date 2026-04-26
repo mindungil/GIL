@@ -28,6 +28,14 @@ type CommandWrapper interface {
 	Wrap(cmd string, args ...string) []string
 }
 
+// RemoteExecutor is the structural twin of core/tool.RemoteExecutor —
+// also duplicated to avoid runtime → core. HTTP-bound drivers (Daytona)
+// implement this in addition to CommandWrapper so the bash tool can
+// bypass exec.Cmd and use a single REST round-trip per command.
+type RemoteExecutor interface {
+	ExecRemote(ctx context.Context, cmd string, args []string) (stdout, stderr string, exit int, err error)
+}
+
 // ProvisionOptions configures a Provision call.
 type ProvisionOptions struct {
 	Image        string // language-stack image, e.g., "python:3.12-slim"
