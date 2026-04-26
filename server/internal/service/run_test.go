@@ -10,6 +10,7 @@ import (
 	_ "modernc.org/sqlite"
 	"github.com/stretchr/testify/require"
 
+	"github.com/jedutools/gil/core/event"
 	"github.com/jedutools/gil/core/provider"
 	"github.com/jedutools/gil/core/session"
 	"github.com/jedutools/gil/core/specstore"
@@ -100,4 +101,43 @@ func TestRunService_Start_NotFound(t *testing.T) {
 	svc, _, _ := newRunSvc(t, nil)
 	_, err := svc.Start(context.Background(), &gilv1.StartRunRequest{SessionId: "nope", Provider: "mock"})
 	require.Error(t, err)
+}
+
+func TestRunService_Start_PersistsEventsToDisk(t *testing.T) {
+	workDir := t.TempDir()
+
+	mockTurns := []provider.MockTurn{
+		{Text: "Creating", ToolCalls: []provider.ToolCall{
+			{ID: "c1", Name: "write_file", Input: json.RawMessage(`{"path":"hello.txt","content":"hi"}`)},
+		}, StopReason: "tool_use"},
+		{Text: "Done", StopReason: "end_turn"},
+	}
+
+	svc, repo, sessionsBase := newRunSvc(t, mockTurns)
+	ctx := context.Background()
+	s, err := repo.Create(ctx, session.CreateInput{WorkingDir: workDir})
+	require.NoError(t, err)
+	require.NoError(t, repo.UpdateStatus(ctx, s.ID, "frozen"))
+	makeFrozenSpec(t, sessionsBase, s.ID, workDir)
+
+	resp, err := svc.Start(ctx, &gilv1.StartRunRequest{SessionId: s.ID, Provider: "mock"})
+	require.NoError(t, err)
+	require.Equal(t, "done", resp.Status)
+
+	// Verify events.jsonl exists and contains events
+	eventsPath := filepath.Join(sessionsBase, s.ID, "events", "events.jsonl")
+	require.FileExists(t, eventsPath)
+
+	// Load and verify event count > 0
+	loaded, err := event.LoadAll(eventsPath)
+	require.NoError(t, err)
+	require.NotEmpty(t, loaded)
+
+	// Should contain at least an iteration_start and run_done
+	types := map[string]int{}
+	for _, e := range loaded {
+		types[e.Type]++
+	}
+	require.Greater(t, types["iteration_start"], 0, "got types: %+v", types)
+	require.Greater(t, types["run_done"], 0)
 }

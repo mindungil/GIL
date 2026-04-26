@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"sync"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/jedutools/gil/core/event"
 	"github.com/jedutools/gil/core/provider"
 	"github.com/jedutools/gil/core/runner"
 	"github.com/jedutools/gil/core/session"
@@ -25,11 +27,19 @@ type RunService struct {
 	repo            *session.Repo
 	sessionsBase    string
 	providerFactory ProviderFactory
+
+	mu         sync.Mutex
+	runStreams map[string]*event.Stream  // per-session live event streams
 }
 
 // NewRunService constructs the service.
 func NewRunService(repo *session.Repo, sessionsBase string, factory ProviderFactory) *RunService {
-	return &RunService{repo: repo, sessionsBase: sessionsBase, providerFactory: factory}
+	return &RunService{
+		repo:            repo,
+		sessionsBase:    sessionsBase,
+		providerFactory: factory,
+		runStreams:      make(map[string]*event.Stream),
+	}
 }
 
 func (s *RunService) sessionDir(sessionID string) string {
@@ -80,8 +90,47 @@ func (s *RunService) Start(ctx context.Context, req *gilv1.StartRunRequest) (*gi
 		return nil, status.Errorf(codes.Internal, "update status: %v", err)
 	}
 
+	// Create per-session event stream + persister
+	eventDir := filepath.Join(s.sessionDir(req.SessionId), "events")
+	persister, err := event.NewPersister(eventDir)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "create persister: %v", err)
+	}
+	defer persister.Close()
+
+	stream := event.NewStream()
+
+	// Register stream so Tail can subscribe
+	s.mu.Lock()
+	s.runStreams[req.SessionId] = stream
+	s.mu.Unlock()
+
+	// Cleanup on exit
+	defer func() {
+		s.mu.Lock()
+		delete(s.runStreams, req.SessionId)
+		s.mu.Unlock()
+	}()
+
+	// Persistence subscriber: write every event to disk
+	persistSub := stream.Subscribe(256)
+	persistDone := make(chan struct{})
+	go func() {
+		defer close(persistDone)
+		for evt := range persistSub.Events() {
+			_ = persister.Write(evt)
+		}
+	}()
+
 	loop := runner.NewAgentLoop(spec, prov, model, tools, ver)
+	loop.Events = stream
+
 	res, runErr := loop.Run(ctx)
+
+	// Allow persister sub to drain
+	persistSub.Close()
+	<-persistDone
+	_ = persister.Sync()
 
 	finalStatus := "stopped"
 	if res != nil && res.Status == "done" {
