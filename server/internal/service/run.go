@@ -8,6 +8,7 @@ import (
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/jedutools/gil/core/event"
 	"github.com/jedutools/gil/core/provider"
@@ -159,7 +160,79 @@ func (s *RunService) Start(ctx context.Context, req *gilv1.StartRunRequest) (*gi
 	return resp, nil
 }
 
-// Tail is a Phase 5 stub.
+// toProtoEvent converts a core event.Event to its proto representation.
+func toProtoEvent(e event.Event) *gilv1.Event {
+	return &gilv1.Event{
+		Id:        e.ID,
+		Timestamp: timestamppb.New(e.Timestamp),
+		Source:    eventSourceToProto(e.Source),
+		Kind:      eventKindToProto(e.Kind),
+		Type:      e.Type,
+		DataJson:  e.Data,
+		Cause:     e.Cause,
+		Metrics: &gilv1.EventMetrics{
+			Tokens:    e.Metrics.Tokens,
+			CostUsd:   e.Metrics.CostUSD,
+			LatencyMs: e.Metrics.LatencyMs,
+		},
+	}
+}
+
+func eventSourceToProto(s event.Source) gilv1.EventSource {
+	switch s {
+	case event.SourceAgent:
+		return gilv1.EventSource_AGENT
+	case event.SourceUser:
+		return gilv1.EventSource_USER
+	case event.SourceEnvironment:
+		return gilv1.EventSource_ENVIRONMENT
+	case event.SourceSystem:
+		return gilv1.EventSource_SYSTEM
+	default:
+		return gilv1.EventSource_SOURCE_UNSPECIFIED
+	}
+}
+
+func eventKindToProto(k event.Kind) gilv1.EventKind {
+	switch k {
+	case event.KindAction:
+		return gilv1.EventKind_ACTION
+	case event.KindObservation:
+		return gilv1.EventKind_OBSERVATION
+	case event.KindNote:
+		return gilv1.EventKind_NOTE
+	default:
+		return gilv1.EventKind_KIND_UNSPECIFIED
+	}
+}
+
+// Tail subscribes to the per-session live event stream and forwards each
+// event to the gRPC client. Returns NotFound if no run is active for the
+// session. (Replay from disk is Phase 6.)
 func (s *RunService) Tail(req *gilv1.TailRequest, stream gilv1.RunService_TailServer) error {
-	return status.Errorf(codes.Unimplemented, "Tail is implemented in Phase 5")
+	s.mu.Lock()
+	rs, ok := s.runStreams[req.SessionId]
+	s.mu.Unlock()
+	if !ok {
+		return status.Errorf(codes.NotFound,
+			"no active run for session %q (replay from disk is Phase 6)", req.SessionId)
+	}
+
+	sub := rs.Subscribe(256)
+	defer sub.Close()
+
+	ctx := stream.Context()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case e, ok := <-sub.Events():
+			if !ok {
+				return nil
+			}
+			if err := stream.Send(toProtoEvent(e)); err != nil {
+				return err
+			}
+		}
+	}
 }

@@ -4,11 +4,16 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"net"
 	"path/filepath"
 	"testing"
+	"time"
 
 	_ "modernc.org/sqlite"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/test/bufconn"
 
 	"github.com/jedutools/gil/core/event"
 	"github.com/jedutools/gil/core/provider"
@@ -140,4 +145,117 @@ func TestRunService_Start_PersistsEventsToDisk(t *testing.T) {
 	}
 	require.Greater(t, types["iteration_start"], 0, "got types: %+v", types)
 	require.Greater(t, types["run_done"], 0)
+}
+
+func TestRunService_Tail_StreamsEvents(t *testing.T) {
+	workDir := t.TempDir()
+	mockTurns := []provider.MockTurn{
+		{Text: "Creating", ToolCalls: []provider.ToolCall{
+			{ID: "c1", Name: "write_file", Input: json.RawMessage(`{"path":"hello.txt","content":"hi"}`)},
+		}, StopReason: "tool_use"},
+		{Text: "Done", StopReason: "end_turn"},
+	}
+
+	svc, repo, sessionsBase := newRunSvc(t, mockTurns)
+	ctx := context.Background()
+	sess, err := repo.Create(ctx, session.CreateInput{WorkingDir: workDir})
+	require.NoError(t, err)
+	require.NoError(t, repo.UpdateStatus(ctx, sess.ID, "frozen"))
+	makeFrozenSpec(t, sessionsBase, sess.ID, workDir)
+
+	// Create a stream and register it
+	stream := event.NewStream()
+	svc.mu.Lock()
+	svc.runStreams[sess.ID] = stream
+	svc.mu.Unlock()
+	defer func() {
+		svc.mu.Lock()
+		delete(svc.runStreams, sess.ID)
+		svc.mu.Unlock()
+	}()
+
+	// Spin up gRPC server with bufconn
+	lis := bufconn.Listen(1024 * 1024)
+	g := grpc.NewServer()
+	gilv1.RegisterRunServiceServer(g, svc)
+	go g.Serve(lis)
+	defer g.Stop()
+
+	conn, err := grpc.NewClient("passthrough://bufnet",
+		grpc.WithContextDialer(func(c context.Context, _ string) (net.Conn, error) {
+			return lis.DialContext(c)
+		}),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
+	require.NoError(t, err)
+	defer conn.Close()
+	client := gilv1.NewRunServiceClient(conn)
+
+	// Start Tail in background
+	tailDone := make(chan error, 1)
+	go func() {
+		tailCtx, tailCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer tailCancel()
+		tail, err := client.Tail(tailCtx, &gilv1.TailRequest{SessionId: sess.ID})
+		if err != nil {
+			tailDone <- err
+			return
+		}
+
+		// Collect events
+		received := 0
+		for {
+			evt, err := tail.Recv()
+			if err != nil {
+				tailDone <- nil
+				break
+			}
+			received++
+			require.Equal(t, "test_event", evt.GetType())
+			require.Equal(t, gilv1.EventSource_SYSTEM, evt.GetSource())
+			require.Equal(t, gilv1.EventKind_NOTE, evt.GetKind())
+			if received >= 3 {
+				tailDone <- nil
+				break
+			}
+		}
+	}()
+
+	// Give Tail time to subscribe
+	time.Sleep(100 * time.Millisecond)
+
+	// Send test events AFTER Tail has subscribed
+	for i := 0; i < 3; i++ {
+		_, _ = stream.Append(event.Event{
+			Timestamp: time.Now(),
+			Source:    event.SourceSystem,
+			Kind:      event.KindNote,
+			Type:      "test_event",
+			Data:      []byte(`{}`),
+		})
+	}
+
+	err = <-tailDone
+	require.NoError(t, err)
+}
+
+func TestRunService_Tail_NotFoundForInactive(t *testing.T) {
+	svc, _, _ := newRunSvc(t, nil)
+	lis := bufconn.Listen(1024 * 1024)
+	g := grpc.NewServer()
+	gilv1.RegisterRunServiceServer(g, svc)
+	go g.Serve(lis)
+	defer g.Stop()
+	conn, _ := grpc.NewClient("passthrough://bufnet",
+		grpc.WithContextDialer(func(c context.Context, _ string) (net.Conn, error) { return lis.DialContext(c) }),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
+	defer conn.Close()
+	client := gilv1.NewRunServiceClient(conn)
+
+	tail, err := client.Tail(context.Background(), &gilv1.TailRequest{SessionId: "nope"})
+	require.NoError(t, err)
+	_, err = tail.Recv()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "no active run")
 }
