@@ -72,6 +72,8 @@ enum WorkspaceBackend {
   DOCKER = 3;
   SSH = 4;
   VM = 5;
+  MODAL = 6;    // Modal (https://modal.com) cloud VM sandbox
+  DAYTONA = 7;  // Daytona (https://daytona.io) cloud workspace
 }
 
 message ModelConfig {

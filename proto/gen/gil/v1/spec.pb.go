@@ -89,6 +89,8 @@ const (
 	WorkspaceBackend_DOCKER              WorkspaceBackend = 3
 	WorkspaceBackend_SSH                 WorkspaceBackend = 4
 	WorkspaceBackend_VM                  WorkspaceBackend = 5
+	WorkspaceBackend_MODAL               WorkspaceBackend = 6 // Modal (https://modal.com) cloud VM sandbox
+	WorkspaceBackend_DAYTONA             WorkspaceBackend = 7 // Daytona (https://daytona.io) cloud workspace
 )
 
 // Enum value maps for WorkspaceBackend.
@@ -100,6 +102,8 @@ var (
 		3: "DOCKER",
 		4: "SSH",
 		5: "VM",
+		6: "MODAL",
+		7: "DAYTONA",
 	}
 	WorkspaceBackend_value = map[string]int32{
 		"BACKEND_UNSPECIFIED": 0,
@@ -108,6 +112,8 @@ var (
 		"DOCKER":              3,
 		"SSH":                 4,
 		"VM":                  5,
+		"MODAL":               6,
+		"DAYTONA":             7,
 	}
 )
 
@@ -1243,7 +1249,7 @@ const file_gil_v1_spec_proto_rawDesc = "" +
 	"\vFILE_EXISTS\x10\x02\x12\b\n" +
 	"\x04HTTP\x10\x03\x12\x0f\n" +
 	"\vREGEX_MATCH\x10\x04\x12\x11\n" +
-	"\rCUSTOM_SCRIPT\x10\x05*m\n" +
+	"\rCUSTOM_SCRIPT\x10\x05*\x85\x01\n" +
 	"\x10WorkspaceBackend\x12\x17\n" +
 	"\x13BACKEND_UNSPECIFIED\x10\x00\x12\x10\n" +
 	"\fLOCAL_NATIVE\x10\x01\x12\x11\n" +
@@ -1251,7 +1257,9 @@ const file_gil_v1_spec_proto_rawDesc = "" +
 	"\n" +
 	"\x06DOCKER\x10\x03\x12\a\n" +
 	"\x03SSH\x10\x04\x12\x06\n" +
-	"\x02VM\x10\x05*o\n" +
+	"\x02VM\x10\x05\x12\t\n" +
+	"\x05MODAL\x10\x06\x12\v\n" +
+	"\aDAYTONA\x10\a*o\n" +
 	"\fAutonomyDial\x12\x18\n" +
 	"\x14AUTONOMY_UNSPECIFIED\x10\x00\x12\r\n" +
 	"\tPLAN_ONLY\x10\x01\x12\x12\n" +

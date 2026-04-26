@@ -26,8 +26,11 @@ import (
 	"github.com/jedutools/gil/core/tool"
 	"github.com/jedutools/gil/core/verify"
 	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
+	"github.com/jedutools/gil/runtime/cloud"
+	"github.com/jedutools/gil/runtime/daytona"
 	"github.com/jedutools/gil/runtime/docker"
 	"github.com/jedutools/gil/runtime/local"
+	"github.com/jedutools/gil/runtime/modal"
 	"github.com/jedutools/gil/runtime/ssh"
 )
 
@@ -144,6 +147,28 @@ func buildTools(workspaceDir string, ws *gilv1.Workspace) ([]tool.Tool, error) {
 
 	case gilv1.WorkspaceBackend_VM:
 		return nil, fmt.Errorf("workspace backend VM not yet supported (Phase 9+)")
+
+	case gilv1.WorkspaceBackend_MODAL:
+		if !modal.New().Available() {
+			return nil, fmt.Errorf("workspace backend MODAL requires MODAL_TOKEN_ID + MODAL_TOKEN_SECRET env vars + modal CLI")
+		}
+		// Tools returned bare; executeRun does Provision and rewires Bash.Wrapper.
+		return []tool.Tool{
+			&tool.Bash{WorkingDir: workspaceDir},
+			&tool.WriteFile{WorkingDir: workspaceDir},
+			&tool.ReadFile{WorkingDir: workspaceDir},
+		}, nil
+
+	case gilv1.WorkspaceBackend_DAYTONA:
+		if !daytona.New().Available() {
+			return nil, fmt.Errorf("workspace backend DAYTONA requires DAYTONA_API_KEY env var")
+		}
+		return []tool.Tool{
+			&tool.Bash{WorkingDir: workspaceDir},
+			&tool.WriteFile{WorkingDir: workspaceDir},
+			&tool.ReadFile{WorkingDir: workspaceDir},
+		}, nil
+
 	default:
 		return nil, fmt.Errorf("unknown workspace backend: %v", backend)
 	}
@@ -343,6 +368,41 @@ func (s *RunService) executeRun(
 			}
 		}
 	}
+
+	// Cloud backends (MODAL, DAYTONA): Provision a sandbox and rewire Bash.
+	var cloudSandbox *cloud.Sandbox
+	var cloudProvider cloud.Provider
+	if spec.Workspace != nil {
+		switch spec.Workspace.Backend {
+		case gilv1.WorkspaceBackend_MODAL:
+			cloudProvider = modal.New()
+		case gilv1.WorkspaceBackend_DAYTONA:
+			cloudProvider = daytona.New()
+		}
+	}
+	if cloudProvider != nil {
+		sb, err := cloudProvider.Provision(ctx, cloud.ProvisionOptions{
+			Image:        spec.Workspace.Path, // overload Path as image ref
+			WorkspaceDir: workspaceDir,
+			SessionID:    sessionID,
+		})
+		if err != nil {
+			_ = s.repo.UpdateStatus(ctx, sessionID, "stopped")
+			return nil, status.Errorf(codes.FailedPrecondition, "cloud provision (%s): %v", cloudProvider.Name(), err)
+		}
+		cloudSandbox = sb
+		defer func() {
+			tdCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			_ = sb.Teardown(tdCtx)
+		}()
+		for _, t := range tools {
+			if b, ok := t.(*tool.Bash); ok {
+				b.Wrapper = sb.Wrapper
+			}
+		}
+	}
+	_ = cloudSandbox // suppress unused if no other refs
 
 	// Create per-session event stream + persister.
 	eventDir := filepath.Join(s.sessionDir(sessionID), "events")
