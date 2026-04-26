@@ -4,7 +4,7 @@
 
 ## 현재 페이즈
 
-**Phase 8: Exec/MCP/SSH/Gateway** (완료 — 2026-04-26). 다음 → Phase 9 (multi-day soak + 클라우드).
+**Phase 9: Remote sync / Cloud / Soak / Polish** (완료 — 2026-04-26). 다음 → Phase 10 (실제 클라우드 deployment + dogfood + VS Code).
 
 **Phase 0: 설계** (완료)
 
@@ -106,14 +106,19 @@
 - [x] e2e phase08 (exec recipe + HTTP curl + gilmcp JSON-RPC sanity) 통과
 - [x] dogfood 절차 문서화 (`docs/dogfood/2026-04-26-first-run-procedure.md`) — 실제 실행은 ANTHROPIC_API_KEY 필요
 
-**Phase 9: Multi-day soak + 클라우드** (대기)
-- [ ] 며칠 무인 시뮬레이션 (Anthropic 실제 호출, 비용 모니터링)
-- [ ] 첫 dogfood 실제 실행 (`docs/dogfood/2026-04-26-first-run-procedure.md` per)
-- [ ] 클라우드 VM 백엔드 (Modal/Daytona)
-- [ ] 원격 file sync (rsync; SSH 백엔드 file ops 제한 해소)
-- [ ] VS Code 확장 (gil SDK 사용)
-- [ ] 다중 사용자 gild
-- [ ] Atropos RL 통합 (학습된 도구 호출 최적화)
+**Phase 9: Remote sync / Cloud / Soak / Polish** (완료 — 2026-04-26)
+- [x] runtime/ssh.Syncer (rsync Push/Pull)
+- [x] RunService SSH push 전 / pull 후 (file ops local 제한 해소)
+- [x] runtime/cloud.Provider 인터페이스 (Sandbox + Teardown shape)
+- [x] runtime/modal stub (MODAL_TOKEN_ID/SECRET 게이팅)
+- [x] runtime/daytona stub (DAYTONA_API_KEY 게이팅)
+- [x] proto WorkspaceBackend MODAL=6/DAYTONA=7 + RunService routing
+- [x] run-soak mock provider (30턴, file writes + memory + compact + stuck loop)
+- [x] e2e9 soak sanity (>=50 events, no panic, memory bank evolved)
+- [x] gild --user 데이터 디렉토리 분리
+- [x] gild --metrics Prometheus 엔드포인트 (6 metrics)
+- [x] README.md 빠른 시작 + 아키텍처 다이어그램
+- [x] docs/install.md 단계별 설치 가이드
 
 ## 최근 결정 사항
 
@@ -134,6 +139,7 @@
 | 2026-04-26 | Phase 6 (컨텍스트/메모리/Repomap) 완료 — 20 tasks + 1 fix. core/compact (Hermes 캐시 보존 + OpenCode 템플릿 + anti-thrashing + system-and-3 cache_control) + AgentLoop 95% auto-compact + compact_now 도구. core/memory.Bank 6 file + 2 tools + 시스템 프롬프트 prepend + post-verify 마일스톤 게이트. core/repomap (CGO 회피하여 stdlib go/parser + py/js/ts regex로 대체; PageRank + binary-search Fit + TTL cache tool). Stuck recovery 4종 풀 구현 (Cline loop-detection lift + Cline resetHead lift + Goose adversary_inspector lift). runtime/local Seatbelt (Codex seatbelt.rs lift, darwin only). e2e6 통과. server-side memory bank wiring fix 포함. e2e-all 6 페이즈 통과. |
 | 2026-04-26 | Phase 7 (Edit/Patch/Permission/TUI) 완료 — 16 tasks. core/edit (Aider editblock_coder.py 4-tier MatchEngine + DSL parser + find_similar_lines hint, edit tool). core/patch (Codex apply-patch parser + applier with seek_sequence 3-tier, apply_patch tool). core/permission (OpenCode evaluate.ts + wildcard.ts: last-wins glob with " *" 트레일링 옵셔널 quirk; AgentLoop gate; spec.risk.autonomy 기반 rule generator FULL/ASK_DESTRUCTIVE/ASK_PER_ACTION/PLAN_ONLY). tui (Bubbletea 3-pane + live event tail + permission_ask 모달 + AnswerPermission RPC, AskCallback 60s timeout). Stuck SubagentBranch 실작동 (read-only sub-loop, AgentLoop.RunSubagent 어댑터). runtime/docker (per-command exec wrapper + Container lifecycle). e2e7 (edit + apply_patch + ASK_DESTRUCTIVE rm 차단 sanity) 통과. e2e-all 7 페이즈 통과. 각 reference lift는 commit 메시지에 출처 명기. |
 | 2026-04-26 | Phase 8 (Exec/MCP/SSH/Gateway) 완료 — 9 tasks. core/exec.Recipe + Runner (Hermes code_execution_tool.py lift): 다단계 도구 압축, 중간 결과는 LLM context에서 숨기고 templated summary만 노출. exec tool. mcp/gilmcp 서버 (hand-rolled JSON-RPC 2.0 over stdio; 3 tools). core/mcp 클라이언트 (Goose subprocess 패턴 lift). runtime/ssh (per-command ssh exec wrapper). HTTP/JSON gateway via grpc-gateway (gild --http :PORT). e2e8 (exec + HTTP curl + gilmcp 핸드셰이크) 통과. dogfood 절차 문서화. e2e-all 8 페이즈 통과. |
+| 2026-04-26 | Phase 9 (Remote sync / Cloud / Soak / Polish) 완료 — 13 tasks. runtime/ssh.Syncer (rsync Push/Pull) + RunService Push 전/Pull 후 → SSH 백엔드 file ops 제한 해소. runtime/cloud.Provider 인터페이스 + runtime/modal + runtime/daytona stubs (env var 게이팅; 실제 deployment는 Phase 10). proto WorkspaceBackend MODAL=6/DAYTONA=7. run-soak mock + e2e9 (30턴 soak; 122 events, 10+ files, memory bank evolved, no panic). gild --user 데이터 분리, --metrics Prometheus 엔드포인트 (6 metrics: iterations/compact/stuck/tool_calls/sessions_running/build_info). README.md + docs/install.md 폴리시. e2e-all 9 페이즈 통과. |
 
 ## 차용 출처 (코드/패턴)
 
@@ -238,6 +244,17 @@
 - **검증**: `make e2e-all` 8 페이즈 모두 통과 (e2e8 = exec recipe + HTTP curl 2회 + gilmcp JSON-RPC initialize/tools/list 핸드셰이크).
 - **dogfood**: 첫 실행 절차 (`docs/dogfood/2026-04-26-first-run-procedure.md`)에 문서화. 실제 run은 ANTHROPIC_API_KEY 필요해서 user-driven.
 - **다음 단계**: Phase 9 — 며칠 무인 시뮬레이션 + 첫 dogfood 실제 실행 + 클라우드 VM 백엔드 + 원격 file sync + VS Code 확장.
+
+## Phase 9 산출물 요약 (2026-04-26)
+
+- **SSH 원격 file sync**: `runtime/ssh.Syncer` (rsync 기반 Push/Pull, ssh transport는 Wrapper 재사용). RunService가 SSH 백엔드 run 전 Push, defer Pull. rsync 미설치 시 soft-warn (event-only). Phase 8의 "file ops stay local" 제한 해소.
+- **클라우드 백엔드 scaffolding**: `runtime/cloud.Provider` 공통 인터페이스 (Available/Provision/Sandbox+Teardown). `runtime/modal` (MODAL_TOKEN_ID + MODAL_TOKEN_SECRET + modal CLI 게이팅), `runtime/daytona` (DAYTONA_API_KEY 게이팅). 두 stub 모두 placeholder argv 생성 (실제 deployment는 Phase 10 — credentials 필요). proto enum MODAL=6/DAYTONA=7. RunService.executeRun이 Provision → Bash.Wrapper rewire → Teardown defer.
+- **Soak 시뮬레이션**: `run-soak` mock provider (30턴: 10 file writes + memory_update + compact_now + 6 repeated bash for stuck + final write/memory + end_turn). e2e9가 122 events / 10+ workspace files / 메모리 progress.md 갱신 / stuck_detected 발사 / gild process 무결성 모두 검증.
+- **Multi-user dir isolation**: `gild --user <name>` → `<base>/users/<name>/` 데이터 분리. socket/sqlite/sessions/events 모두 분리. Phase 10 OAuth 위한 디렉토리 수준 기반.
+- **Prometheus metrics**: `gild --metrics :PORT` 엔드포인트. 6 metrics: `gil_run_iterations_total` (counter), `gil_compact_done_total` (counter), `gil_stuck_detected_total{pattern}` (counter), `gil_tool_calls_total{tool,result}` (counter), `gil_sessions_running` (gauge), `gil_build_info{version}` (gauge). RunService에 third event subscriber goroutine 추가 — event type/data 파싱하여 적절한 counter bump.
+- **문서 폴리시**: README.md를 placeholder에서 빠른 시작 가이드 + ASCII 아키텍처 다이어그램 + 명령어 표 + workspace 백엔드 매트릭스 + 자율성 다이얼 + lift 출처 매트릭스로 교체. docs/install.md 단계별 설치 가이드 (요구사항/빌드/환경설정/첫 실행/옵션 백엔드 활성화/문제 해결/검증).
+- **검증**: `make e2e-all` 9 페이즈 모두 통과. `make build` 4 binary 생성.
+- **다음 단계**: Phase 10 — 실제 Anthropic-driven dogfood 실행 + Modal/Daytona 실제 deployment + VS Code 확장 + OAuth multi-user + Atropos RL 통합 (모두 외부 자원/계정 필요).
 
 ## 미해결 / 추후 결정
 
