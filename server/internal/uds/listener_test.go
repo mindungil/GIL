@@ -1,6 +1,7 @@
 package uds
 
 import (
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -73,4 +74,32 @@ func TestListener_RemovesStaleSocket(t *testing.T) {
 	require.NoError(t, err)
 	mode := stat.Mode().Perm()
 	require.Equal(t, os.FileMode(0o600), mode)
+}
+
+func TestListener_FailsIfSocketInUse(t *testing.T) {
+	dir := t.TempDir()
+	sockPath := filepath.Join(dir, "test.sock")
+
+	lis1, err := Listen(sockPath)
+	require.NoError(t, err)
+	defer lis1.Close()
+
+	// Second Listen on the same path must fail (no silent takeover)
+	lis2, err := Listen(sockPath)
+	require.Error(t, err)
+	require.Nil(t, lis2)
+}
+
+func TestRemoveSocket_Idempotent(t *testing.T) {
+	dir := t.TempDir()
+	sockPath := filepath.Join(dir, "test.sock")
+
+	// Removing nonexistent path is OK
+	require.NoError(t, RemoveSocket(sockPath))
+
+	// Create a regular file, RemoveSocket removes it
+	require.NoError(t, os.WriteFile(sockPath, []byte("x"), 0o644))
+	require.NoError(t, RemoveSocket(sockPath))
+	_, err := os.Stat(sockPath)
+	require.True(t, errors.Is(err, os.ErrNotExist))
 }
