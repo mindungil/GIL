@@ -27,40 +27,49 @@
 
 **Phase 2: 인터뷰 엔진** (완료 — 2026-04-26)
 - [x] `core/interview` 에이전트 주도 대화
-- [ ] adversary critique 라운드 (Phase 3로 이연)
-- [ ] self-audit gate (Phase 3로 이연)
+- [x] adversary critique 라운드
+- [x] self-audit gate
 - [x] saturation 객관 측정
 - [x] freeze + SHA-256 lock
 
-**Phase 3: 검증 + Stop** (대기)
+**Phase 3: 인터뷰 엔진 (실작동)** (완료 — 2026-04-26)
+- [x] core/interview SlotFiller (LLM이 user reply에서 spec field 추출)
+- [x] core/interview Adversary (별도 LLM 패스로 spec 비판)
+- [x] core/interview SelfAuditGate (Conversation→Confirm 자기 검사)
+- [x] Engine.RunReplyTurn 오케스트레이션 (slotfill + adversary + audit)
+- [x] server/InterviewService Reply는 RunReplyTurn 사용
+- [x] gil resume (in-progress 인터뷰 재개)
+- [x] E2E phase03 sanity script
+
+**Phase 4: 검증 + Stop** (대기)
 - [ ] `core/verify` 셸 단언 실행기
 - [ ] `core/stuck` 5패턴 시맨틱 감지
 - [ ] 자가 회복 5단계
 - [ ] `core/budget` + grace call
 
-**Phase 4: 워크스페이스/체크포인트** (대기)
+**Phase 5: 워크스페이스/체크포인트** (대기)
 - [ ] `core/checkpoint` shadow git
 - [ ] `runtime/local` (bwrap+Seatbelt)
 - [ ] `runtime/docker`
 - [ ] `runtime/ssh`
 
-**Phase 5: 컨텍스트/메모리** (대기)
+**Phase 6: 컨텍스트/메모리** (대기)
 - [ ] `core/compact` 캐시 보존 압축
 - [ ] `core/memory` 6 마크다운 뱅크 (진짜 구현)
 - [ ] `core/repomap` tree-sitter + PageRank
 
-**Phase 6: 도구/편집** (대기)
+**Phase 7: 도구/편집** (대기)
 - [ ] `core/edit` SEARCH/REPLACE 4단 매칭
 - [ ] `core/patch` apply_patch DSL
 - [ ] `core/exec` 다단계 도구 압축
 - [ ] `core/permission` allow/ask/deny + glob
 
-**Phase 7: TUI + SDK** (대기)
+**Phase 8: TUI + SDK** (대기)
 - [ ] `tui/` Bubbletea
 - [ ] `sdk/` Go 클라이언트
 - [ ] `mcp/` 빌트인 MCP 서버
 
-**Phase 8: 통합 테스트 + 첫 자율 작업 시연** (대기)
+**Phase 9: 통합 테스트 + 첫 자율 작업 시연** (대기)
 - [ ] e2e: 인터뷰 → freeze → run → 검증 통과 → 보고
 - [ ] 며칠 무인 시뮬레이션
 - [ ] 첫 dogfood: gil 자체 기능 추가를 gil 으로 하기
@@ -78,6 +87,7 @@
 | 2026-04-25 | 살아있는 문서 (design/progress) 날짜 X, 단일 파일 유지 |
 | 2026-04-26 | Phase 1 (코어 골격) 완료 — gild + gil new/status + event/spec/session 영속화. 18 tasks, ~30 commits. |
 | 2026-04-26 | Phase 2 (인터뷰 엔진) 완료 — 데몬 자동 spawn + Anthropic provider + InterviewService gRPC + gil interview/spec CLI. 13 tasks. adversary/self-audit는 Phase 3로 이연. |
+| 2026-04-26 | Phase 3 (인터뷰 엔진 실작동) 완료 — SlotFiller + Adversary + SelfAuditGate + RunReplyTurn 오케스트레이션 + gil resume. 7 tasks. cross-restart resume + per-stage 모델 분리 + retry/backoff은 Phase 4로 이연. |
 
 ## 차용 출처 (코드/패턴)
 
@@ -111,6 +121,17 @@
 - **검증**: `make test` + `make e2e` (Phase 1) + `make e2e2` (Phase 2 sanity) 모두 통과
 - **gild 바이너리**: 33MB (+13MB from Phase 1, due to Anthropic SDK)
 - **다음 단계**: Phase 3 — adversary critique + self-audit gate + dynamic spec slot filling
+
+## Phase 3 산출물 요약 (2026-04-26)
+
+- **SlotFiller**: LLM이 user reply에서 spec.goal/constraints/verification/workspace/risk/models 슬롯 자동 추출 (dotted-path JSON 업데이트)
+- **Adversary**: 별도 LLM 패스가 working spec 비판 → finding 배열 (severity/category/finding/question_to_user/proposed_addition)
+- **SelfAuditGate**: 인터뷰 stage 전환(Conversation→Confirm) 직전 명시적 자기 검사 (design.md §2.4)
+- **Engine.RunReplyTurn**: slotfill → (saturated 시) adversary 1회 → (clean 시) audit → ready 시 stage 전환, else NextQuestion
+- **server.Reply 통합**: outcome에 따라 StageTransition 또는 AgentTurn 이벤트 emit
+- **gil resume**: empty first_input sentinel로 in-progress 인터뷰 마지막 agent turn 재현 (cross-restart resume은 Phase 4)
+- **검증**: `make e2e-all` (e2e + e2e2 + e2e3) 모두 통과
+- **다음 단계**: Phase 4 — 진정한 cross-restart resume (state 디스크 영속화) + Provider retry/backoff + per-stage 모델 분리 (main/weak/editor/adversary)
 
 ## 미해결 / 추후 결정
 
