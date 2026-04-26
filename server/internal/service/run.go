@@ -322,6 +322,28 @@ func (s *RunService) executeRun(
 		}
 	}
 
+	// SSH backend: push before run, pull after.
+	// NOTE: RemoteDir mirrors LocalDir (same absolute path assumed on remote).
+	// This is the Phase 9 convention; a future phase can add spec.workspace.remote_path.
+	var sshSyncer *ssh.Syncer
+	if spec.Workspace != nil && spec.Workspace.Backend == gilv1.WorkspaceBackend_SSH {
+		if !ssh.SyncAvailable() {
+			// Soft-warn: continue without sync if rsync absent. Agent can still
+			// exec remote commands but file changes won't sync.
+			// Emit a single event so observers see the limitation.
+			// (stream not yet created here; note is emitted after stream init below)
+			_ = sshSyncer // will remain nil, handled after stream init
+		} else {
+			host, port, key := ssh.ParseTarget(spec.Workspace.Path)
+			sshSyncer = &ssh.Syncer{
+				Wrapper:   &ssh.Wrapper{Host: host, Port: port, KeyPath: key},
+				LocalDir:  workspaceDir,
+				RemoteDir: workspaceDir,
+				ExtraArgs: []string{"--exclude=.git/"},
+			}
+		}
+	}
+
 	// Create per-session event stream + persister.
 	eventDir := filepath.Join(s.sessionDir(sessionID), "events")
 	persister, err := event.NewPersister(eventDir)
@@ -375,6 +397,70 @@ func (s *RunService) executeRun(
 			s.mu.Unlock()
 		}
 	}()
+
+	// SSH sync: now that stream exists, emit unavailable warning or do push+defer-pull.
+	if spec.Workspace != nil && spec.Workspace.Backend == gilv1.WorkspaceBackend_SSH {
+		if sshSyncer == nil && ssh.SyncAvailable() == false {
+			data, _ := json.Marshal(map[string]any{
+				"reason": "rsync not in PATH; file changes will not sync",
+			})
+			_, _ = stream.Append(event.Event{
+				Timestamp: time.Now().UTC(),
+				Source:    event.SourceSystem,
+				Kind:      event.KindNote,
+				Type:      "ssh_sync_unavailable",
+				Data:      data,
+			})
+		} else if sshSyncer != nil {
+			// Push before run.
+			pushCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+			pushErr := sshSyncer.Push(pushCtx)
+			cancel()
+			if pushErr != nil {
+				data, _ := json.Marshal(map[string]any{"phase": "push", "err": pushErr.Error()})
+				_, _ = stream.Append(event.Event{
+					Timestamp: time.Now().UTC(),
+					Source:    event.SourceSystem,
+					Kind:      event.KindNote,
+					Type:      "ssh_sync_error",
+					Data:      data,
+				})
+				sshSyncer = nil // disable pull-after
+			} else {
+				_, _ = stream.Append(event.Event{
+					Timestamp: time.Now().UTC(),
+					Source:    event.SourceSystem,
+					Kind:      event.KindNote,
+					Type:      "ssh_sync_pushed",
+				})
+			}
+			// Defer pull-after (runs even on run error; uses background context).
+			defer func() {
+				if sshSyncer == nil {
+					return
+				}
+				pullCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+				defer cancel()
+				if err := sshSyncer.Pull(pullCtx); err != nil {
+					data, _ := json.Marshal(map[string]any{"phase": "pull", "err": err.Error()})
+					_, _ = stream.Append(event.Event{
+						Timestamp: time.Now().UTC(),
+						Source:    event.SourceSystem,
+						Kind:      event.KindNote,
+						Type:      "ssh_sync_error",
+						Data:      data,
+					})
+				} else {
+					_, _ = stream.Append(event.Event{
+						Timestamp: time.Now().UTC(),
+						Source:    event.SourceSystem,
+						Kind:      event.KindNote,
+						Type:      "ssh_sync_pulled",
+					})
+				}
+			}()
+		}
+	}
 
 	bank := memory.New(filepath.Join(s.sessionDir(sessionID), "memory"))
 	if err := bank.Init(); err != nil {
