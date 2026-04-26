@@ -114,6 +114,30 @@ func newServer(dbPath, sockPath, sessionsBase string) (*server, error) {
 						StopReason: "end_turn",
 					},
 				}), "mock-model", nil
+			case "run-exec-recipe":
+				return provider.NewMockToolProvider([]provider.MockTurn{
+					{
+						Text: "Running a 3-step recipe via exec.",
+						ToolCalls: []provider.ToolCall{{
+							ID: "x1", Name: "exec",
+							Input: json.RawMessage(`{
+    "recipe": {
+        "steps": [
+            {"tool": "write_file", "args": {"path": "step1.txt", "content": "step1\n"}},
+            {"tool": "read_file",  "args": {"path": "step1.txt"}},
+            {"tool": "bash",       "args": {"command": "echo done"}}
+        ],
+        "summary": "wrote: {{step_1_status}}; read content: {{step_2_output}}; bash: {{step_3_status}}"
+    }
+}`),
+						}},
+						StopReason: "tool_use",
+					},
+					{
+						Text:       "Recipe complete.",
+						StopReason: "end_turn",
+					},
+				}), "mock-model", nil
 			case "run-memory-repomap":
 				// Scripted scenario for Phase 6 e2e: repomap → memory_update → write_file → end → milestone update.
 				return provider.NewMockToolProvider([]provider.MockTurn{

@@ -1,4 +1,4 @@
-.PHONY: tidy test gen build install clean e2e e2e2 e2e3 e2e4 e2e5 e2e6 e2e7 e2e-all
+.PHONY: tidy test gen build install clean e2e e2e2 e2e3 e2e4 e2e5 e2e6 e2e7 e2e8 e2e-all
 
 tidy:
 	@for m in core runtime proto server cli tui sdk mcp; do \
@@ -50,7 +50,10 @@ e2e6: build
 e2e7: build
 	@bash tests/e2e/phase07_test.sh
 
-e2e-all: e2e e2e2 e2e3 e2e4 e2e5 e2e6 e2e7
+e2e8: build
+	@bash tests/e2e/phase08_test.sh
+
+e2e-all: e2e e2e2 e2e3 e2e4 e2e5 e2e6 e2e7 e2e8
 
 clean:
 	@rm -rf bin
