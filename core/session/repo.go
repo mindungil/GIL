@@ -4,10 +4,13 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/oklog/ulid/v2"
 )
+
+const statusCreated = "created"
 
 // ErrNotFound is returned when a session lookup misses.
 var ErrNotFound = errors.New("session not found")
@@ -53,14 +56,14 @@ func (r *Repo) Create(ctx context.Context, in CreateInput) (Session, error) {
 	now := time.Now().UTC()
 	_, err := r.db.ExecContext(ctx, `
 		INSERT INTO sessions (id, status, created_at, updated_at, working_dir, goal_hint)
-		VALUES (?, 'created', ?, ?, ?, ?)
-	`, id, now, now, in.WorkingDir, in.GoalHint)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, id, statusCreated, now, now, in.WorkingDir, in.GoalHint)
 	if err != nil {
-		return Session{}, err
+		return Session{}, fmt.Errorf("session.Create: %w", err)
 	}
 	return Session{
 		ID:         id,
-		Status:     "created",
+		Status:     statusCreated,
 		CreatedAt:  now,
 		UpdatedAt:  now,
 		WorkingDir: in.WorkingDir,
@@ -80,7 +83,7 @@ func (r *Repo) Get(ctx context.Context, id string) (Session, error) {
 		return Session{}, ErrNotFound
 	}
 	if err != nil {
-		return Session{}, err
+		return Session{}, fmt.Errorf("session.Get: %w", err)
 	}
 	return s, nil
 }
@@ -103,7 +106,7 @@ func (r *Repo) List(ctx context.Context, opts ListOptions) ([]Session, error) {
 
 	rows, err := r.db.QueryContext(ctx, q, args...)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("session.List query: %w", err)
 	}
 	defer rows.Close()
 
@@ -111,7 +114,7 @@ func (r *Repo) List(ctx context.Context, opts ListOptions) ([]Session, error) {
 	for rows.Next() {
 		var s Session
 		if err := rows.Scan(&s.ID, &s.Status, &s.CreatedAt, &s.UpdatedAt, &s.SpecID, &s.WorkingDir, &s.GoalHint, &s.TotalTokens, &s.TotalCostUSD); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("session.List scan: %w", err)
 		}
 		out = append(out, s)
 	}
