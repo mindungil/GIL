@@ -37,5 +37,6 @@ func Root() *cobra.Command {
 	root.AddCommand(runCmd())
 	root.AddCommand(eventsCmd())
 	root.AddCommand(restoreCmd())
+	root.AddCommand(newCompletionCmd(root))
 	return root
 }
