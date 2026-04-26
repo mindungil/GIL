@@ -6,6 +6,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func gitAvailable() bool {
@@ -199,6 +201,37 @@ func TestShadowGit_Restore_DeletedFile(t *testing.T) {
 	if _, err := os.Stat(bPath); err != nil {
 		t.Errorf("b.txt should exist after restore, got: %v", err)
 	}
+}
+
+func TestShadowGit_Reset_HardResetsHead(t *testing.T) {
+	if !gitAvailable() {
+		t.Skip("git not in PATH")
+	}
+	workspace := t.TempDir()
+	sg := New(workspace, t.TempDir())
+	require.NoError(t, sg.Init(context.Background()))
+
+	require.NoError(t, os.WriteFile(filepath.Join(workspace, "f.txt"), []byte("v1"), 0o644))
+	sha1, err := sg.Commit(context.Background(), "first")
+	require.NoError(t, err)
+
+	require.NoError(t, os.WriteFile(filepath.Join(workspace, "f.txt"), []byte("v2"), 0o644))
+	_, err = sg.Commit(context.Background(), "second")
+	require.NoError(t, err)
+
+	// Reset to v1
+	require.NoError(t, sg.Reset(context.Background(), sha1))
+
+	// Working tree reverted
+	data, err := os.ReadFile(filepath.Join(workspace, "f.txt"))
+	require.NoError(t, err)
+	require.Equal(t, "v1", string(data))
+
+	// HEAD is now sha1 (unlike Restore which leaves HEAD untouched)
+	commits, err := sg.ListCommits(context.Background())
+	require.NoError(t, err)
+	require.Len(t, commits, 1, "after --hard reset, history is just the v1 commit")
+	require.Equal(t, sha1, commits[0].SHA)
 }
 
 func TestShadowGit_New_HashIsDeterministic(t *testing.T) {

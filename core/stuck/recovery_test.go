@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jedutools/gil/core/checkpoint"
 	"github.com/stretchr/testify/require"
 )
 
@@ -190,7 +191,6 @@ func TestStubs_ReturnErrNoFallback(t *testing.T) {
 
 	stubs := []Strategy{
 		SubagentBranchStrategy{},
-		ResetSectionStrategy{},
 		AdversaryConsultStrategy{},
 	}
 
@@ -202,4 +202,131 @@ func TestStubs_ReturnErrNoFallback(t *testing.T) {
 			}
 		})
 	}
+}
+
+// --------------------------------------------------------------------------
+// ResetSectionStrategy tests
+// --------------------------------------------------------------------------
+
+type fakeCheckpointReader struct {
+	commits []checkpoint.CommitInfo
+	err     error
+}
+
+func (f *fakeCheckpointReader) ListCommits(ctx context.Context) ([]checkpoint.CommitInfo, error) {
+	return f.commits, f.err
+}
+
+func TestResetSectionStrategy_RollsBackToSecondNewest(t *testing.T) {
+	cr := &fakeCheckpointReader{commits: []checkpoint.CommitInfo{
+		{SHA: "newest_sha_____aaaa", Message: "iter 5"},
+		{SHA: "second_sha_____bbbb", Message: "iter 4"},
+		{SHA: "older_sha______cccc", Message: "iter 3"},
+	}}
+	s := ResetSectionStrategy{}
+	dec, err := s.Apply(context.Background(), ApplyRequest{
+		Signal:     Signal{Pattern: PatternRepeatedActionError, Count: 3},
+		Checkpoint: cr,
+	})
+	require.NoError(t, err)
+	require.Equal(t, ActionResetSection, dec.Action)
+	require.Equal(t, "second_sha_____bbbb", dec.RestoreSHA)
+	require.Contains(t, dec.Explanation, "iter 4")
+}
+
+func TestResetSectionStrategy_RepeatedActionObservation_Works(t *testing.T) {
+	cr := &fakeCheckpointReader{commits: []checkpoint.CommitInfo{
+		{SHA: "sha_a", Message: "latest"},
+		{SHA: "sha_b", Message: "prior"},
+	}}
+	s := ResetSectionStrategy{}
+	dec, err := s.Apply(context.Background(), ApplyRequest{
+		Signal:     Signal{Pattern: PatternRepeatedActionObservation, Count: 4},
+		Checkpoint: cr,
+	})
+	require.NoError(t, err)
+	require.Equal(t, ActionResetSection, dec.Action)
+	require.Equal(t, "sha_b", dec.RestoreSHA)
+}
+
+func TestResetSectionStrategy_NoCheckpoint_ReturnsErrNoFallback(t *testing.T) {
+	s := ResetSectionStrategy{}
+	_, err := s.Apply(context.Background(), ApplyRequest{
+		Signal: Signal{Pattern: PatternRepeatedActionError},
+	})
+	require.ErrorIs(t, err, ErrNoFallback)
+}
+
+func TestResetSectionStrategy_LessThanTwoCommits_ReturnsErrNoFallback(t *testing.T) {
+	cr := &fakeCheckpointReader{commits: []checkpoint.CommitInfo{
+		{SHA: "only_one", Message: "iter 1"},
+	}}
+	s := ResetSectionStrategy{}
+	_, err := s.Apply(context.Background(), ApplyRequest{
+		Signal:     Signal{Pattern: PatternRepeatedActionError},
+		Checkpoint: cr,
+	})
+	require.ErrorIs(t, err, ErrNoFallback)
+}
+
+func TestResetSectionStrategy_ZeroCommits_ReturnsErrNoFallback(t *testing.T) {
+	cr := &fakeCheckpointReader{commits: []checkpoint.CommitInfo{}}
+	s := ResetSectionStrategy{}
+	_, err := s.Apply(context.Background(), ApplyRequest{
+		Signal:     Signal{Pattern: PatternRepeatedActionError},
+		Checkpoint: cr,
+	})
+	require.ErrorIs(t, err, ErrNoFallback)
+}
+
+func TestResetSectionStrategy_WrongPattern_ReturnsErrNoFallback(t *testing.T) {
+	cr := &fakeCheckpointReader{commits: []checkpoint.CommitInfo{
+		{SHA: "a"}, {SHA: "b"},
+	}}
+	s := ResetSectionStrategy{}
+	_, err := s.Apply(context.Background(), ApplyRequest{
+		Signal:     Signal{Pattern: PatternMonologue},
+		Checkpoint: cr,
+	})
+	require.ErrorIs(t, err, ErrNoFallback)
+}
+
+func TestResetSectionStrategy_PingPong_ReturnsErrNoFallback(t *testing.T) {
+	cr := &fakeCheckpointReader{commits: []checkpoint.CommitInfo{
+		{SHA: "a"}, {SHA: "b"},
+	}}
+	s := ResetSectionStrategy{}
+	_, err := s.Apply(context.Background(), ApplyRequest{
+		Signal:     Signal{Pattern: PatternPingPong},
+		Checkpoint: cr,
+	})
+	require.ErrorIs(t, err, ErrNoFallback)
+}
+
+func TestResetSectionStrategy_ExplanationContainsShortSHAAndPattern(t *testing.T) {
+	longSHA := "abcdef1234567890abcdef1234567890abcdef12"
+	cr := &fakeCheckpointReader{commits: []checkpoint.CommitInfo{
+		{SHA: "newer", Message: "iter 2"},
+		{SHA: longSHA, Message: "iter 1"},
+	}}
+	s := ResetSectionStrategy{}
+	dec, err := s.Apply(context.Background(), ApplyRequest{
+		Signal:     Signal{Pattern: PatternRepeatedActionError},
+		Checkpoint: cr,
+	})
+	require.NoError(t, err)
+	require.Contains(t, dec.Explanation, longSHA[:12])
+	require.Contains(t, dec.Explanation, "RepeatedActionError")
+	require.Contains(t, dec.Explanation, "iter 1")
+}
+
+func TestResetSectionStrategy_ListCommitsError_ReturnsError(t *testing.T) {
+	cr := &fakeCheckpointReader{err: errors.New("git offline")}
+	s := ResetSectionStrategy{}
+	_, err := s.Apply(context.Background(), ApplyRequest{
+		Signal:     Signal{Pattern: PatternRepeatedActionError},
+		Checkpoint: cr,
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "git offline")
 }

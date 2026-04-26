@@ -105,6 +105,19 @@ func (s *ShadowGit) Restore(ctx context.Context, commitSHA string) error {
 	return err
 }
 
+// Reset HARD-resets HEAD and the working tree to commitSHA — equivalent to
+// `git reset --hard <sha>`. Use Reset for stuck-recovery rollbacks where the
+// agent needs a clean slate at the target commit; use Restore for less
+// destructive rollbacks (e.g., manual `gil restore`) where untracked
+// workspace files should be preserved.
+//
+// Lifted from Cline's resetHead (cline/src/integrations/checkpoints/
+// CheckpointTracker.ts:364).
+func (s *ShadowGit) Reset(ctx context.Context, commitSHA string) error {
+	_, err := s.gitCmd(ctx, "reset", "--hard", commitSHA)
+	return err
+}
+
 // CommitInfo describes one snapshot.
 type CommitInfo struct {
 	SHA       string

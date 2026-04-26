@@ -218,6 +218,7 @@ func (a *AgentLoop) Run(ctx context.Context) (*Result, error) {
 							CurrentModel: a.Model,
 							ModelChain:   a.ModelChain,
 							Iteration:    iter,
+							Checkpoint:   a.Checkpoint,
 						})
 						if err == nil && dec.Action == stuck.ActionSwitchModel {
 							a.emit(event.SourceSystem, event.KindNote, "stuck_recovered", map[string]any{
@@ -236,6 +237,27 @@ func (a *AgentLoop) Run(ctx context.Context) (*Result, error) {
 							})
 							a.extraSystemNote = dec.Explanation
 							recovered = true
+						}
+						if err == nil && dec.Action == stuck.ActionResetSection && a.Checkpoint != nil {
+							rerr := a.Checkpoint.Reset(ctx, dec.RestoreSHA)
+							if rerr != nil {
+								a.emit(event.SourceSystem, event.KindNote, "stuck_reset_failed", map[string]any{
+									"strategy": a.StuckStrategy.Name(),
+									"sha":      dec.RestoreSHA,
+									"err":      rerr.Error(),
+								})
+								// not recovered — fall through; let unrecovered counter increment normally
+							} else {
+								a.emit(event.SourceSystem, event.KindNote, "stuck_reset_section", map[string]any{
+									"strategy":    a.StuckStrategy.Name(),
+									"sha":         dec.RestoreSHA,
+									"explanation": dec.Explanation,
+								})
+								// After hard reset, also clear the recent buffer so the same patterns
+								// don't fire again immediately on the next iteration.
+								a.recent = nil
+								recovered = true
+							}
 						}
 					}
 					if !recovered {

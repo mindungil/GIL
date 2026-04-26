@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+
+	"github.com/jedutools/gil/core/checkpoint"
 )
 
 // Strategy is one tactic for recovering from a detected stuck Signal.
@@ -17,12 +19,19 @@ type Strategy interface {
 	Apply(ctx context.Context, req ApplyRequest) (Decision, error)
 }
 
+// CheckpointReader is the subset of *checkpoint.ShadowGit that strategies
+// need. *checkpoint.ShadowGit satisfies it naturally.
+type CheckpointReader interface {
+	ListCommits(ctx context.Context) ([]checkpoint.CommitInfo, error)
+}
+
 // ApplyRequest carries the minimum read-only context a strategy needs.
 type ApplyRequest struct {
 	Signal       Signal
-	CurrentModel string   // model id currently being used
-	ModelChain   []string // ordered fallback chain (may be empty)
-	Iteration    int      // current iteration count
+	CurrentModel string          // model id currently being used
+	ModelChain   []string        // ordered fallback chain (may be empty)
+	Iteration    int             // current iteration count
+	Checkpoint   CheckpointReader // nil-safe; nil → strategy returns ErrNoFallback
 }
 
 // Action enumerates the operations AgentLoop knows how to perform.
@@ -63,6 +72,7 @@ type Decision struct {
 	Action      Action
 	NewModel    string // valid when Action == ActionSwitchModel
 	Explanation string // human-readable reason; emitted as event detail
+	RestoreSHA  string // valid when Action == ActionResetSection
 }
 
 // ErrNoFallback indicates ModelEscalateStrategy has exhausted its chain.
@@ -157,13 +167,50 @@ func (SubagentBranchStrategy) Apply(ctx context.Context, req ApplyRequest) (Deci
 	return Decision{}, ErrNoFallback // Phase 6
 }
 
-// ResetSectionStrategy will restore to last shadow git commit and retry.
-// Phase 6: requires checkpoint integration.
+// ResetSectionStrategy rolls the workspace back to the second-newest
+// shadow-git checkpoint, giving the agent a clean slate at the last known
+// good state. Inspired by Cline's resetHead (CheckpointTracker.ts:336)
+// which performs git reset --hard to a target commit.
+//
+// Applies only to action-level repetition patterns (where rolling back
+// undoes the doomed work). Returns ErrNoFallback if Checkpoint is nil
+// (no shadow git in this run) or fewer than 2 commits exist (nothing to
+// roll back to).
 type ResetSectionStrategy struct{}
 
 func (ResetSectionStrategy) Name() string { return "reset_section" }
-func (ResetSectionStrategy) Apply(ctx context.Context, req ApplyRequest) (Decision, error) {
-	return Decision{}, ErrNoFallback // Phase 6
+
+func (s ResetSectionStrategy) Apply(ctx context.Context, req ApplyRequest) (Decision, error) {
+	switch req.Signal.Pattern {
+	case PatternRepeatedActionObservation, PatternRepeatedActionError:
+		// ok — these are the patterns that benefit from "undo last step + retry"
+	default:
+		return Decision{}, ErrNoFallback
+	}
+	if req.Checkpoint == nil {
+		return Decision{}, ErrNoFallback
+	}
+	commits, err := req.Checkpoint.ListCommits(ctx)
+	if err != nil {
+		return Decision{}, fmt.Errorf("reset_section: list commits: %w", err)
+	}
+	if len(commits) < 2 {
+		return Decision{}, ErrNoFallback // need at least 2 commits to roll back to one
+	}
+	// commits is newest-first; commits[1] is the second-newest = target
+	target := commits[1]
+	return Decision{
+		Action:      ActionResetSection,
+		RestoreSHA:  target.SHA,
+		Explanation: fmt.Sprintf("rolled back to checkpoint %s (%q) due to %s", short(target.SHA), target.Message, req.Signal.Pattern.String()),
+	}, nil
+}
+
+func short(sha string) string {
+	if len(sha) > 12 {
+		return sha[:12]
+	}
+	return sha
 }
 
 // AdversaryConsultStrategy will invoke the adversary on the stuck context.

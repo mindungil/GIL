@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -1256,6 +1257,118 @@ func TestAgentLoop_AltToolOrder_NoteIsSingleShot(t *testing.T) {
 	require.Greater(t, urgentCount, 0, "expected at least one injection of URGENT NOTE")
 	// And must be strictly less than all requests (it's single-shot, so most won't have it).
 	require.Less(t, urgentCount, len(reqs), "URGENT NOTE should be single-shot, not in every request")
+}
+
+// TestAgentLoop_ResetSection_RollsBackAndContinues verifies that
+// ResetSectionStrategy triggers a hard reset and emits a stuck_reset_section
+// event with a non-empty sha.
+func TestAgentLoop_ResetSection_RollsBackAndContinues(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not in PATH")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	workDir := t.TempDir()
+	baseDir := t.TempDir()
+
+	// Seed the workspace with initial content and make an initial checkpoint commit.
+	sg := checkpoint.New(workDir, baseDir)
+	require.NoError(t, sg.Init(ctx))
+	require.NoError(t, os.WriteFile(filepath.Join(workDir, "seed.txt"), []byte("seed"), 0o644))
+	_, err := sg.Commit(ctx, "seed commit")
+	require.NoError(t, err)
+
+	// Provider always makes the same write_file call → triggers PatternRepeatedActionObservation.
+	mock := &loopProvider{turn: provider.MockTurn{
+		Text: "writing file",
+		ToolCalls: []provider.ToolCall{{
+			ID:   "c1",
+			Name: "write_file",
+			Input: json.RawMessage(`{"path":"stuck.txt","content":"stuck"}`),
+		}},
+		StopReason: "tool_use",
+	}}
+
+	spec := &gilv1.FrozenSpec{
+		Goal: &gilv1.Goal{OneLiner: "loop forever"},
+		Verification: &gilv1.Verification{
+			Checks: []*gilv1.Check{{Name: "never", Kind: gilv1.CheckKind_SHELL, Command: "false", ExpectedExitCode: 0}},
+		},
+		Budget: &gilv1.Budget{MaxIterations: 50},
+	}
+
+	tools := []tool.Tool{&tool.WriteFile{WorkingDir: workDir}}
+
+	stream := event.NewStream()
+	sub := stream.Subscribe(512)
+	defer sub.Close()
+
+	loop := &AgentLoop{
+		Spec:           spec,
+		Provider:       mock,
+		Model:          "m1",
+		Tools:          tools,
+		Verifier:       verify.NewRunner(workDir),
+		Events:         stream,
+		Checkpoint:     sg,
+		StuckDetector:  &stuck.Detector{Window: 50},
+		StuckStrategy:  stuck.ResetSectionStrategy{},
+		StuckThreshold: 5,
+	}
+
+	var mu sync.Mutex
+	var collected []event.Event
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case e, ok := <-sub.Events():
+				if !ok {
+					return
+				}
+				mu.Lock()
+				collected = append(collected, e)
+				mu.Unlock()
+				if e.Type == "stuck_unrecovered" || e.Type == "run_done" || e.Type == "run_max_iterations" {
+					return
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	res, err := loop.Run(ctx)
+	require.NoError(t, err)
+	// The loop should abort due to stuck (ResetSection fires but loop keeps
+	// looping, eventually hitting threshold after resets are exhausted).
+	require.Contains(t, []string{"stuck", "max_iterations"}, res.Status)
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+	}
+
+	mu.Lock()
+	evs := collected
+	mu.Unlock()
+
+	// Must have at least one stuck_reset_section event with non-empty sha.
+	var resetCount int
+	for _, e := range evs {
+		if e.Type != "stuck_reset_section" {
+			continue
+		}
+		var d map[string]any
+		require.NoError(t, json.Unmarshal(e.Data, &d))
+		sha, _ := d["sha"].(string)
+		require.NotEmpty(t, sha, "stuck_reset_section event missing sha: %s", string(e.Data))
+		resetCount++
+	}
+	require.Greater(t, resetCount, 0, "expected at least one stuck_reset_section event")
 }
 
 func TestAgentLoop_MilestoneGate_NonMemoryToolsIgnored(t *testing.T) {
