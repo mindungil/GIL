@@ -30,5 +30,6 @@ func Root() *cobra.Command {
 	}
 	root.AddCommand(daemonCmd())
 	root.AddCommand(newCmd())
+	root.AddCommand(statusCmd())
 	return root
 }

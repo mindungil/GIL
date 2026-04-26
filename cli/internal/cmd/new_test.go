@@ -3,9 +3,11 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -46,17 +48,30 @@ func startGildForTest(t *testing.T) (sock string, cleanup func()) {
 }
 
 // testSessionServer is a minimal in-test stub of SessionService.
+// It maintains state across Create and List calls.
 type testSessionServer struct {
 	gilv1.UnimplementedSessionServiceServer
+	mu       sync.Mutex
+	sessions []*gilv1.Session
 }
 
 func (s *testSessionServer) Create(ctx context.Context, req *gilv1.CreateRequest) (*gilv1.Session, error) {
-	return &gilv1.Session{
-		Id:         "01TESTSESSIONIDXXXXXXXXXX1", // 26-char ULID-like for length check
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess := &gilv1.Session{
+		Id:         fmt.Sprintf("01TESTSESSIONIDXXXXXXXXX%02d", len(s.sessions)+1),
 		Status:     gilv1.SessionStatus_CREATED,
 		WorkingDir: req.WorkingDir,
 		GoalHint:   req.GoalHint,
-	}, nil
+	}
+	s.sessions = append(s.sessions, sess)
+	return sess, nil
+}
+
+func (s *testSessionServer) List(ctx context.Context, req *gilv1.ListRequest) (*gilv1.ListResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return &gilv1.ListResponse{Sessions: append([]*gilv1.Session(nil), s.sessions...)}, nil
 }
 
 func TestNew_OutputsSessionID(t *testing.T) {
