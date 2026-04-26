@@ -43,16 +43,21 @@ type Message struct {
 	Content     string
 	ToolCalls   []ToolCall   // if this assistant message contained tool_use blocks
 	ToolResults []ToolResult // if this user message is feeding back tool_use results
+	// CacheControl, when true, signals the provider adapter to attach an
+	// Anthropic ephemeral cache_control marker to this message's last
+	// content block. Used by core/compact.MarkCacheBreakpoints.
+	CacheControl bool
 }
 
 // Request contains everything needed for an LLM completion.
 type Request struct {
-	Model       string
-	Messages    []Message
-	System      string
-	MaxTokens   int
-	Temperature float64
-	Tools       []ToolDef // tool defs sent to LLM
+	Model              string
+	Messages           []Message
+	System             string
+	SystemCacheControl bool    // when true, attach ephemeral cache_control to the system block
+	MaxTokens          int
+	Temperature        float64
+	Tools              []ToolDef // tool defs sent to LLM
 }
 
 // Response carries the LLM output and usage metrics.

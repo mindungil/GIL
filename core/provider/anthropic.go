@@ -45,9 +45,16 @@ func (a *Anthropic) Complete(ctx context.Context, req Request) (Response, error)
 				for _, tr := range m.ToolResults {
 					blocks = append(blocks, anthropic.NewToolResultBlock(tr.ToolUseID, tr.Content, tr.IsError))
 				}
+				if m.CacheControl {
+					blocks[len(blocks)-1] = withCacheControl(blocks[len(blocks)-1])
+				}
 				msgs = append(msgs, anthropic.NewUserMessage(blocks...))
 			} else if m.Content != "" {
-				msgs = append(msgs, anthropic.NewUserMessage(anthropic.NewTextBlock(m.Content)))
+				block := anthropic.NewTextBlock(m.Content)
+				if m.CacheControl {
+					block = withCacheControl(block)
+				}
+				msgs = append(msgs, anthropic.NewUserMessage(block))
 			} else {
 				// Empty user message with no content or tool results; skip
 				continue
@@ -69,9 +76,16 @@ func (a *Anthropic) Complete(ctx context.Context, req Request) (Response, error)
 					}
 					blocks = append(blocks, anthropic.NewToolUseBlock(tc.ID, inputObj, tc.Name))
 				}
+				if m.CacheControl {
+					blocks[len(blocks)-1] = withCacheControl(blocks[len(blocks)-1])
+				}
 				msgs = append(msgs, anthropic.NewAssistantMessage(blocks...))
 			} else if m.Content != "" {
-				msgs = append(msgs, anthropic.NewAssistantMessage(anthropic.NewTextBlock(m.Content)))
+				block := anthropic.NewTextBlock(m.Content)
+				if m.CacheControl {
+					block = withCacheControl(block)
+				}
+				msgs = append(msgs, anthropic.NewAssistantMessage(block))
 			}
 		}
 		// system is handled separately below
@@ -88,7 +102,11 @@ func (a *Anthropic) Complete(ctx context.Context, req Request) (Response, error)
 		Messages:  msgs,
 	}
 	if req.System != "" {
-		params.System = []anthropic.TextBlockParam{{Text: req.System}}
+		sb := anthropic.TextBlockParam{Text: req.System}
+		if req.SystemCacheControl {
+			sb.CacheControl = anthropic.NewCacheControlEphemeralParam()
+		}
+		params.System = []anthropic.TextBlockParam{sb}
 	}
 	if req.Temperature > 0 {
 		params.Temperature = anthropic.Float(req.Temperature)
@@ -149,4 +167,21 @@ func (a *Anthropic) Complete(ctx context.Context, req Request) (Response, error)
 		ToolCalls:    toolCalls,
 		StopReason:   string(msg.StopReason),
 	}, nil
+}
+
+// withCacheControl returns the content block with an ephemeral cache_control
+// marker attached. It handles the known variants that support CacheControl.
+func withCacheControl(block anthropic.ContentBlockParamUnion) anthropic.ContentBlockParamUnion {
+	cc := anthropic.NewCacheControlEphemeralParam()
+	switch {
+	case block.OfText != nil:
+		block.OfText.CacheControl = cc
+	case block.OfToolUse != nil:
+		block.OfToolUse.CacheControl = cc
+	case block.OfToolResult != nil:
+		block.OfToolResult.CacheControl = cc
+	case block.OfImage != nil:
+		block.OfImage.CacheControl = cc
+	}
+	return block
 }
