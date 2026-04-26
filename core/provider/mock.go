@@ -40,3 +40,44 @@ func (m *Mock) Complete(ctx context.Context, req Request) (Response, error) {
 		StopReason:   "end_turn",
 	}, nil
 }
+
+// MockTurn is one scripted response that may include tool calls.
+type MockTurn struct {
+	Text       string
+	ToolCalls  []ToolCall
+	StopReason string
+}
+
+// MockToolProvider returns scripted MockTurns, one per Complete call.
+// Useful for testing AgentLoop behavior with deterministic tool call sequences.
+type MockToolProvider struct {
+	mu    sync.Mutex
+	turns []MockTurn
+	idx   int
+}
+
+// NewMockToolProvider returns a MockToolProvider pre-loaded with the given turns.
+func NewMockToolProvider(turns []MockTurn) *MockToolProvider {
+	return &MockToolProvider{turns: turns}
+}
+
+// Name implements Provider.
+func (m *MockToolProvider) Name() string { return "mock-tool" }
+
+// Complete returns the next scripted turn.
+func (m *MockToolProvider) Complete(ctx context.Context, req Request) (Response, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.idx >= len(m.turns) {
+		return Response{}, errors.New("mock-tool provider turns exhausted")
+	}
+	turn := m.turns[m.idx]
+	m.idx++
+	return Response{
+		Text:         turn.Text,
+		ToolCalls:    turn.ToolCalls,
+		StopReason:   turn.StopReason,
+		InputTokens:  int64(len(req.Messages) * 10),
+		OutputTokens: int64(len(turn.Text)),
+	}, nil
+}
