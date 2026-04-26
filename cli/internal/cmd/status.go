@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
@@ -25,6 +26,10 @@ func statusCmd() *cobra.Command {
 			ctx := cmd.Context()
 			if ctx == nil {
 				ctx = context.Background()
+			}
+			base := filepath.Dir(socket)
+			if err := ensureDaemon(socket, base); err != nil {
+				return fmt.Errorf("ensure daemon: %w", err)
 			}
 			cli, err := sdk.Dial(socket)
 			if err != nil {
