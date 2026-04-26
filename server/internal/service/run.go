@@ -20,8 +20,15 @@ import (
 	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
 )
 
+// runProgressSnap holds live iteration/token counters for an active run.
+type runProgressSnap struct {
+	iters  int32
+	tokens int64
+}
+
 // RunService handles RunService gRPC. Loads frozen spec, builds tools/verifier,
-// runs AgentLoop synchronously. Tail is a Phase 5 stub.
+// runs AgentLoop synchronously or in background (detach mode). Tail subscribes
+// to the live event stream.
 type RunService struct {
 	gilv1.UnimplementedRunServiceServer
 
@@ -29,8 +36,9 @@ type RunService struct {
 	sessionsBase    string
 	providerFactory ProviderFactory
 
-	mu         sync.Mutex
-	runStreams map[string]*event.Stream  // per-session live event streams
+	mu          sync.Mutex
+	runStreams  map[string]*event.Stream    // per-session live event streams
+	runProgress map[string]*runProgressSnap // per-session live progress counters
 }
 
 // NewRunService constructs the service.
@@ -40,14 +48,29 @@ func NewRunService(repo *session.Repo, sessionsBase string, factory ProviderFact
 		sessionsBase:    sessionsBase,
 		providerFactory: factory,
 		runStreams:      make(map[string]*event.Stream),
+		runProgress:     make(map[string]*runProgressSnap),
 	}
+}
+
+// Progress returns a live snapshot of iteration and token counts for the given
+// session. Returns ok=false when no run is active for that session.
+func (s *RunService) Progress(sessionID string) (iters int32, tokens int64, ok bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p, ok := s.runProgress[sessionID]
+	if !ok {
+		return 0, 0, false
+	}
+	return p.iters, p.tokens, true
 }
 
 func (s *RunService) sessionDir(sessionID string) string {
 	return filepath.Join(s.sessionsBase, sessionID)
 }
 
-// Start runs the agent loop synchronously and returns the result.
+// Start runs the agent loop and returns the result. When req.Detach is true,
+// the loop runs in a goroutine and the method returns immediately with
+// Status="started".
 func (s *RunService) Start(ctx context.Context, req *gilv1.StartRunRequest) (*gilv1.StartRunResponse, error) {
 	sess, err := s.repo.Get(ctx, req.SessionId)
 	if err != nil {
@@ -87,12 +110,35 @@ func (s *RunService) Start(ctx context.Context, req *gilv1.StartRunRequest) (*gi
 	}
 	ver := verify.NewRunner(workspaceDir)
 
+	// Mark running BEFORE spawning goroutine so the client sees consistent state.
 	if err := s.repo.UpdateStatus(ctx, req.SessionId, "running"); err != nil {
 		return nil, status.Errorf(codes.Internal, "update status: %v", err)
 	}
 
-	// Create per-session event stream + persister
-	eventDir := filepath.Join(s.sessionDir(req.SessionId), "events")
+	if req.Detach {
+		go func() {
+			// Use a background context: the gRPC ctx cancels when Start returns.
+			bgCtx := context.Background()
+			_, _ = s.executeRun(bgCtx, req.SessionId, spec, prov, model, tools, ver)
+		}()
+		return &gilv1.StartRunResponse{Status: "started"}, nil
+	}
+	return s.executeRun(ctx, req.SessionId, spec, prov, model, tools, ver)
+}
+
+// executeRun performs the actual agent loop execution and cleanup. It is called
+// either directly (synchronous path) or from a detached goroutine.
+func (s *RunService) executeRun(
+	ctx context.Context,
+	sessionID string,
+	spec *gilv1.FrozenSpec,
+	prov provider.Provider,
+	model string,
+	tools []tool.Tool,
+	ver *verify.Runner,
+) (*gilv1.StartRunResponse, error) {
+	// Create per-session event stream + persister.
+	eventDir := filepath.Join(s.sessionDir(sessionID), "events")
 	persister, err := event.NewPersister(eventDir)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "create persister: %v", err)
@@ -101,19 +147,21 @@ func (s *RunService) Start(ctx context.Context, req *gilv1.StartRunRequest) (*gi
 
 	stream := event.NewStream()
 
-	// Register stream so Tail can subscribe
+	// Register stream and progress snap under the lock.
 	s.mu.Lock()
-	s.runStreams[req.SessionId] = stream
+	s.runStreams[sessionID] = stream
+	s.runProgress[sessionID] = &runProgressSnap{}
 	s.mu.Unlock()
 
-	// Cleanup on exit
+	// Cleanup on exit: remove both stream and progress entry.
 	defer func() {
 		s.mu.Lock()
-		delete(s.runStreams, req.SessionId)
+		delete(s.runStreams, sessionID)
+		delete(s.runProgress, sessionID)
 		s.mu.Unlock()
 	}()
 
-	// Persistence subscriber: write every event to disk
+	// Persistence subscriber: write every event to disk.
 	persistSub := stream.Subscribe(256)
 	persistDone := make(chan struct{})
 	go func() {
@@ -123,21 +171,44 @@ func (s *RunService) Start(ctx context.Context, req *gilv1.StartRunRequest) (*gi
 		}
 	}()
 
+	// Progress subscriber: track iterations and accumulated tokens.
+	progSub := stream.Subscribe(256)
+	progDone := make(chan struct{})
+	go func() {
+		defer close(progDone)
+		for evt := range progSub.Events() {
+			s.mu.Lock()
+			snap := s.runProgress[sessionID]
+			if snap != nil {
+				if evt.Type == "iteration_start" {
+					snap.iters++
+				}
+				if evt.Metrics.Tokens > 0 {
+					snap.tokens += evt.Metrics.Tokens
+				}
+			}
+			s.mu.Unlock()
+		}
+	}()
+
 	loop := runner.NewAgentLoop(spec, prov, model, tools, ver)
 	loop.Events = stream
 
 	res, runErr := loop.Run(ctx)
 
-	// Allow persister sub to drain
+	// Drain both subscribers before syncing to disk (order-independent).
 	persistSub.Close()
 	<-persistDone
+	progSub.Close()
+	<-progDone
+
 	_ = persister.Sync()
 
 	finalStatus := "stopped"
 	if res != nil && res.Status == "done" {
 		finalStatus = "done"
 	}
-	_ = s.repo.UpdateStatus(ctx, req.SessionId, finalStatus)
+	_ = s.repo.UpdateStatus(ctx, sessionID, finalStatus)
 
 	if runErr != nil && res == nil {
 		return nil, status.Errorf(codes.Internal, "run: %v", runErr)

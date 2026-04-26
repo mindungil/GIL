@@ -39,9 +39,18 @@ func statusCmd() *cobra.Command {
 				return fmt.Errorf("list: %w", err)
 			}
 			tw := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
-			fmt.Fprintln(tw, "ID\tSTATUS\tWORKING_DIR\tGOAL")
+			fmt.Fprintln(tw, "ID\tSTATUS\tITER\tTOKENS\tWORKING_DIR\tGOAL")
 			for _, s := range list {
-				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", s.ID, s.Status, s.WorkingDir, s.GoalHint)
+				iter := "-"
+				tokens := "-"
+				if s.CurrentIteration != 0 {
+					iter = fmt.Sprintf("%d", s.CurrentIteration)
+				}
+				if s.CurrentTokens != 0 {
+					tokens = fmt.Sprintf("%d", s.CurrentTokens)
+				}
+				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
+					s.ID, s.Status, iter, tokens, s.WorkingDir, s.GoalHint)
 			}
 			return tw.Flush()
 		},

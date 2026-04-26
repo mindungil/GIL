@@ -16,6 +16,10 @@ message Session {
   string goal_hint = 7;
   int64 total_tokens = 8;
   double total_cost_usd = 9;
+  // Live snapshot for RUNNING sessions; zero otherwise. Populated by server
+  // from in-process run progress; not persisted across restarts.
+  int32 current_iteration = 10;
+  int64 current_tokens = 11;
 }
 
 enum SessionStatus {

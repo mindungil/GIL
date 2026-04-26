@@ -53,10 +53,12 @@ type CreateOptions struct {
 
 // Session represents a Gil session.
 type Session struct {
-	ID         string
-	Status     string
-	WorkingDir string
-	GoalHint   string
+	ID               string
+	Status           string
+	WorkingDir       string
+	GoalHint         string
+	CurrentIteration int32
+	CurrentTokens    int64
 }
 
 // CreateSession creates a new session with the given options.
@@ -100,10 +102,12 @@ func fromProto(s *gilv1.Session) *Session {
 		return nil
 	}
 	return &Session{
-		ID:         s.Id,
-		Status:     s.Status.String(),
-		WorkingDir: s.WorkingDir,
-		GoalHint:   s.GoalHint,
+		ID:               s.Id,
+		Status:           s.Status.String(),
+		WorkingDir:       s.WorkingDir,
+		GoalHint:         s.GoalHint,
+		CurrentIteration: s.CurrentIteration,
+		CurrentTokens:    s.CurrentTokens,
 	}
 }
 
@@ -146,13 +150,15 @@ func (c *Client) GetSpec(ctx context.Context, sessionID string) (*gilv1.FrozenSp
 	return c.interviews.GetSpec(ctx, &gilv1.GetSpecRequest{SessionId: sessionID})
 }
 
-// StartRun executes the agent loop synchronously and returns the result.
-// providerName: "anthropic" | "mock" | "" (server default).
-func (c *Client) StartRun(ctx context.Context, sessionID, providerName, model string) (*gilv1.StartRunResponse, error) {
+// StartRun executes the agent loop. When detach=false (default), blocks until
+// completion and returns the final result. When detach=true, returns immediately
+// with Status="started"; observe progress via TailRun or GetSession.
+func (c *Client) StartRun(ctx context.Context, sessionID, providerName, model string, detach bool) (*gilv1.StartRunResponse, error) {
 	return c.runs.Start(ctx, &gilv1.StartRunRequest{
 		SessionId: sessionID,
 		Provider:  providerName,
 		Model:     model,
+		Detach:    detach,
 	})
 }
 

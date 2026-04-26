@@ -94,9 +94,10 @@ func newServer(dbPath, sockPath, sessionsBase string) (*server, error) {
 
 	g := grpc.NewServer()
 	repo := session.NewRepo(db)
-	gilv1.RegisterSessionServiceServer(g, service.NewSessionService(repo))
+	runSvc := service.NewRunService(repo, sessionsBase, factory)
+	gilv1.RegisterSessionServiceServer(g, service.NewSessionService(repo, runSvc))
 	gilv1.RegisterInterviewServiceServer(g, service.NewInterviewService(repo, sessionsBase, factory))
-	gilv1.RegisterRunServiceServer(g, service.NewRunService(repo, sessionsBase, factory))
+	gilv1.RegisterRunServiceServer(g, runSvc)
 
 	return &server{grpc: g, lis: lis, db: db}, nil
 }

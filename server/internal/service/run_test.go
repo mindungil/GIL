@@ -10,6 +10,7 @@ import (
 	"time"
 
 	_ "modernc.org/sqlite"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -258,4 +259,38 @@ func TestRunService_Tail_NotFoundForInactive(t *testing.T) {
 	_, err = tail.Recv()
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "no active run")
+}
+
+func TestRunService_Start_Detach_ReturnsStarted(t *testing.T) {
+	workDir := t.TempDir()
+
+	// Multi-iteration turns so progress tracking has time to record something.
+	mockTurns := []provider.MockTurn{
+		{Text: "Creating", ToolCalls: []provider.ToolCall{
+			{ID: "c1", Name: "write_file", Input: json.RawMessage(`{"path":"hello.txt","content":"hello"}`)},
+		}, StopReason: "tool_use"},
+		{Text: "Done", StopReason: "end_turn"},
+	}
+
+	svc, repo, sessionsBase := newRunSvc(t, mockTurns)
+	ctx := context.Background()
+	s, err := repo.Create(ctx, session.CreateInput{WorkingDir: workDir})
+	require.NoError(t, err)
+	require.NoError(t, repo.UpdateStatus(ctx, s.ID, "frozen"))
+	makeFrozenSpec(t, sessionsBase, s.ID, workDir)
+
+	// Detach=true → should return immediately with Status="started".
+	resp, err := svc.Start(ctx, &gilv1.StartRunRequest{
+		SessionId: s.ID,
+		Provider:  "mock",
+		Detach:    true,
+	})
+	require.NoError(t, err)
+	require.Equal(t, "started", resp.Status)
+
+	// Progress should be tracked (eventually > 0 iterations) within 2 seconds.
+	assert.Eventually(t, func() bool {
+		iters, _, ok := svc.Progress(s.ID)
+		return ok && iters > 0
+	}, 2*time.Second, 10*time.Millisecond, "expected progress to be tracked for detached run")
 }

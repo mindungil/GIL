@@ -26,6 +26,7 @@ type StartRunRequest struct {
 	SessionId     string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
 	Provider      string                 `protobuf:"bytes,2,opt,name=provider,proto3" json:"provider,omitempty"` // "anthropic" | "mock" | "" (server default)
 	Model         string                 `protobuf:"bytes,3,opt,name=model,proto3" json:"model,omitempty"`       // empty → provider default
+	Detach        bool                   `protobuf:"varint,4,opt,name=detach,proto3" json:"detach,omitempty"`    // if true, server starts run in background and returns immediately
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -81,9 +82,16 @@ func (x *StartRunRequest) GetModel() string {
 	return ""
 }
 
+func (x *StartRunRequest) GetDetach() bool {
+	if x != nil {
+		return x.Detach
+	}
+	return false
+}
+
 type StartRunResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Status        string                 `protobuf:"bytes,1,opt,name=status,proto3" json:"status,omitempty"` // "done" | "max_iterations" | "error"
+	Status        string                 `protobuf:"bytes,1,opt,name=status,proto3" json:"status,omitempty"` // "done" | "max_iterations" | "error" | "stopped" | "started" (detached only)
 	Iterations    int32                  `protobuf:"varint,2,opt,name=iterations,proto3" json:"iterations,omitempty"`
 	Tokens        int64                  `protobuf:"varint,3,opt,name=tokens,proto3" json:"tokens,omitempty"`
 	CostUsd       float64                `protobuf:"fixed64,4,opt,name=cost_usd,json=costUsd,proto3" json:"cost_usd,omitempty"`
@@ -289,12 +297,13 @@ var File_gil_v1_run_proto protoreflect.FileDescriptor
 
 const file_gil_v1_run_proto_rawDesc = "" +
 	"\n" +
-	"\x10gil/v1/run.proto\x12\x06gil.v1\x1a\x12gil/v1/event.proto\"b\n" +
+	"\x10gil/v1/run.proto\x12\x06gil.v1\x1a\x12gil/v1/event.proto\"z\n" +
 	"\x0fStartRunRequest\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x1a\n" +
 	"\bprovider\x18\x02 \x01(\tR\bprovider\x12\x14\n" +
-	"\x05model\x18\x03 \x01(\tR\x05model\"\xdf\x01\n" +
+	"\x05model\x18\x03 \x01(\tR\x05model\x12\x16\n" +
+	"\x06detach\x18\x04 \x01(\bR\x06detach\"\xdf\x01\n" +
 	"\x10StartRunResponse\x12\x16\n" +
 	"\x06status\x18\x01 \x01(\tR\x06status\x12\x1e\n" +
 	"\n" +

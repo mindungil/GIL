@@ -22,7 +22,7 @@ func newTestService(t *testing.T) *SessionService {
 	require.NoError(t, err)
 	t.Cleanup(func() { db.Close() })
 	require.NoError(t, session.Migrate(db))
-	return NewSessionService(session.NewRepo(db))
+	return NewSessionService(session.NewRepo(db), nil)
 }
 
 func TestSessionService_Create(t *testing.T) {

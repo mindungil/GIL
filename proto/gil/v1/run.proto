@@ -22,10 +22,11 @@ message StartRunRequest {
   string session_id = 1;
   string provider = 2;          // "anthropic" | "mock" | "" (server default)
   string model = 3;              // empty → provider default
+  bool detach = 4;               // if true, server starts run in background and returns immediately
 }
 
 message StartRunResponse {
-  string status = 1;             // "done" | "max_iterations" | "error"
+  string status = 1;             // "done" | "max_iterations" | "error" | "stopped" | "started" (detached only)
   int32  iterations = 2;
   int64  tokens = 3;
   double cost_usd = 4;

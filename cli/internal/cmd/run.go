@@ -11,8 +11,10 @@ import (
 
 // runCmd returns the `gil run <session-id>` command.
 // Runs the agent loop synchronously (server-side) and prints the result.
+// With --detach, returns immediately and the server runs the loop in background.
 func runCmd() *cobra.Command {
 	var socket, providerName, model string
+	var detach bool
 	c := &cobra.Command{
 		Use:   "run <session-id>",
 		Short: "Run the agent loop for a frozen session",
@@ -32,12 +34,19 @@ func runCmd() *cobra.Command {
 			}
 			defer cli.Close()
 
-			resp, err := cli.StartRun(ctx, sessionID, providerName, model)
+			resp, err := cli.StartRun(ctx, sessionID, providerName, model, detach)
 			if err != nil {
 				return fmt.Errorf("run: %w", err)
 			}
 
 			out := cmd.OutOrStdout()
+			if detach && resp.Status == "started" {
+				fmt.Fprintf(out, "Started run for %s (background).\n", sessionID)
+				fmt.Fprintf(out, "Watch progress:  gil events %s --tail\n", sessionID)
+				fmt.Fprintf(out, "Check status:    gil status\n")
+				return nil
+			}
+
 			fmt.Fprintf(out, "Status:     %s\n", resp.Status)
 			fmt.Fprintf(out, "Iterations: %d\n", resp.Iterations)
 			fmt.Fprintf(out, "Tokens:     %d\n", resp.Tokens)
@@ -58,5 +67,6 @@ func runCmd() *cobra.Command {
 	c.Flags().StringVar(&socket, "socket", defaultSocket(), "gild UDS socket path")
 	c.Flags().StringVar(&providerName, "provider", "anthropic", "LLM provider (anthropic|mock)")
 	c.Flags().StringVar(&model, "model", "", "LLM model id (empty → provider default)")
+	c.Flags().BoolVar(&detach, "detach", false, "start run in background and return immediately")
 	return c
 }

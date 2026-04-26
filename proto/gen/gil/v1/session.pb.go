@@ -87,18 +87,22 @@ func (SessionStatus) EnumDescriptor() ([]byte, []int) {
 }
 
 type Session struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	Status        SessionStatus          `protobuf:"varint,2,opt,name=status,proto3,enum=gil.v1.SessionStatus" json:"status,omitempty"`
-	CreatedAt     *timestamppb.Timestamp `protobuf:"bytes,3,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
-	UpdatedAt     *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`
-	SpecId        string                 `protobuf:"bytes,5,opt,name=spec_id,json=specId,proto3" json:"spec_id,omitempty"`
-	WorkingDir    string                 `protobuf:"bytes,6,opt,name=working_dir,json=workingDir,proto3" json:"working_dir,omitempty"`
-	GoalHint      string                 `protobuf:"bytes,7,opt,name=goal_hint,json=goalHint,proto3" json:"goal_hint,omitempty"`
-	TotalTokens   int64                  `protobuf:"varint,8,opt,name=total_tokens,json=totalTokens,proto3" json:"total_tokens,omitempty"`
-	TotalCostUsd  float64                `protobuf:"fixed64,9,opt,name=total_cost_usd,json=totalCostUsd,proto3" json:"total_cost_usd,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	Id           string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Status       SessionStatus          `protobuf:"varint,2,opt,name=status,proto3,enum=gil.v1.SessionStatus" json:"status,omitempty"`
+	CreatedAt    *timestamppb.Timestamp `protobuf:"bytes,3,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
+	UpdatedAt    *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`
+	SpecId       string                 `protobuf:"bytes,5,opt,name=spec_id,json=specId,proto3" json:"spec_id,omitempty"`
+	WorkingDir   string                 `protobuf:"bytes,6,opt,name=working_dir,json=workingDir,proto3" json:"working_dir,omitempty"`
+	GoalHint     string                 `protobuf:"bytes,7,opt,name=goal_hint,json=goalHint,proto3" json:"goal_hint,omitempty"`
+	TotalTokens  int64                  `protobuf:"varint,8,opt,name=total_tokens,json=totalTokens,proto3" json:"total_tokens,omitempty"`
+	TotalCostUsd float64                `protobuf:"fixed64,9,opt,name=total_cost_usd,json=totalCostUsd,proto3" json:"total_cost_usd,omitempty"`
+	// Live snapshot for RUNNING sessions; zero otherwise. Populated by server
+	// from in-process run progress; not persisted across restarts.
+	CurrentIteration int32 `protobuf:"varint,10,opt,name=current_iteration,json=currentIteration,proto3" json:"current_iteration,omitempty"`
+	CurrentTokens    int64 `protobuf:"varint,11,opt,name=current_tokens,json=currentTokens,proto3" json:"current_tokens,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *Session) Reset() {
@@ -190,6 +194,20 @@ func (x *Session) GetTotalTokens() int64 {
 func (x *Session) GetTotalCostUsd() float64 {
 	if x != nil {
 		return x.TotalCostUsd
+	}
+	return 0
+}
+
+func (x *Session) GetCurrentIteration() int32 {
+	if x != nil {
+		return x.CurrentIteration
+	}
+	return 0
+}
+
+func (x *Session) GetCurrentTokens() int64 {
+	if x != nil {
+		return x.CurrentTokens
 	}
 	return 0
 }
@@ -390,7 +408,7 @@ var File_gil_v1_session_proto protoreflect.FileDescriptor
 
 const file_gil_v1_session_proto_rawDesc = "" +
 	"\n" +
-	"\x14gil/v1/session.proto\x12\x06gil.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xde\x02\n" +
+	"\x14gil/v1/session.proto\x12\x06gil.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xb2\x03\n" +
 	"\aSession\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12-\n" +
 	"\x06status\x18\x02 \x01(\x0e2\x15.gil.v1.SessionStatusR\x06status\x129\n" +
@@ -403,7 +421,10 @@ const file_gil_v1_session_proto_rawDesc = "" +
 	"workingDir\x12\x1b\n" +
 	"\tgoal_hint\x18\a \x01(\tR\bgoalHint\x12!\n" +
 	"\ftotal_tokens\x18\b \x01(\x03R\vtotalTokens\x12$\n" +
-	"\x0etotal_cost_usd\x18\t \x01(\x01R\ftotalCostUsd\"M\n" +
+	"\x0etotal_cost_usd\x18\t \x01(\x01R\ftotalCostUsd\x12+\n" +
+	"\x11current_iteration\x18\n" +
+	" \x01(\x05R\x10currentIteration\x12%\n" +
+	"\x0ecurrent_tokens\x18\v \x01(\x03R\rcurrentTokens\"M\n" +
 	"\rCreateRequest\x12\x1f\n" +
 	"\vworking_dir\x18\x01 \x01(\tR\n" +
 	"workingDir\x12\x1b\n" +

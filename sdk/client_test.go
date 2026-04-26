@@ -277,7 +277,7 @@ func TestClient_StartRun(t *testing.T) {
 	require.NoError(t, err)
 	defer cli.Close()
 
-	resp, err := cli.StartRun(context.Background(), "sess-1", "mock", "")
+	resp, err := cli.StartRun(context.Background(), "sess-1", "mock", "", false)
 	require.NoError(t, err)
 	require.Equal(t, "done", resp.Status)
 	require.Equal(t, int32(2), resp.Iterations)

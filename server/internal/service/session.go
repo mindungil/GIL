@@ -12,15 +12,24 @@ import (
 	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
 )
 
+// ProgressGetter exposes live run progress so SessionService can enrich
+// RUNNING session responses without depending on the full RunService.
+type ProgressGetter interface {
+	Progress(sessionID string) (iters int32, tokens int64, ok bool)
+}
+
 // SessionService implements the gRPC SessionService server-side handler.
 type SessionService struct {
 	gilv1.UnimplementedSessionServiceServer
-	repo *session.Repo
+	repo     *session.Repo
+	progress ProgressGetter // may be nil for tests/standalone
 }
 
 // NewSessionService returns a new SessionService backed by the provided Repo.
-func NewSessionService(repo *session.Repo) *SessionService {
-	return &SessionService{repo: repo}
+// progress may be nil; when non-nil, RUNNING sessions will have live
+// iteration/token counts populated in responses.
+func NewSessionService(repo *session.Repo, progress ProgressGetter) *SessionService {
+	return &SessionService{repo: repo, progress: progress}
 }
 
 // Create creates a new session with the given working directory and goal hint.
@@ -32,7 +41,7 @@ func (s *SessionService) Create(ctx context.Context, req *gilv1.CreateRequest) (
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "session.Create: %v", err)
 	}
-	return toProto(created), nil
+	return s.toProto(created), nil
 }
 
 // Get retrieves a session by its ID.
@@ -44,7 +53,7 @@ func (s *SessionService) Get(ctx context.Context, req *gilv1.GetRequest) (*gilv1
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "session.Get: %v", err)
 	}
-	return toProto(got), nil
+	return s.toProto(got), nil
 }
 
 // List returns a list of sessions, optionally filtered by status.
@@ -55,25 +64,34 @@ func (s *SessionService) List(ctx context.Context, req *gilv1.ListRequest) (*gil
 		return nil, status.Errorf(codes.Internal, "session.List: %v", err)
 	}
 	out := make([]*gilv1.Session, 0, len(got))
-	for _, s := range got {
-		out = append(out, toProto(s))
+	for _, sess := range got {
+		out = append(out, s.toProto(sess))
 	}
 	return &gilv1.ListResponse{Sessions: out}, nil
 }
 
-// toProto converts a core Session to a proto Session.
-func toProto(s session.Session) *gilv1.Session {
-	return &gilv1.Session{
-		Id:           s.ID,
-		Status:       statusToProto(s.Status),
-		CreatedAt:    timestamppb.New(s.CreatedAt),
-		UpdatedAt:    timestamppb.New(s.UpdatedAt),
-		SpecId:       s.SpecID,
-		WorkingDir:   s.WorkingDir,
-		GoalHint:     s.GoalHint,
-		TotalTokens:  s.TotalTokens,
-		TotalCostUsd: s.TotalCostUSD,
+// toProto converts a core Session to a proto Session. When the session status
+// is "running" and a ProgressGetter is wired in, it enriches the response with
+// live iteration and token counts.
+func (s *SessionService) toProto(sess session.Session) *gilv1.Session {
+	p := &gilv1.Session{
+		Id:           sess.ID,
+		Status:       statusToProto(sess.Status),
+		CreatedAt:    timestamppb.New(sess.CreatedAt),
+		UpdatedAt:    timestamppb.New(sess.UpdatedAt),
+		SpecId:       sess.SpecID,
+		WorkingDir:   sess.WorkingDir,
+		GoalHint:     sess.GoalHint,
+		TotalTokens:  sess.TotalTokens,
+		TotalCostUsd: sess.TotalCostUSD,
 	}
+	if sess.Status == "running" && s.progress != nil {
+		if iters, tokens, ok := s.progress.Progress(sess.ID); ok {
+			p.CurrentIteration = iters
+			p.CurrentTokens = tokens
+		}
+	}
+	return p
 }
 
 // statusToProto maps a session status string to the corresponding proto enum.
