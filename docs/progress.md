@@ -4,7 +4,7 @@
 
 ## 현재 페이즈
 
-**Phase 7: Edit/Patch/Permission/TUI** (완료 — 2026-04-26). 다음 → Phase 8.
+**Phase 8: Exec/MCP/SSH/Gateway** (완료 — 2026-04-26). 다음 → Phase 9 (multi-day soak + 클라우드).
 
 **Phase 0: 설계** (완료)
 
@@ -96,16 +96,24 @@
 - [x] runtime/docker: Wrapper + Container lifecycle (per-command exec)
 - [x] e2e phase07 (edit + apply_patch + permission deny sanity)
 
-**Phase 8: MCP + Exec + 통합** (대기)
-- [ ] `core/exec` UDS RPC 다단계 (Hermes execute_code 패턴)
-- [ ] `mcp/` 빌트인 MCP 서버 (Goose MCP 6 백엔드)
-- [ ] SSH workspace backend
-- [ ] HTTP/JSON gateway (grpc-gateway, browser clients)
+**Phase 8: Exec/MCP/SSH/Gateway** (완료 — 2026-04-26)
+- [x] core/exec: Recipe + Runner (Hermes execute_code lift) — 다단계 도구 압축, 중간 출력은 LLM context에서 숨김
+- [x] exec tool + RunService 통합 (intermediate exec_step_done events 송출)
+- [x] mcp/cmd/gilmcp 서버 (JSON-RPC 2.0 stdio; list/get/create_sessions tools)
+- [x] core/mcp 클라이언트 (Goose subprocess 패턴 lift; 외부 MCP 서버 subprocess launch)
+- [x] runtime/ssh: Wrapper + ParseTarget (per-command ssh exec; file ops는 local)
+- [x] HTTP/JSON gateway via grpc-gateway: GET/POST /v1/sessions, /v1/sessions/{id}/run/restore/events 등 (gild --http :PORT)
+- [x] e2e phase08 (exec recipe + HTTP curl + gilmcp JSON-RPC sanity) 통과
+- [x] dogfood 절차 문서화 (`docs/dogfood/2026-04-26-first-run-procedure.md`) — 실제 실행은 ANTHROPIC_API_KEY 필요
 
-**Phase 9: 통합 테스트 + 첫 자율 작업 시연** (대기)
-- [ ] e2e: 인터뷰 → freeze → run → 검증 통과 → 보고
-- [ ] 며칠 무인 시뮬레이션
-- [ ] 첫 dogfood: gil 자체 기능 추가를 gil 으로 하기
+**Phase 9: Multi-day soak + 클라우드** (대기)
+- [ ] 며칠 무인 시뮬레이션 (Anthropic 실제 호출, 비용 모니터링)
+- [ ] 첫 dogfood 실제 실행 (`docs/dogfood/2026-04-26-first-run-procedure.md` per)
+- [ ] 클라우드 VM 백엔드 (Modal/Daytona)
+- [ ] 원격 file sync (rsync; SSH 백엔드 file ops 제한 해소)
+- [ ] VS Code 확장 (gil SDK 사용)
+- [ ] 다중 사용자 gild
+- [ ] Atropos RL 통합 (학습된 도구 호출 최적화)
 
 ## 최근 결정 사항
 
@@ -125,6 +133,7 @@
 | 2026-04-25 | Phase 5 (Run Engine 개선) 완료 — 18 tasks. secret masking + AgentLoop event emit + per-session Stream/Persister + RunService.Tail real + gil events --tail real + gil run --detach + 라이브 iteration/tokens + 5-pattern Stuck Detector + ModelEscalate recovery + 3-strike abort + bwrap Sandbox + WorkspaceBackend 라우팅 + Shadow Git checkpoint + gil restore + per-stage interview models + e2e5 + make install. e2e-all 5 페이즈 통과. Phase 6: 컨텍스트/메모리/리포맵. |
 | 2026-04-26 | Phase 6 (컨텍스트/메모리/Repomap) 완료 — 20 tasks + 1 fix. core/compact (Hermes 캐시 보존 + OpenCode 템플릿 + anti-thrashing + system-and-3 cache_control) + AgentLoop 95% auto-compact + compact_now 도구. core/memory.Bank 6 file + 2 tools + 시스템 프롬프트 prepend + post-verify 마일스톤 게이트. core/repomap (CGO 회피하여 stdlib go/parser + py/js/ts regex로 대체; PageRank + binary-search Fit + TTL cache tool). Stuck recovery 4종 풀 구현 (Cline loop-detection lift + Cline resetHead lift + Goose adversary_inspector lift). runtime/local Seatbelt (Codex seatbelt.rs lift, darwin only). e2e6 통과. server-side memory bank wiring fix 포함. e2e-all 6 페이즈 통과. |
 | 2026-04-26 | Phase 7 (Edit/Patch/Permission/TUI) 완료 — 16 tasks. core/edit (Aider editblock_coder.py 4-tier MatchEngine + DSL parser + find_similar_lines hint, edit tool). core/patch (Codex apply-patch parser + applier with seek_sequence 3-tier, apply_patch tool). core/permission (OpenCode evaluate.ts + wildcard.ts: last-wins glob with " *" 트레일링 옵셔널 quirk; AgentLoop gate; spec.risk.autonomy 기반 rule generator FULL/ASK_DESTRUCTIVE/ASK_PER_ACTION/PLAN_ONLY). tui (Bubbletea 3-pane + live event tail + permission_ask 모달 + AnswerPermission RPC, AskCallback 60s timeout). Stuck SubagentBranch 실작동 (read-only sub-loop, AgentLoop.RunSubagent 어댑터). runtime/docker (per-command exec wrapper + Container lifecycle). e2e7 (edit + apply_patch + ASK_DESTRUCTIVE rm 차단 sanity) 통과. e2e-all 7 페이즈 통과. 각 reference lift는 commit 메시지에 출처 명기. |
+| 2026-04-26 | Phase 8 (Exec/MCP/SSH/Gateway) 완료 — 9 tasks. core/exec.Recipe + Runner (Hermes code_execution_tool.py lift): 다단계 도구 압축, 중간 결과는 LLM context에서 숨기고 templated summary만 노출. exec tool. mcp/gilmcp 서버 (hand-rolled JSON-RPC 2.0 over stdio; 3 tools). core/mcp 클라이언트 (Goose subprocess 패턴 lift). runtime/ssh (per-command ssh exec wrapper). HTTP/JSON gateway via grpc-gateway (gild --http :PORT). e2e8 (exec + HTTP curl + gilmcp 핸드셰이크) 통과. dogfood 절차 문서화. e2e-all 8 페이즈 통과. |
 
 ## 차용 출처 (코드/패턴)
 
@@ -217,6 +226,18 @@
 - **runtime/docker**: Wrapper builds `docker exec [-w wd] [-u user] container cmd args`. Container.Start/Stop manages per-session container lifecycle. RunService rewires Bash.Wrapper after Container.Start in DOCKER backend.
 - **검증**: `make e2e-all` 7 페이즈 모두 통과 (e2e7 = edit + apply_patch + ASK_DESTRUCTIVE deny).
 - **다음 단계**: Phase 8 — core/exec (Hermes execute_code 다단계 도구 압축), mcp/ (Goose MCP 백엔드), SSH workspace backend, HTTP/JSON gateway, 첫 dogfood.
+
+## Phase 8 산출물 요약 (2026-04-26)
+
+- **core/exec (Hermes lift)**: Recipe = JSON sequence of tool calls + summary template ({{step_N_output}} placeholders). Runner는 in-process 실행, 중간 결과는 hidden, summary 1회만 LLM에게 반환. 캐시 절약의 결정적 패턴 (Hermes의 Python subprocess 대신 typed JSON으로 RCE 회피). Resource 한도: 300s/step, 50 steps, 50KB output 모두 Hermes에서 직접 lift.
+- **exec tool**: agent-callable Recipe wrapper. 자기 자신을 inner Tools에서 필터링 (recursion 방지). RunService가 Emit 콜백으로 exec_step_* 이벤트를 stream에 흘려 observer는 보지만 LLM은 못 봄.
+- **mcp/gilmcp 서버**: hand-rolled JSON-RPC 2.0 over stdio (Goose lib.rs shape lift; rmcp Rust crate에 해당하는 Go SDK가 없어서 직접 구현). 3 tools: list_sessions / get_session / create_session. 외부 MCP 클라이언트(Claude Desktop, Cline 등)가 gil을 백엔드로 사용 가능.
+- **core/mcp 클라이언트 (Goose lift)**: 외부 MCP 서버 subprocess launch + JSON-RPC 다중화 (atomic ID, sync.Map pending). RemoteTool로 wrapping해서 core/tool.Tool 인터페이스 구현 → AgentLoop가 외부 MCP tools 사용 가능.
+- **runtime/ssh**: bwrap/seatbelt/docker와 동일한 Wrapper API. ParseTarget이 user@host[:port][/key] 4가지 형식 처리. Phase 8 limitation: file ops (write_file/read_file)는 local 유지; 원격 file sync는 Phase 9.
+- **HTTP/JSON gateway (grpc-gateway)**: session/run RPC에 google.api.http 어노테이션 추가. `buf generate`가 .pb.gw.go 생성. gild --http :PORT가 gateway mux 마운트. `curl http://127.0.0.1:8080/v1/sessions` 작동. browser/curl 클라이언트가 gRPC 클라이언트 없이 gil 사용 가능.
+- **검증**: `make e2e-all` 8 페이즈 모두 통과 (e2e8 = exec recipe + HTTP curl 2회 + gilmcp JSON-RPC initialize/tools/list 핸드셰이크).
+- **dogfood**: 첫 실행 절차 (`docs/dogfood/2026-04-26-first-run-procedure.md`)에 문서화. 실제 run은 ANTHROPIC_API_KEY 필요해서 user-driven.
+- **다음 단계**: Phase 9 — 며칠 무인 시뮬레이션 + 첫 dogfood 실제 실행 + 클라우드 VM 백엔드 + 원격 file sync + VS Code 확장.
 
 ## 미해결 / 추후 결정
 
