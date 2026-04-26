@@ -128,3 +128,36 @@ func TestAgentLoop_VerifyFailureFeedsBack(t *testing.T) {
 	require.Equal(t, "done", res.Status)
 	require.Equal(t, 3, res.Iterations)
 }
+
+func TestAgentLoop_NilVerification_TreatsAsAllPass(t *testing.T) {
+	mock := provider.NewMockToolProvider([]provider.MockTurn{
+		{Text: "I'm done", StopReason: "end_turn"},
+	})
+	spec := &gilv1.FrozenSpec{
+		Goal: &gilv1.Goal{OneLiner: "do nothing"},
+		// Verification is nil → no checks → vacuously pass
+		Budget: &gilv1.Budget{MaxIterations: 3},
+	}
+	loop := NewAgentLoop(spec, mock, "x", nil, verify.NewRunner(t.TempDir()))
+	res, err := loop.Run(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "done", res.Status)
+	require.Equal(t, 1, res.Iterations)
+}
+
+func TestAgentLoop_SystemPromptIncludesChecks(t *testing.T) {
+	tools := []tool.Tool{&tool.Bash{WorkingDir: "/tmp"}}
+	spec := &gilv1.FrozenSpec{
+		Goal: &gilv1.Goal{OneLiner: "build hello"},
+		Verification: &gilv1.Verification{
+			Checks: []*gilv1.Check{
+				{Name: "exists", Kind: gilv1.CheckKind_SHELL, Command: "test -f hello"},
+			},
+		},
+	}
+	prompt := buildSystemPrompt(spec, tools)
+	require.Contains(t, prompt, "build hello")
+	require.Contains(t, prompt, "exists")
+	require.Contains(t, prompt, "test -f hello")
+	require.Contains(t, prompt, "bash")
+}

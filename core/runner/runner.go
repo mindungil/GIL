@@ -108,9 +108,13 @@ func (a *AgentLoop) Run(ctx context.Context) (*Result, error) {
 			}
 			r, err := t.Run(ctx, tc.Input)
 			if err != nil {
+				msg := err.Error()
+				if len(msg) > 500 {
+					msg = msg[:500] + "... (truncated)"
+				}
 				toolResults = append(toolResults, provider.ToolResult{
 					ToolUseID: tc.ID,
-					Content:   err.Error(),
+					Content:   "tool error: " + msg,
 					IsError:   true,
 				})
 				continue
@@ -141,18 +145,31 @@ func buildSystemPrompt(spec *gilv1.FrozenSpec, tools []tool.Tool) string {
 		toolList += fmt.Sprintf("- %s: %s\n", t.Name(), t.Description())
 	}
 
+	var checkList string
+	if spec != nil && spec.Verification != nil {
+		for _, c := range spec.Verification.Checks {
+			checkList += fmt.Sprintf("- %s: `%s`\n", c.Name, c.Command)
+		}
+	}
+	if checkList == "" {
+		checkList = "(no checks defined — any non-tool response will be considered done)\n"
+	}
+
 	return fmt.Sprintf(`You are an autonomous coding agent. Your job is to make all verification checks pass.
 
 Goal: %s
 
+Verification checks (all must pass):
+%s
 Available tools:
 %s
 Strategy:
 1. Use tools to inspect, write, or run code.
-2. When you believe verification will pass, stop calling tools — the system will run the checks.
-3. If any check fails, you'll receive the output and should fix the issue.
+2. Verify your work matches the check commands above before stopping.
+3. When you believe all checks will pass, stop calling tools — the system will run the checks.
+4. If any check fails, you'll receive the output and should fix the issue.
 
-Be decisive. Don't ask the user — they're not present. Make reasonable assumptions and act.`, goal, toolList)
+Be decisive. Don't ask the user — they're not present. Make reasonable assumptions and act.`, goal, checkList, toolList)
 }
 
 func formatVerifyFeedback(results []verify.Result) string {
