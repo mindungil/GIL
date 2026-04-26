@@ -42,3 +42,15 @@ snapshots/
 vscode/dist/
 vscode/node_modules/
 vscode/*.vsix
+
+# Python (gil_atropos)
+python/**/__pycache__/
+python/**/*.egg-info/
+python/**/*.pyc
+python/**/.pytest_cache/
+python/**/.mypy_cache/
+python/**/build/
+python/**/dist/
+# Generated gRPC stubs (regenerate via `python -m gil_atropos.compile_protos`)
+python/gil_atropos/proto/*_pb2.py
+python/gil_atropos/proto/*_pb2_grpc.py
