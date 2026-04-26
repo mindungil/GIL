@@ -15,6 +15,7 @@ import (
 	_ "modernc.org/sqlite"
 	"google.golang.org/grpc"
 
+	"github.com/jedutools/gil/core/provider"
 	"github.com/jedutools/gil/core/session"
 	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
 	"github.com/jedutools/gil/server/internal/service"
@@ -33,7 +34,7 @@ type server struct {
 // database at dbPath. It returns an error if the database cannot be opened, migrations
 // fail, the socket cannot be created, or gRPC registration fails. Partial failures
 // are cleaned up: if migration or socket creation fails, the database is closed.
-func newServer(dbPath, sockPath string) (*server, error) {
+func newServer(dbPath, sockPath, sessionsBase string) (*server, error) {
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return nil, err
@@ -47,8 +48,30 @@ func newServer(dbPath, sockPath string) (*server, error) {
 		_ = db.Close()
 		return nil, err
 	}
+
+	// Factory provides mock or anthropic provider based on name
+	factory := func(name string) (provider.Provider, string, error) {
+		switch name {
+		case "mock":
+			return provider.NewMock([]string{
+				`{"domain":"unknown","domain_confidence":0.5,"tech_hints":[],"scale_hint":"unknown","ambiguity":"none"}`,
+				"What's your project goal?",
+			}), "mock-model", nil
+		case "anthropic", "":
+			key := os.Getenv("ANTHROPIC_API_KEY")
+			if key == "" {
+				return nil, "", fmt.Errorf("ANTHROPIC_API_KEY not set")
+			}
+			return provider.NewAnthropic(key), "claude-opus-4-7", nil
+		default:
+			return nil, "", fmt.Errorf("unknown provider %q", name)
+		}
+	}
+
 	g := grpc.NewServer()
-	gilv1.RegisterSessionServiceServer(g, service.NewSessionService(session.NewRepo(db)))
+	repo := session.NewRepo(db)
+	gilv1.RegisterSessionServiceServer(g, service.NewSessionService(repo))
+	gilv1.RegisterInterviewServiceServer(g, service.NewInterviewService(repo, sessionsBase, factory))
 
 	return &server{grpc: g, lis: lis, db: db}, nil
 }
@@ -86,8 +109,9 @@ func main() {
 
 	dbPath := filepath.Join(*base, "sessions.db")
 	sockPath := filepath.Join(*base, "gild.sock")
+	sessionsBase := filepath.Join(*base, "sessions")
 
-	srv, err := newServer(dbPath, sockPath)
+	srv, err := newServer(dbPath, sockPath, sessionsBase)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "gild:", err)
 		os.Exit(1)

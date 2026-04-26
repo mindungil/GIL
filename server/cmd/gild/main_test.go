@@ -19,8 +19,9 @@ func TestGild_StartsAndAcceptsCreate(t *testing.T) {
 	dir := t.TempDir()
 	sockPath := filepath.Join(dir, "gild.sock")
 	dbPath := filepath.Join(dir, "sessions.db")
+	sessionsBase := filepath.Join(dir, "sessions")
 
-	srv, err := newServer(dbPath, sockPath)
+	srv, err := newServer(dbPath, sockPath, sessionsBase)
 	require.NoError(t, err)
 
 	go func() {
