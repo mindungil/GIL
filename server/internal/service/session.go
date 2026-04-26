@@ -2,7 +2,10 @@ package service
 
 import (
 	"context"
+	"errors"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/jedutools/gil/core/session"
@@ -27,7 +30,7 @@ func (s *SessionService) Create(ctx context.Context, req *gilv1.CreateRequest) (
 		GoalHint:   req.GoalHint,
 	})
 	if err != nil {
-		return nil, err
+		return nil, status.Errorf(codes.Internal, "session.Create: %v", err)
 	}
 	return toProto(created), nil
 }
@@ -35,8 +38,11 @@ func (s *SessionService) Create(ctx context.Context, req *gilv1.CreateRequest) (
 // Get retrieves a session by its ID.
 func (s *SessionService) Get(ctx context.Context, req *gilv1.GetRequest) (*gilv1.Session, error) {
 	got, err := s.repo.Get(ctx, req.Id)
+	if errors.Is(err, session.ErrNotFound) {
+		return nil, status.Errorf(codes.NotFound, "session %q not found", req.Id)
+	}
 	if err != nil {
-		return nil, err
+		return nil, status.Errorf(codes.Internal, "session.Get: %v", err)
 	}
 	return toProto(got), nil
 }
@@ -46,7 +52,7 @@ func (s *SessionService) List(ctx context.Context, req *gilv1.ListRequest) (*gil
 	limit := int(req.Limit)
 	got, err := s.repo.List(ctx, session.ListOptions{Limit: limit, StatusFilter: req.StatusFilter})
 	if err != nil {
-		return nil, err
+		return nil, status.Errorf(codes.Internal, "session.List: %v", err)
 	}
 	out := make([]*gilv1.Session, 0, len(got))
 	for _, s := range got {
@@ -70,7 +76,10 @@ func toProto(s session.Session) *gilv1.Session {
 	}
 }
 
-// statusToProto converts a core session status string to a proto SessionStatus.
+// statusToProto maps a session status string to the corresponding proto enum.
+// String values must align with constants used in core/session
+// (currently statusCreated="created"; other states are managed by future
+// status-transition methods). Unknown values map to UNSPECIFIED.
 func statusToProto(s string) gilv1.SessionStatus {
 	switch s {
 	case "created":

@@ -8,6 +8,8 @@ import (
 
 	_ "modernc.org/sqlite"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/jedutools/gil/core/session"
 	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
@@ -59,4 +61,13 @@ func TestSessionService_List(t *testing.T) {
 	resp, err := svc.List(ctx, &gilv1.ListRequest{Limit: 10})
 	require.NoError(t, err)
 	require.Len(t, resp.Sessions, 2)
+}
+
+func TestSessionService_Get_NotFound(t *testing.T) {
+	svc := newTestService(t)
+	ctx := context.Background()
+
+	_, err := svc.Get(ctx, &gilv1.GetRequest{Id: "nonexistent"})
+	require.Error(t, err)
+	require.Equal(t, codes.NotFound, status.Code(err))
 }
