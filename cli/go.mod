@@ -6,6 +6,7 @@ require (
 	github.com/jedutools/gil/core v0.0.0-00010101000000-000000000000
 	github.com/jedutools/gil/proto v0.0.0
 	github.com/jedutools/gil/sdk v0.0.0-00010101000000-000000000000
+	github.com/oklog/ulid/v2 v2.1.1
 	github.com/spf13/cobra v1.10.2
 	github.com/stretchr/testify v1.11.1
 	golang.org/x/term v0.42.0
