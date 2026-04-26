@@ -4,7 +4,7 @@
 
 ## 현재 페이즈
 
-**Phase 10: Cloud real impl / VS Code / OIDC / Packaging / Atropos** (완료 — 2026-04-26). 외부 자원(API key, cloud account, real IdP) 필요한 항목만 잔여.
+**Phase 11: Harness UX foundations** (완료 — 2026-04-26). 다음 → Phase 12 (in-session UX).
 
 **Phase 0: 설계** (완료)
 
@@ -266,6 +266,19 @@
 - **Atropos RL 환경 어댑터 (Python)**: `python/gil_atropos` — `GilGrpcClient` (UDS over `~/.gil/gild.sock` + lazy stub), `GilCodingEnv` (Hermes `HermesAgentBaseEnv` 서브클래스 또는 standalone fallback) — setup/get_next_item/format_prompt/compute_reward/evaluate/wandb_log per hermes-atropos-environments skill 계약. 5 bundled coding tasks (fibonacci/reverse_string/is_palindrome/fizzbuzz/sum_csv_column) + heredoc-pytest verifier. `gil-atropos-eval` CLI. `compile_protos.py`로 grpc stubs 재생성. 9/9 smoke test pass (mock client 기반).
 - **검증**: `make e2e-all` 12 페이즈 모두 통과 (1-9 + phase10-modal + phase10-daytona + phase10-oidc).
 - **다음 단계 (외부 자원 필요)**: 실제 Anthropic dogfood (API key), Modal/Daytona 실제 deployment, OIDC 실제 IdP (Google/Auth0) 통합, VS Code Marketplace 게시, Atropos 실제 training run, Homebrew tap 등록.
+
+## Phase 11 산출물 요약 (2026-04-26)
+
+- **XDG 표준 layout**: `core/paths.Layout` (Config / Data / State / Cache 분리). `os.UserConfigDir` / `os.UserCacheDir` + manual `XDG_DATA_HOME` / `XDG_STATE_HOME` 해소. `GIL_HOME` override (단일 트리 collapse — 테스트/sandbox용). `MigrateLegacyTilde` 가 `~/.gil/` → XDG 분산 (idempotent, EXDEV cross-device 폴백, MIGRATED stamp). gild가 매 시작 시 best-effort 호출. Reference lift: goose `paths.rs` (etcetera + GOOSE_PATH_ROOT 패턴).
+- **credstore**: `core/credstore.FileStore` — auth.json 0600 perms, 0700 parent dir, atomic write (tmp + rename + parent fsync), versioned envelope `{"version":1,"providers":{...}}`. Reference lift: opencode `auth/index.ts` (discriminated union + atomic write).
+- **gil auth subcommand**: `login [provider] [--api-key K] [--base-url U]`, `list` (masked sk-ant-...3f2a), `logout <provider>`, `status` (credstore + env var fallback 표시). Interactive picker + `golang.org/x/term.ReadPassword` (echo off). Format validation은 warn-only. Reference lift: opencode `cli/cmd/providers.ts` + codex `safe_format_key`.
+- **gild factory가 credstore 우선**: provider switch가 credstore.Get → env var fallback. ANTHROPIC_API_KEY 없어도 작동. openai/openrouter/vllm 케이스는 stub (Phase 12+ 실제 adapter).
+- **error overhaul**: `core/cliutil.UserError{Msg, Hint, Code, Cause}` + `cliutil.Exit`. CLI/server에서 17 사이트 변환 — `socket did not appear` → `daemon not running` + `Hint: gild --foreground &`; `ANTHROPIC_API_KEY not set` → `no credentials for anthropic` + `Hint: gil auth login anthropic`; etc. cobra `SilenceUsage`/`SilenceErrors`로 중복 출력 방지. Reference lift: opencode `error.ts`.
+- **gil init**: 첫 실행 scaffolding. EnsureDirs + MigrateLegacyTilde + config.toml stub + (옵션) auth login 자동 호출. `--no-auth`/`--no-config` 플래그.
+- **gil doctor**: 5 그룹 (Layout / Daemon / Credentials / Sandboxes / Tools), 15 체크. ✓/✗/•/! 글리프, 마지막 라인에 OK/INFO/WARN/FAIL 카운트, FAIL 있으면 exit 1. `--output json` 지원. Reference lift: goose `info.rs` 정렬 + WARN/FAIL trichotomy.
+- **gil completion**: cobra 기본 wrapper (bash/zsh/fish/powershell).
+- **검증**: `make e2e-all` 13 phase 모두 통과 (1-9 + phase10-modal/daytona/oidc + phase11-freshinstall).
+- **다음 단계**: Phase 12 — AGENTS.md 디스커버리, MCP add/remove subcommand, TUI/run 슬래시 명령, project-local `.gil/`, permission 영속화, cost/stats, `--output json` global, session export.
 
 ## 미해결 / 추후 결정
 

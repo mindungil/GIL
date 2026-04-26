@@ -2,7 +2,7 @@
 
 자율 코딩 하네스. 길고 철저한 인터뷰로 모든 요구사항을 추출한 뒤, 며칠이 걸리더라도 사용자에게 다시 묻지 않고 끝까지 작업을 수행하는 CLI 에이전트.
 
-**상태**: Phase 10 완료. e2e 12 단계 전부 green (1-9 + modal + daytona + oidc). 4 binary (`gil` / `gild` / `giltui` / `gilmcp`) build + install 가능. VS Code 확장 + Python Atropos 어댑터 scaffold. GoReleaser로 16-binary release matrix 빌드 가능 (linux/darwin × amd64/arm64 × 4 binary + deb + rpm + brew formula).
+**상태**: Phase 11 완료. e2e 13 단계 전부 green. fresh install 친화적: `gil init` 한 번으로 디렉토리 + 인증 셋업, `gil doctor` 으로 진단, XDG 표준 준수.
 
 ## 빠른 시작
 
@@ -13,19 +13,23 @@ cd gil
 make build           # produces bin/{gil,gild,giltui,gilmcp}
 # (or: make install — installs to /usr/local/bin)
 
-# 2. Set Anthropic API key
-export ANTHROPIC_API_KEY=sk-ant-...
+# 2. First-time setup (creates XDG dirs + prompts for API key)
+./bin/gil init
 
-# 3. Start the daemon (foreground)
+# 3. Verify
+./bin/gil doctor
+
+# 4. Start the daemon (foreground)
 ./bin/gild --foreground &
+# (or skip — gil auto-spawns gild on first command)
 
-# 4. Create a session in your project
+# 5. Create a session in your project
 SESSION=$(./bin/gil new --working-dir $(pwd) | awk '{print $3}')
 
-# 5. Interview — agent asks until it has enough to work autonomously
+# 6. Interview — agent asks until it has enough to work autonomously
 ./bin/gil interview $SESSION
 
-# 6. Run — autonomous; check progress in another terminal
+# 7. Run — autonomous; check progress in another terminal
 ./bin/gil run $SESSION
 # or:
 ./bin/gil events $SESSION --tail
