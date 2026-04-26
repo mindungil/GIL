@@ -22,6 +22,11 @@ type testSessionServer struct {
 	failGetWith codes.Code // if non-zero, Get returns this code
 }
 
+// testInterviewServer is a minimal implementation of InterviewServiceServer for testing.
+type testInterviewServer struct {
+	gilv1.UnimplementedInterviewServiceServer
+}
+
 // Create returns a test session.
 func (s *testSessionServer) Create(ctx context.Context, req *gilv1.CreateRequest) (*gilv1.Session, error) {
 	return &gilv1.Session{
@@ -59,6 +64,40 @@ func (s *testSessionServer) List(ctx context.Context, req *gilv1.ListRequest) (*
 	}, nil
 }
 
+// Start implements InterviewService.Start for testing.
+func (s *testInterviewServer) Start(req *gilv1.StartInterviewRequest, stream gilv1.InterviewService_StartServer) error {
+	// Emit stage transition
+	if err := stream.Send(&gilv1.InterviewEvent{
+		Payload: &gilv1.InterviewEvent_Stage{Stage: &gilv1.StageTransition{
+			From: "sensing", To: "conversation", Reason: "test",
+		}},
+	}); err != nil {
+		return err
+	}
+	// Emit agent turn
+	return stream.Send(&gilv1.InterviewEvent{
+		Payload: &gilv1.InterviewEvent_AgentTurn{AgentTurn: &gilv1.AgentTurn{
+			Content: "test question?",
+		}},
+	})
+}
+
+// Confirm implements InterviewService.Confirm for testing.
+func (s *testInterviewServer) Confirm(ctx context.Context, req *gilv1.ConfirmRequest) (*gilv1.ConfirmResponse, error) {
+	return &gilv1.ConfirmResponse{
+		SpecId:        "test-spec-id",
+		ContentSha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+	}, nil
+}
+
+// GetSpec implements InterviewService.GetSpec for testing.
+func (s *testInterviewServer) GetSpec(ctx context.Context, req *gilv1.GetSpecRequest) (*gilv1.FrozenSpec, error) {
+	return &gilv1.FrozenSpec{
+		SpecId:    "test-spec-id",
+		SessionId: req.SessionId,
+	}, nil
+}
+
 func startTestServer(t *testing.T) (string, func()) {
 	t.Helper()
 	sock, stop, _ := startTestServerWithCtrl(t)
@@ -81,6 +120,7 @@ func startTestServerWithCtrl(t *testing.T) (string, func(), *testSessionServer) 
 	srv := &testSessionServer{}
 	g := grpc.NewServer()
 	gilv1.RegisterSessionServiceServer(g, srv)
+	gilv1.RegisterInterviewServiceServer(g, &testInterviewServer{})
 	go g.Serve(lis)
 
 	// Wait for the server to be ready
@@ -157,4 +197,56 @@ func TestClient_GetSession_NotFound(t *testing.T) {
 	_, err = cli.GetSession(context.Background(), "any")
 	require.Error(t, err)
 	require.Equal(t, codes.NotFound, status.Code(err))
+}
+
+func TestClient_StartInterview_StreamsEvents(t *testing.T) {
+	sock, stop := startTestServer(t)
+	defer stop()
+
+	cli, err := Dial(sock)
+	require.NoError(t, err)
+	defer cli.Close()
+
+	stream, err := cli.StartInterview(context.Background(), "sess-1", "build a CLI", "mock", "")
+	require.NoError(t, err)
+
+	// First event: stage transition
+	evt, err := stream.Recv()
+	require.NoError(t, err)
+	require.NotNil(t, evt.GetStage())
+	require.Equal(t, "conversation", evt.GetStage().To)
+
+	// Second event: agent turn
+	evt, err = stream.Recv()
+	require.NoError(t, err)
+	require.NotNil(t, evt.GetAgentTurn())
+	require.Equal(t, "test question?", evt.GetAgentTurn().Content)
+}
+
+func TestClient_ConfirmInterview(t *testing.T) {
+	sock, stop := startTestServer(t)
+	defer stop()
+
+	cli, err := Dial(sock)
+	require.NoError(t, err)
+	defer cli.Close()
+
+	specID, hex, err := cli.ConfirmInterview(context.Background(), "sess-1")
+	require.NoError(t, err)
+	require.Equal(t, "test-spec-id", specID)
+	require.Len(t, hex, 64)
+}
+
+func TestClient_GetSpec(t *testing.T) {
+	sock, stop := startTestServer(t)
+	defer stop()
+
+	cli, err := Dial(sock)
+	require.NoError(t, err)
+	defer cli.Close()
+
+	fs, err := cli.GetSpec(context.Background(), "sess-1")
+	require.NoError(t, err)
+	require.Equal(t, "test-spec-id", fs.SpecId)
+	require.Equal(t, "sess-1", fs.SessionId)
 }

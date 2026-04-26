@@ -12,10 +12,11 @@ import (
 	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
 )
 
-// Client is a gRPC client for the Gil SessionService.
+// Client is a gRPC client for the Gil SessionService and InterviewService.
 type Client struct {
-	conn     *grpc.ClientConn
-	sessions gilv1.SessionServiceClient
+	conn       *grpc.ClientConn
+	sessions   gilv1.SessionServiceClient
+	interviews gilv1.InterviewServiceClient
 }
 
 // Dial connects to a Gil gRPC server at the given Unix socket path.
@@ -31,8 +32,9 @@ func Dial(sockPath string) (*Client, error) {
 		return nil, err
 	}
 	return &Client{
-		conn:     conn,
-		sessions: gilv1.NewSessionServiceClient(conn),
+		conn:       conn,
+		sessions:   gilv1.NewSessionServiceClient(conn),
+		interviews: gilv1.NewInterviewServiceClient(conn),
 	}, nil
 }
 
@@ -101,4 +103,43 @@ func fromProto(s *gilv1.Session) *Session {
 		WorkingDir: s.WorkingDir,
 		GoalHint:   s.GoalHint,
 	}
+}
+
+// StartInterview begins an interview for sessionID. Returns a server stream
+// that emits agent events (stage transitions, agent turns, errors). The caller
+// must drain the stream until io.EOF or first AgentTurn before calling Reply.
+//
+// providerName is "anthropic", "mock", or "" (server default = anthropic).
+// model is provider-specific (empty → server default for that provider).
+func (c *Client) StartInterview(ctx context.Context, sessionID, firstInput, providerName, model string) (gilv1.InterviewService_StartClient, error) {
+	return c.interviews.Start(ctx, &gilv1.StartInterviewRequest{
+		SessionId:  sessionID,
+		FirstInput: firstInput,
+		Provider:   providerName,
+		Model:      model,
+	})
+}
+
+// ReplyInterview sends a user reply mid-interview. Returns a stream of
+// subsequent agent events.
+func (c *Client) ReplyInterview(ctx context.Context, sessionID, content string) (gilv1.InterviewService_ReplyClient, error) {
+	return c.interviews.Reply(ctx, &gilv1.ReplyRequest{
+		SessionId: sessionID,
+		Content:   content,
+	})
+}
+
+// ConfirmInterview freezes the spec for sessionID. Returns the spec ID and
+// SHA-256 hex of the frozen content.
+func (c *Client) ConfirmInterview(ctx context.Context, sessionID string) (specID, contentSha256 string, err error) {
+	resp, err := c.interviews.Confirm(ctx, &gilv1.ConfirmRequest{SessionId: sessionID})
+	if err != nil {
+		return "", "", err
+	}
+	return resp.SpecId, resp.ContentSha256, nil
+}
+
+// GetSpec returns the current (possibly partial) spec for sessionID.
+func (c *Client) GetSpec(ctx context.Context, sessionID string) (*gilv1.FrozenSpec, error) {
+	return c.interviews.GetSpec(ctx, &gilv1.GetSpecRequest{SessionId: sessionID})
 }
