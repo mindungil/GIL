@@ -25,3 +25,16 @@ func TestStream_Append_DuplicateIDFails(t *testing.T) {
 	_, err := s.Append(Event{ID: 5, Type: "test"})
 	require.Error(t, err)
 }
+
+func TestStream_Len(t *testing.T) {
+	s := NewStream()
+	require.Equal(t, 0, s.Len())
+
+	_, err := s.Append(Event{Type: "test"})
+	require.NoError(t, err)
+	require.Equal(t, 1, s.Len())
+
+	_, err = s.Append(Event{Type: "test"})
+	require.NoError(t, err)
+	require.Equal(t, 2, s.Len())
+}
