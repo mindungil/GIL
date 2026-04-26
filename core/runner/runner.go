@@ -7,11 +7,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jedutools/gil/core/checkpoint"
 	"github.com/jedutools/gil/core/compact"
 	"github.com/jedutools/gil/core/event"
+	"github.com/jedutools/gil/core/memory"
 	"github.com/jedutools/gil/core/provider"
 	"github.com/jedutools/gil/core/stuck"
 	"github.com/jedutools/gil/core/tool"
@@ -46,6 +48,10 @@ type AgentLoop struct {
 	ModelChain     []string       // ordered list for ModelEscalateStrategy
 	StuckThreshold int            // abort after this many UN-recovered signals; default 3 if zero
 	StuckCheckEvery int           // run detector every N iterations; default 1 if zero
+
+	// Memory bank, optional. If non-nil, the system prompt prepends bank
+	// contents (full when small, progress-only when large).
+	Memory *memory.Bank
 
 	// Compactor + budget. If nil, no compaction.
 	Compactor        *compact.Compactor
@@ -84,7 +90,7 @@ func (a *AgentLoop) Run(ctx context.Context) (*Result, error) {
 		maxIter = int(a.Spec.Budget.MaxIterations)
 	}
 
-	system := buildSystemPrompt(a.Spec, a.Tools)
+	system := buildSystemPrompt(a.Spec, a.Tools, a.Memory)
 	tools := make([]provider.ToolDef, 0, len(a.Tools))
 	toolByName := map[string]tool.Tool{}
 	for _, t := range a.Tools {
@@ -346,7 +352,7 @@ func (a *AgentLoop) Run(ctx context.Context) (*Result, error) {
 	return &Result{Status: "max_iterations", Iterations: maxIter, Tokens: totalTokens}, nil
 }
 
-func buildSystemPrompt(spec *gilv1.FrozenSpec, tools []tool.Tool) string {
+func buildSystemPrompt(spec *gilv1.FrozenSpec, tools []tool.Tool, bank *memory.Bank) string {
 	goal := "(no goal specified)"
 	if spec != nil && spec.Goal != nil {
 		goal = spec.Goal.OneLiner
@@ -367,7 +373,7 @@ func buildSystemPrompt(spec *gilv1.FrozenSpec, tools []tool.Tool) string {
 		checkList = "(no checks defined — any non-tool response will be considered done)\n"
 	}
 
-	return fmt.Sprintf(`You are an autonomous coding agent. Your job is to make all verification checks pass.
+	base := fmt.Sprintf(`You are an autonomous coding agent. Your job is to make all verification checks pass.
 
 Goal: %s
 
@@ -382,6 +388,86 @@ Strategy:
 4. If any check fails, you'll receive the output and should fix the issue.
 
 Be decisive. Don't ask the user — they're not present. Make reasonable assumptions and act.`, goal, checkList, toolList)
+
+	if bank == nil {
+		return base
+	}
+	bankSection, err := buildMemoryBankSection(bank)
+	if err != nil {
+		// Soft failure: skip prepend, log nothing here (caller may emit event)
+		return base
+	}
+	if bankSection == "" {
+		return base
+	}
+	return base + "\n\n" + bankSection
+}
+
+const bankFullThresholdTokens = 4000
+
+// buildMemoryBankSection returns the markdown to append to the system prompt.
+// When the bank's estimated total tokens <= bankFullThresholdTokens, all six
+// files are inlined. Otherwise only progress.md is inlined and a hint is
+// emitted listing the other files retrievable via memory_load.
+func buildMemoryBankSection(bank *memory.Bank) (string, error) {
+	tokens, err := bank.EstimateTokens()
+	if err != nil {
+		return "", err
+	}
+	snap, err := bank.Snapshot()
+	if err != nil {
+		return "", err
+	}
+	if len(snap) == 0 {
+		return "", nil
+	}
+
+	var sb strings.Builder
+	sb.WriteString("## Memory Bank\n\n")
+	sb.WriteString("These files in the session memory directory persist state across compactions and iterations. Update them via the memory_update tool when you complete meaningful work.\n\n")
+
+	if tokens <= bankFullThresholdTokens {
+		for _, name := range memory.AllFiles {
+			content, ok := snap[name]
+			if !ok {
+				continue
+			}
+			sb.WriteString("### ")
+			sb.WriteString(name)
+			sb.WriteString("\n\n")
+			sb.WriteString(content)
+			if !strings.HasSuffix(content, "\n") {
+				sb.WriteString("\n")
+			}
+			sb.WriteString("\n")
+		}
+		return sb.String(), nil
+	}
+
+	// Large bank: only progress.md + hint
+	sb.WriteString("(Memory bank exceeds inline budget; only progress is shown. Use memory_load to fetch other files.)\n\n")
+	if content, ok := snap[memory.FileProgress]; ok {
+		sb.WriteString("### ")
+		sb.WriteString(memory.FileProgress)
+		sb.WriteString("\n\n")
+		sb.WriteString(content)
+		if !strings.HasSuffix(content, "\n") {
+			sb.WriteString("\n")
+		}
+		sb.WriteString("\n")
+	}
+	sb.WriteString("Other available files (use memory_load to fetch):\n")
+	for _, name := range memory.AllFiles {
+		if name == memory.FileProgress {
+			continue
+		}
+		if _, ok := snap[name]; ok {
+			sb.WriteString("- ")
+			sb.WriteString(name)
+			sb.WriteString("\n")
+		}
+	}
+	return sb.String(), nil
 }
 
 func formatVerifyFeedback(results []verify.Result) string {

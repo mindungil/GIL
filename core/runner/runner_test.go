@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -13,6 +14,7 @@ import (
 	"github.com/jedutools/gil/core/checkpoint"
 	"github.com/jedutools/gil/core/compact"
 	"github.com/jedutools/gil/core/event"
+	"github.com/jedutools/gil/core/memory"
 	"github.com/jedutools/gil/core/provider"
 	"github.com/jedutools/gil/core/stuck"
 	"github.com/jedutools/gil/core/tool"
@@ -180,7 +182,7 @@ func TestAgentLoop_SystemPromptIncludesChecks(t *testing.T) {
 			},
 		},
 	}
-	prompt := buildSystemPrompt(spec, tools)
+	prompt := buildSystemPrompt(spec, tools, nil)
 	require.Contains(t, prompt, "build hello")
 	require.Contains(t, prompt, "exists")
 	require.Contains(t, prompt, "test -f hello")
@@ -828,4 +830,58 @@ func TestAgentLoop_CompactNow_TriggersCompaction(t *testing.T) {
 		}
 	}
 	require.True(t, sawForced, "expected compact_start with forced=true after compact_now tool call")
+}
+
+func TestAgentLoop_PrependsMemoryBank_FullWhenSmall(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "memory")
+	bank := memory.New(dir)
+	require.NoError(t, bank.Init())
+	require.NoError(t, bank.Write(memory.FileProgress, "## Done\n- step 1\n"))
+	require.NoError(t, bank.Write(memory.FileProjectBrief, "Build a CLI\n"))
+
+	spec := &gilv1.FrozenSpec{Goal: &gilv1.Goal{OneLiner: "test"}, Verification: &gilv1.Verification{}}
+	sysPrompt := buildSystemPrompt(spec, nil, bank)
+	require.Contains(t, sysPrompt, "## Memory Bank")
+	require.Contains(t, sysPrompt, "### projectbrief.md")
+	require.Contains(t, sysPrompt, "Build a CLI")
+	require.Contains(t, sysPrompt, "### progress.md")
+	require.Contains(t, sysPrompt, "- step 1")
+	require.NotContains(t, sysPrompt, "exceeds inline budget")
+}
+
+func TestAgentLoop_PrependsMemoryBank_OnlyProgressWhenLarge(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "memory")
+	bank := memory.New(dir)
+	require.NoError(t, bank.Init())
+	// Make the bank exceed 4000 tokens (~16000 chars). Stuff techContext.
+	big := strings.Repeat("xxxx", 5000) // 20000 chars ≈ 5000 tokens
+	require.NoError(t, bank.Write(memory.FileTechContext, big))
+	require.NoError(t, bank.Write(memory.FileProgress, "## Done\n- progress shown\n"))
+
+	spec := &gilv1.FrozenSpec{Goal: &gilv1.Goal{OneLiner: "test"}, Verification: &gilv1.Verification{}}
+	sysPrompt := buildSystemPrompt(spec, nil, bank)
+	require.Contains(t, sysPrompt, "## Memory Bank")
+	require.Contains(t, sysPrompt, "exceeds inline budget")
+	require.Contains(t, sysPrompt, "### progress.md")
+	require.Contains(t, sysPrompt, "- progress shown")
+	// Content of techContext should NOT be inlined
+	require.NotContains(t, sysPrompt, "xxxx")
+	// But it should be listed
+	require.Contains(t, sysPrompt, "techContext.md")
+	require.Contains(t, sysPrompt, "memory_load")
+}
+
+func TestAgentLoop_NilBank_NoMemorySection(t *testing.T) {
+	spec := &gilv1.FrozenSpec{Goal: &gilv1.Goal{OneLiner: "test"}, Verification: &gilv1.Verification{}}
+	sysPrompt := buildSystemPrompt(spec, nil, nil)
+	require.NotContains(t, sysPrompt, "## Memory Bank")
+	require.NotContains(t, sysPrompt, "memory_load")
+}
+
+func TestAgentLoop_EmptyBank_NoMemorySection(t *testing.T) {
+	// Bank exists but has no files written yet
+	bank := memory.New(filepath.Join(t.TempDir(), "memory")) // Init NOT called
+	spec := &gilv1.FrozenSpec{Goal: &gilv1.Goal{OneLiner: "test"}, Verification: &gilv1.Verification{}}
+	sysPrompt := buildSystemPrompt(spec, nil, bank)
+	require.NotContains(t, sysPrompt, "## Memory Bank")
 }
