@@ -23,6 +23,7 @@ import (
 	"github.com/jedutools/gil/core/runner"
 	"github.com/jedutools/gil/core/session"
 	"github.com/jedutools/gil/core/specstore"
+	"github.com/jedutools/gil/core/stuck"
 	"github.com/jedutools/gil/core/tool"
 	"github.com/jedutools/gil/core/verify"
 	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
@@ -557,6 +558,18 @@ func (s *RunService) executeRun(
 	loop := runner.NewAgentLoop(spec, prov, model, tools, ver)
 	loop.Events = stream
 	loop.Memory = bank
+
+	// Wire compact_now tool: must be added after loop is created so we can pass
+	// the loop itself as the CompactRequester. Appended last so it appears in
+	// the tool list but doesn't shadow other tools.
+	tools = append(tools, &tool.CompactNow{Requester: loop})
+	// Rebuild the loop's internal tool set to include compact_now.
+	loop.Tools = tools
+
+	// Wire stuck detector so the long-run soak and production runs can detect
+	// repeated-action patterns and surface them as events. No recovery strategy
+	// here; every signal is unrecovered (counts toward the 3-signal abort).
+	loop.StuckDetector = &stuck.Detector{Window: 50}
 
 	// Build permission gate from spec.risk.autonomy. Returns nil for FULL.
 	var autonomy gilv1.AutonomyDial

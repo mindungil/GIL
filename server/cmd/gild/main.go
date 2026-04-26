@@ -138,6 +138,14 @@ func newServer(dbPath, sockPath, sessionsBase string) (*server, error) {
 						StopReason: "end_turn",
 					},
 				}), "mock-model", nil
+			case "run-soak":
+				// 30-turn scripted soak that exercises:
+				//   - many write_file calls (workspace mutation)
+				//   - periodic memory_update (bank persistence)
+				//   - one compact_now (compactor exercise)
+				//   - one repeated tool sequence (stuck detector + AltToolOrder)
+				//   - final end_turn → verifier passes (workspace contains soak.txt)
+				return provider.NewMockToolProvider(buildSoakScenario()), "mock-model", nil
 			case "run-memory-repomap":
 				// Scripted scenario for Phase 6 e2e: repomap → memory_update → write_file → end → milestone update.
 				return provider.NewMockToolProvider([]provider.MockTurn{
@@ -275,6 +283,109 @@ func main() {
 		fmt.Fprintln(os.Stderr, "gild serve:", err)
 	}
 	srv.Stop()
+}
+
+// buildSoakScenario returns a ~30-turn scripted sequence for GIL_MOCK_MODE=run-soak.
+// It exercises write_file (workspace mutation), memory_update (bank persistence),
+// compact_now (compactor trigger), repeated bash calls (stuck-detector trigger),
+// and a final end_turn that allows the verifier to confirm soak.txt exists.
+//
+// Ordering is chosen so that soak.txt and the "wrote 10 files" memory entry are
+// persisted before the stuck-triggering bash loop begins. If stuck detection aborts
+// the run early, the test assertions about soak.txt + memory still hold.
+func buildSoakScenario() []provider.MockTurn {
+	var turns []provider.MockTurn
+
+	// Phase 1: 10 write_file calls building up workspace
+	for i := 0; i < 10; i++ {
+		turns = append(turns, provider.MockTurn{
+			Text: fmt.Sprintf("Writing file %d", i),
+			ToolCalls: []provider.ToolCall{{
+				ID:    fmt.Sprintf("w%d", i),
+				Name:  "write_file",
+				Input: json.RawMessage(fmt.Sprintf(`{"path":"f%d.txt","content":"soak %d\n"}`, i, i)),
+			}},
+			StopReason: "tool_use",
+		})
+	}
+
+	// Phase 2: memory_update to record progress
+	turns = append(turns, provider.MockTurn{
+		Text: "Recording progress to memory.",
+		ToolCalls: []provider.ToolCall{{
+			ID:    "mu1",
+			Name:  "memory_update",
+			Input: json.RawMessage(`{"file":"progress","section":"Done","content":"- wrote 10 files"}`),
+		}},
+		StopReason: "tool_use",
+	})
+
+	// Phase 3: write soak.txt now so it exists even if the run ends early (e.g. stuck).
+	turns = append(turns, provider.MockTurn{
+		Text: "Writing soak.txt to satisfy the verifier.",
+		ToolCalls: []provider.ToolCall{{
+			ID:    "wfin",
+			Name:  "write_file",
+			Input: json.RawMessage(`{"path":"soak.txt","content":"soak complete\n"}`),
+		}},
+		StopReason: "tool_use",
+	})
+
+	// Phase 4: compact_now to exercise compactor
+	turns = append(turns, provider.MockTurn{
+		Text: "Compacting context.",
+		ToolCalls: []provider.ToolCall{{
+			ID:    "c1",
+			Name:  "compact_now",
+			Input: json.RawMessage(`{"reason":"midway"}`),
+		}},
+		StopReason: "tool_use",
+	})
+
+	// Phase 5: 6 repeated identical tool calls to trigger stuck detector.
+	// PatternRepeatedActionObservation triggers at 4 identical pairs.
+	// The run may abort as stuck here; that is acceptable (test allows stuck status).
+	for i := 0; i < 6; i++ {
+		turns = append(turns, provider.MockTurn{
+			Text: "Looping bash for stuck detection.",
+			ToolCalls: []provider.ToolCall{{
+				ID:    fmt.Sprintf("b%d", i),
+				Name:  "bash",
+				Input: json.RawMessage(`{"command":"echo loop"}`),
+			}},
+			StopReason: "tool_use",
+		})
+	}
+
+	// Phase 6: memory_update final (may not be reached if stuck fires first)
+	turns = append(turns, provider.MockTurn{
+		Text: "Final memory update.",
+		ToolCalls: []provider.ToolCall{{
+			ID:    "mufin",
+			Name:  "memory_update",
+			Input: json.RawMessage(`{"file":"progress","section":"Done","content":"- soak run complete"}`),
+		}},
+		StopReason: "tool_use",
+	})
+
+	// Phase 7: end_turn → verifier checks soak.txt, then memory milestone fires
+	turns = append(turns, provider.MockTurn{
+		Text:       "Done.",
+		StopReason: "end_turn",
+	})
+
+	// Phase 8: milestone gate response (called after verification passes)
+	turns = append(turns, provider.MockTurn{
+		Text: "Recording milestone completion.",
+		ToolCalls: []provider.ToolCall{{
+			ID:    "mums",
+			Name:  "memory_update",
+			Input: json.RawMessage(`{"file":"progress","section":"Done","content":"- milestone gate: soak complete"}`),
+		}},
+		StopReason: "end_turn",
+	})
+
+	return turns
 }
 
 // runHTTPGateway starts an HTTP/JSON reverse-proxy that translates REST calls
