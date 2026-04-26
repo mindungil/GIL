@@ -3,10 +3,12 @@ package stuck
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/jedutools/gil/core/checkpoint"
+	"github.com/jedutools/gil/core/provider"
 	"github.com/stretchr/testify/require"
 )
 
@@ -191,7 +193,6 @@ func TestStubs_ReturnErrNoFallback(t *testing.T) {
 
 	stubs := []Strategy{
 		SubagentBranchStrategy{},
-		AdversaryConsultStrategy{},
 	}
 
 	for _, s := range stubs {
@@ -329,4 +330,145 @@ func TestResetSectionStrategy_ListCommitsError_ReturnsError(t *testing.T) {
 	})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "git offline")
+}
+
+// --------------------------------------------------------------------------
+// AdversaryConsultStrategy tests
+// --------------------------------------------------------------------------
+
+// fakeProvider returns the configured response for use in adversary tests.
+type fakeProvider struct {
+	resp provider.Response
+	err  error
+	seen []provider.Request
+}
+
+func (f *fakeProvider) Name() string { return "fake" }
+func (f *fakeProvider) Complete(_ context.Context, req provider.Request) (provider.Response, error) {
+	f.seen = append(f.seen, req)
+	return f.resp, f.err
+}
+
+func TestAdversaryConsultStrategy_LLMSuggestsStep(t *testing.T) {
+	fp := &fakeProvider{resp: provider.Response{Text: "Run git status before retrying.\nThis grounds the next decision."}}
+	s := AdversaryConsultStrategy{}
+	dec, err := s.Apply(context.Background(), ApplyRequest{
+		Signal:         Signal{Pattern: PatternRepeatedActionError, Detail: "x", Count: 3},
+		Provider:       fp,
+		CurrentModel:   "main",
+		RecentMessages: []provider.Message{{Role: provider.RoleUser, Content: "do the thing"}},
+	})
+	require.NoError(t, err)
+	require.Equal(t, ActionAdversaryConsult, dec.Action)
+	require.Contains(t, dec.Explanation, "Run git status before retrying.")
+	require.NotContains(t, dec.Explanation, "This grounds the next decision.", "should take only first line")
+	// Sanity: provider was called with adversary system prompt + structured user message
+	require.Len(t, fp.seen, 1)
+	require.Contains(t, fp.seen[0].System, "adversarial reviewer")
+	require.Contains(t, fp.seen[0].Messages[0].Content, "STUCK PATTERN DETECTED")
+}
+
+func TestAdversaryConsultStrategy_AdversaryModelOverride(t *testing.T) {
+	fp := &fakeProvider{resp: provider.Response{Text: "do the next thing"}}
+	s := AdversaryConsultStrategy{}
+	_, err := s.Apply(context.Background(), ApplyRequest{
+		Signal:         Signal{Pattern: PatternRepeatedActionError, Count: 2},
+		Provider:       fp,
+		CurrentModel:   "main-model",
+		AdversaryModel: "adversary-model",
+	})
+	require.NoError(t, err)
+	require.Equal(t, "adversary-model", fp.seen[0].Model)
+}
+
+func TestAdversaryConsultStrategy_AdversaryModelEmptyFallsBackToCurrent(t *testing.T) {
+	fp := &fakeProvider{resp: provider.Response{Text: "x"}}
+	s := AdversaryConsultStrategy{}
+	_, err := s.Apply(context.Background(), ApplyRequest{
+		Signal:       Signal{Pattern: PatternRepeatedActionError, Count: 2},
+		Provider:     fp,
+		CurrentModel: "main-model",
+		// AdversaryModel: ""
+	})
+	require.NoError(t, err)
+	require.Equal(t, "main-model", fp.seen[0].Model)
+}
+
+func TestAdversaryConsultStrategy_NoProvider_ErrNoFallback(t *testing.T) {
+	s := AdversaryConsultStrategy{}
+	_, err := s.Apply(context.Background(), ApplyRequest{
+		Signal:       Signal{Pattern: PatternRepeatedActionError, Count: 2},
+		Provider:     nil,
+		CurrentModel: "m",
+	})
+	require.ErrorIs(t, err, ErrNoFallback)
+}
+
+func TestAdversaryConsultStrategy_NoModel_ErrNoFallback(t *testing.T) {
+	fp := &fakeProvider{resp: provider.Response{Text: "x"}}
+	s := AdversaryConsultStrategy{}
+	_, err := s.Apply(context.Background(), ApplyRequest{
+		Signal:   Signal{Pattern: PatternRepeatedActionError, Count: 2},
+		Provider: fp,
+		// no model fields
+	})
+	require.ErrorIs(t, err, ErrNoFallback)
+}
+
+func TestAdversaryConsultStrategy_ContextOverflow_ErrNoFallback(t *testing.T) {
+	fp := &fakeProvider{resp: provider.Response{Text: "x"}}
+	s := AdversaryConsultStrategy{}
+	_, err := s.Apply(context.Background(), ApplyRequest{
+		Signal:       Signal{Pattern: PatternContextWindowError, Count: 2},
+		Provider:     fp,
+		CurrentModel: "m",
+	})
+	require.ErrorIs(t, err, ErrNoFallback)
+}
+
+func TestAdversaryConsultStrategy_LLMError_PropagatesWrapped(t *testing.T) {
+	fp := &fakeProvider{err: errors.New("network down")}
+	s := AdversaryConsultStrategy{}
+	_, err := s.Apply(context.Background(), ApplyRequest{
+		Signal:       Signal{Pattern: PatternRepeatedActionError, Count: 2},
+		Provider:     fp,
+		CurrentModel: "m",
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "adversary_consult")
+	require.Contains(t, err.Error(), "network down")
+}
+
+func TestAdversaryConsultStrategy_EmptyResponse_ErrNoFallback(t *testing.T) {
+	fp := &fakeProvider{resp: provider.Response{Text: "   \n   "}}
+	s := AdversaryConsultStrategy{}
+	_, err := s.Apply(context.Background(), ApplyRequest{
+		Signal:       Signal{Pattern: PatternRepeatedActionError, Count: 2},
+		Provider:     fp,
+		CurrentModel: "m",
+	})
+	require.ErrorIs(t, err, ErrNoFallback)
+}
+
+func TestBuildAdversaryConsultPrompt_TruncatesLongMessages(t *testing.T) {
+	long := strings.Repeat("x", 500)
+	out := buildAdversaryConsultPrompt(
+		Signal{Pattern: PatternRepeatedActionError, Detail: "d", Count: 2},
+		[]provider.Message{{Role: provider.RoleUser, Content: long}},
+	)
+	// Each message capped at 200 chars + ellipsis
+	require.Contains(t, out, strings.Repeat("x", 200)+"…")
+	require.NotContains(t, out, strings.Repeat("x", 201))
+}
+
+func TestBuildAdversaryConsultPrompt_CapsRecentTo10(t *testing.T) {
+	msgs := make([]provider.Message, 20)
+	for i := range msgs {
+		msgs[i] = provider.Message{Role: provider.RoleUser, Content: fmt.Sprintf("msg-%d", i)}
+	}
+	out := buildAdversaryConsultPrompt(Signal{Pattern: PatternRepeatedActionError, Count: 1}, msgs)
+	// Should contain msg-19 (last) but NOT msg-9 (older than the last 10)
+	require.Contains(t, out, "msg-19")
+	require.Contains(t, out, "msg-10")
+	require.NotContains(t, out, "msg-9")
 }

@@ -1371,6 +1371,98 @@ func TestAgentLoop_ResetSection_RollsBackAndContinues(t *testing.T) {
 	require.Greater(t, resetCount, 0, "expected at least one stuck_reset_section event")
 }
 
+// loopingTool is a tool that always succeeds with "ok", used to generate
+// repeated tool-call patterns for stuck detection tests.
+type loopingTool struct{}
+
+func (l *loopingTool) Name() string        { return "noop" }
+func (l *loopingTool) Description() string { return "no-op looping tool" }
+func (l *loopingTool) Schema() json.RawMessage {
+	return json.RawMessage(`{"type":"object"}`)
+}
+func (l *loopingTool) Run(_ context.Context, _ json.RawMessage) (tool.Result, error) {
+	return tool.Result{Content: "ok"}, nil
+}
+
+// interceptingProv routes calls based on whether the system prompt contains
+// "adversarial reviewer": adversary calls get a suggestion; main calls get a
+// repeated noop tool call to trigger stuck detection.
+type interceptingProv struct {
+	mu        sync.Mutex
+	captureFn func(provider.Request)
+}
+
+func (p *interceptingProv) Name() string { return "intercept" }
+func (p *interceptingProv) Complete(_ context.Context, req provider.Request) (provider.Response, error) {
+	if p.captureFn != nil {
+		p.captureFn(req)
+	}
+	if strings.Contains(req.System, "adversarial reviewer") {
+		return provider.Response{
+			Text:       "Use a different tool than 'noop' on the next iteration.",
+			StopReason: "end_turn",
+		}, nil
+	}
+	return provider.Response{
+		Text:       "looping",
+		ToolCalls:  []provider.ToolCall{{ID: "x", Name: "noop", Input: json.RawMessage(`{}`)}},
+		StopReason: "tool_use",
+	}, nil
+}
+
+func TestAgentLoop_AdversaryConsult_AppendsSuggestionToNextSystemPrompt(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	type captured struct{ system, model string }
+	var capturedSysMu sync.Mutex
+	var capturedSys []captured
+
+	prov := &interceptingProv{
+		captureFn: func(req provider.Request) {
+			capturedSysMu.Lock()
+			defer capturedSysMu.Unlock()
+			capturedSys = append(capturedSys, captured{system: req.System, model: req.Model})
+		},
+	}
+
+	spec := &gilv1.FrozenSpec{
+		Budget: &gilv1.Budget{MaxIterations: 8},
+		Verification: &gilv1.Verification{
+			Checks: []*gilv1.Check{{Name: "fail", Kind: gilv1.CheckKind_SHELL, Command: "false"}},
+		},
+	}
+	loop := &AgentLoop{
+		Spec:           spec,
+		Provider:       prov,
+		Model:          "main-model",
+		AdversaryModel: "adversary-model",
+		Tools:          []tool.Tool{&loopingTool{}},
+		Verifier:       verify.NewRunner(t.TempDir()),
+		StuckDetector:  &stuck.Detector{Window: 50},
+		StuckStrategy:  stuck.AdversaryConsultStrategy{},
+		StuckThreshold: 5,
+		Events:         event.NewStream(),
+	}
+	_, err := loop.Run(ctx)
+	require.NoError(t, err)
+
+	capturedSysMu.Lock()
+	defer capturedSysMu.Unlock()
+	var sawAdversaryCall bool
+	var sawNoteInjected bool
+	for _, c := range capturedSys {
+		if strings.Contains(c.system, "adversarial reviewer") && c.model == "adversary-model" {
+			sawAdversaryCall = true
+		}
+		if strings.Contains(c.system, "URGENT NOTE") && strings.Contains(c.system, "ADVERSARY SUGGESTION") {
+			sawNoteInjected = true
+		}
+	}
+	require.True(t, sawAdversaryCall, "expected at least one Complete() call with adversary system prompt + adversary-model")
+	require.True(t, sawNoteInjected, "expected at least one Complete() call where system prompt contained the injected ADVERSARY SUGGESTION note")
+}
+
 func TestAgentLoop_MilestoneGate_NonMemoryToolsIgnored(t *testing.T) {
 	workspace := t.TempDir()
 	bank := memory.New(filepath.Join(workspace, "memory"))

@@ -49,6 +49,10 @@ type AgentLoop struct {
 	StuckThreshold int            // abort after this many UN-recovered signals; default 3 if zero
 	StuckCheckEvery int           // run detector every N iterations; default 1 if zero
 
+	// AdversaryModel is used by AdversaryConsultStrategy. If empty, falls back
+	// to a.Model.
+	AdversaryModel string
+
 	// Memory bank, optional. If non-nil, the system prompt prepends bank
 	// contents (full when small, progress-only when large).
 	Memory *memory.Bank
@@ -214,11 +218,14 @@ func (a *AgentLoop) Run(ctx context.Context) (*Result, error) {
 					recovered := false
 					if a.StuckStrategy != nil {
 						dec, err := a.StuckStrategy.Apply(ctx, stuck.ApplyRequest{
-							Signal:       sig,
-							CurrentModel: a.Model,
-							ModelChain:   a.ModelChain,
-							Iteration:    iter,
-							Checkpoint:   a.Checkpoint,
+							Signal:         sig,
+							CurrentModel:   a.Model,
+							ModelChain:     a.ModelChain,
+							Iteration:      iter,
+							Checkpoint:     a.Checkpoint,
+							Provider:       a.Provider,
+							AdversaryModel: a.AdversaryModel,
+							RecentMessages: snapshotMessages(messages, 10),
 						})
 						if err == nil && dec.Action == stuck.ActionSwitchModel {
 							a.emit(event.SourceSystem, event.KindNote, "stuck_recovered", map[string]any{
@@ -236,6 +243,15 @@ func (a *AgentLoop) Run(ctx context.Context) (*Result, error) {
 								"explanation": dec.Explanation,
 							})
 							a.extraSystemNote = dec.Explanation
+							recovered = true
+						}
+						if err == nil && dec.Action == stuck.ActionAdversaryConsult {
+							a.emit(event.SourceSystem, event.KindNote, "stuck_recovered", map[string]any{
+								"strategy":    a.StuckStrategy.Name(),
+								"action":      "adversary_consult",
+								"explanation": dec.Explanation,
+							})
+							a.extraSystemNote = dec.Explanation // same single-shot mechanism as AltToolOrder
 							recovered = true
 						}
 						if err == nil && dec.Action == stuck.ActionResetSection && a.Checkpoint != nil {
@@ -649,6 +665,17 @@ func countMemoryCalls(calls []provider.ToolCall) int {
 		}
 	}
 	return n
+}
+
+// snapshotMessages returns a copy of the last n messages (or all if fewer).
+func snapshotMessages(msgs []provider.Message, n int) []provider.Message {
+	start := len(msgs) - n
+	if start < 0 {
+		start = 0
+	}
+	out := make([]provider.Message, len(msgs)-start)
+	copy(out, msgs[start:])
+	return out
 }
 
 // estimateMessagesTokens uses the same 4-chars-per-token heuristic as compact.estimateTokens.

@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/jedutools/gil/core/checkpoint"
+	"github.com/jedutools/gil/core/provider"
 )
 
 // Strategy is one tactic for recovering from a detected stuck Signal.
@@ -28,10 +30,15 @@ type CheckpointReader interface {
 // ApplyRequest carries the minimum read-only context a strategy needs.
 type ApplyRequest struct {
 	Signal       Signal
-	CurrentModel string          // model id currently being used
-	ModelChain   []string        // ordered fallback chain (may be empty)
-	Iteration    int             // current iteration count
+	CurrentModel string           // model id currently being used
+	ModelChain   []string         // ordered fallback chain (may be empty)
+	Iteration    int              // current iteration count
 	Checkpoint   CheckpointReader // nil-safe; nil → strategy returns ErrNoFallback
+
+	// Fields used by AdversaryConsultStrategy.
+	Provider       provider.Provider  // nil → strategy returns ErrNoFallback
+	AdversaryModel string             // if empty, falls back to CurrentModel
+	RecentMessages []provider.Message // last N messages for LLM context (10 is fine)
 }
 
 // Action enumerates the operations AgentLoop knows how to perform.
@@ -213,11 +220,106 @@ func short(sha string) string {
 	return sha
 }
 
-// AdversaryConsultStrategy will invoke the adversary on the stuck context.
-// Phase 6: requires adversary turn from runtime.
+// AdversaryConsultStrategy makes a one-shot call to the adversary model
+// asking for a concrete next step to escape the current stuck pattern.
+//
+// Lifted from Goose's adversary_inspector (goose/crates/goose/src/security/
+// adversary_inspector.rs:241 consult_llm). Goose uses this pattern to BLOCK
+// dangerous tool calls; we adapt it to SUGGEST escape hatches when stuck.
+//
+// Behavior:
+//   - Returns Decision{Action: ActionAdversaryConsult, Explanation: <suggestion>}
+//     when the LLM responds successfully.
+//   - Returns ErrNoFallback when Provider is nil (no LLM available) — fail-open
+//     analog of Goose's "No provider available" path.
+//   - Returns ErrNoFallback for ContextWindow patterns (a separate LLM call
+//     when context is overflowing would just make it worse).
 type AdversaryConsultStrategy struct{}
 
 func (AdversaryConsultStrategy) Name() string { return "adversary_consult" }
-func (AdversaryConsultStrategy) Apply(ctx context.Context, req ApplyRequest) (Decision, error) {
-	return Decision{}, ErrNoFallback // Phase 6
+
+const adversarySystemPrompt = `You are an adversarial reviewer of an autonomous coding agent's progress. The agent has detected it is stuck in a repetitive or unproductive pattern. Your ONLY job: suggest ONE concrete next step the agent should try.
+
+Respond with ONE LINE — a terse, actionable instruction starting with a verb. Examples:
+- "Run 'git status' to verify the workspace state before retrying."
+- "Read the failing test's source file and trace which assertion fails."
+- "Stop using the 'bash' tool for this; use 'write_file' to inspect intermediate state instead."
+
+Do NOT add preamble, bullets, or multiple suggestions. ONE LINE.`
+
+func (s AdversaryConsultStrategy) Apply(ctx context.Context, req ApplyRequest) (Decision, error) {
+	if req.Signal.Pattern == PatternContextWindowError {
+		return Decision{}, ErrNoFallback
+	}
+	if req.Provider == nil {
+		return Decision{}, ErrNoFallback
+	}
+	model := req.AdversaryModel
+	if model == "" {
+		model = req.CurrentModel
+	}
+	if model == "" {
+		return Decision{}, ErrNoFallback
+	}
+
+	userMsg := buildAdversaryConsultPrompt(req.Signal, req.RecentMessages)
+	resp, err := req.Provider.Complete(ctx, provider.Request{
+		Model:     model,
+		System:    adversarySystemPrompt,
+		Messages:  []provider.Message{{Role: provider.RoleUser, Content: userMsg}},
+		MaxTokens: 256,
+	})
+	if err != nil {
+		return Decision{}, fmt.Errorf("adversary_consult: %w", err)
+	}
+	suggestion := strings.TrimSpace(resp.Text)
+	// Take only the first line; defensive truncation (Goose pattern: output.trim().lines().skip(1)).
+	if i := strings.IndexByte(suggestion, '\n'); i >= 0 {
+		suggestion = strings.TrimSpace(suggestion[:i])
+	}
+	if suggestion == "" {
+		return Decision{}, ErrNoFallback
+	}
+	return Decision{
+		Action:      ActionAdversaryConsult,
+		Explanation: fmt.Sprintf("ADVERSARY SUGGESTION (pattern: %s): %s", req.Signal.Pattern.String(), suggestion),
+	}, nil
+}
+
+func buildAdversaryConsultPrompt(sig Signal, recent []provider.Message) string {
+	var sb strings.Builder
+	sb.WriteString("STUCK PATTERN DETECTED\n")
+	sb.WriteString("Pattern: ")
+	sb.WriteString(sig.Pattern.String())
+	sb.WriteString("\n")
+	sb.WriteString("Detail: ")
+	sb.WriteString(sig.Detail)
+	sb.WriteString("\n")
+	sb.WriteString(fmt.Sprintf("Count: %d\n\n", sig.Count))
+
+	if len(recent) > 0 {
+		sb.WriteString("Recent conversation (oldest first):\n")
+		// Cap at last 10 messages, truncate each to 200 chars (Goose pattern:
+		// safe_truncate(msg, 200) in consult_llm history_section).
+		start := 0
+		if len(recent) > 10 {
+			start = len(recent) - 10
+		}
+		for i := start; i < len(recent); i++ {
+			m := recent[i]
+			content := strings.ReplaceAll(m.Content, "\n", " ")
+			if len(content) > 200 {
+				content = content[:200] + "…"
+			}
+			sb.WriteString(fmt.Sprintf("[%s] %s\n", m.Role, content))
+			// Tool calls are useful too — mention briefly
+			for _, tc := range m.ToolCalls {
+				sb.WriteString(fmt.Sprintf("  → tool %s\n", tc.Name))
+			}
+		}
+		sb.WriteString("\n")
+	}
+
+	sb.WriteString("Suggest ONE concrete next step the agent should try.")
+	return sb.String()
 }
