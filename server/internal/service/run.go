@@ -28,6 +28,7 @@ import (
 	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
 	"github.com/jedutools/gil/runtime/docker"
 	"github.com/jedutools/gil/runtime/local"
+	"github.com/jedutools/gil/runtime/ssh"
 )
 
 // runProgressSnap holds live iteration/token counters for an active run.
@@ -122,8 +123,27 @@ func buildTools(workspaceDir string, ws *gilv1.Workspace) ([]tool.Tool, error) {
 			&tool.ReadFile{WorkingDir: workspaceDir},
 			&tool.Repomap{Root: workspaceDir},
 		}, nil
-	case gilv1.WorkspaceBackend_SSH, gilv1.WorkspaceBackend_VM:
-		return nil, fmt.Errorf("workspace backend %s not yet supported (Phase 8+)", backend.String())
+	case gilv1.WorkspaceBackend_SSH:
+		if !ssh.Available() {
+			return nil, fmt.Errorf("workspace backend SSH requires ssh, but it is not in PATH")
+		}
+		if ws == nil || ws.Path == "" {
+			return nil, fmt.Errorf("workspace backend SSH requires spec.workspace.path (e.g., user@host or user@host:port/key)")
+		}
+		host, port, keyPath := ssh.ParseTarget(ws.Path)
+		if host == "" {
+			return nil, fmt.Errorf("workspace backend SSH: failed to parse target %q", ws.Path)
+		}
+		sshWrap := &ssh.Wrapper{Host: host, Port: port, KeyPath: keyPath}
+		return []tool.Tool{
+			&tool.Bash{WorkingDir: workspaceDir, Wrapper: sshWrap},
+			// File ops stay LOCAL — Phase 8 limitation; remote file sync deferred to Phase 9.
+			&tool.WriteFile{WorkingDir: workspaceDir},
+			&tool.ReadFile{WorkingDir: workspaceDir},
+		}, nil
+
+	case gilv1.WorkspaceBackend_VM:
+		return nil, fmt.Errorf("workspace backend VM not yet supported (Phase 9+)")
 	default:
 		return nil, fmt.Errorf("unknown workspace backend: %v", backend)
 	}

@@ -394,19 +394,57 @@ func TestBuildTools_Docker_ReturnsTools_WhenDockerAvailable(t *testing.T) {
 	require.Nil(t, bash.Wrapper, "Wrapper should be nil at buildTools time for DOCKER")
 }
 
-func TestBuildTools_SSH_VM_Returns_NotSupported(t *testing.T) {
-	unsupported := []gilv1.WorkspaceBackend{
-		gilv1.WorkspaceBackend_SSH,
-		gilv1.WorkspaceBackend_VM,
+func TestBuildTools_SSH_RequiresSSHInPath(t *testing.T) {
+	// SSH backend requires ssh binary in PATH; always returns error when Path is empty.
+	_, err := buildTools("/work", &gilv1.Workspace{Backend: gilv1.WorkspaceBackend_SSH, Path: ""})
+	require.Error(t, err)
+	// Either "not in PATH" (ssh missing) or "requires spec.workspace.path" (ssh present but no path).
+	require.True(t,
+		containsAny(err.Error(), "not in PATH", "requires spec.workspace.path"),
+		"unexpected error: %v", err,
+	)
+}
+
+func TestBuildTools_SSH_WithPath_ReturnsTools(t *testing.T) {
+	if !sshAvailable() {
+		t.Skip("ssh not installed")
 	}
-	for _, backend := range unsupported {
-		backend := backend
-		t.Run(backend.String(), func(t *testing.T) {
-			_, err := buildTools("/work", &gilv1.Workspace{Backend: backend})
-			require.Error(t, err)
-			require.Contains(t, err.Error(), "not yet supported")
-		})
+	tools, err := buildTools("/work", &gilv1.Workspace{
+		Backend: gilv1.WorkspaceBackend_SSH,
+		Path:    "user@host",
+	})
+	require.NoError(t, err)
+	// SSH backend returns 3 tools (no Repomap — file ops stay local, no remote walk).
+	require.Len(t, tools, 3)
+	bash, ok := tools[0].(*tool.Bash)
+	require.True(t, ok, "first tool should be *tool.Bash")
+	require.NotNil(t, bash.Wrapper, "Wrapper should be set for SSH backend")
+}
+
+func TestBuildTools_VM_Returns_NotSupported(t *testing.T) {
+	_, err := buildTools("/work", &gilv1.Workspace{Backend: gilv1.WorkspaceBackend_VM})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "not yet supported")
+}
+
+// containsAny returns true if s contains any of the given substrings.
+func containsAny(s string, subs ...string) bool {
+	for _, sub := range subs {
+		if len(sub) > 0 && len(s) >= len(sub) {
+			for i := 0; i <= len(s)-len(sub); i++ {
+				if s[i:i+len(sub)] == sub {
+					return true
+				}
+			}
+		}
 	}
+	return false
+}
+
+// sshAvailable reports whether the ssh binary is in PATH.
+func sshAvailable() bool {
+	_, err := exec.LookPath("ssh")
+	return err == nil
 }
 
 func TestRunService_Restore_RollsBackWorkspace(t *testing.T) {
