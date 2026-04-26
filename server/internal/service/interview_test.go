@@ -119,10 +119,13 @@ func TestInterviewService_Start_NotFound_ReturnsError(t *testing.T) {
 }
 
 func TestInterviewService_Reply_AppendsAndGeneratesQuestion(t *testing.T) {
+	// Start needs: sensing JSON + first question = 2
+	// Reply needs: slotfill + next question = 2 (no adversary because slots aren't filled)
 	svc, repo, _ := newInterviewSvc(t, []string{
-		`{"domain":"web-saas","domain_confidence":0.9,"tech_hints":["go"],"scale_hint":"medium","ambiguity":"none"}`,
-		`What problem are you solving?`,
-		`How many users?`,
+		`{"domain":"x","domain_confidence":0.5}`,           // 1 sensing
+		`What problem are you solving?`,                     // 2 first question
+		`{"updates":[]}`,                                    // 3 slotfill (no extractions)
+		`Tell me about your users.`,                         // 4 next question
 	})
 	ctx := context.Background()
 
@@ -142,15 +145,62 @@ func TestInterviewService_Reply_AppendsAndGeneratesQuestion(t *testing.T) {
 	replyStream := &fakeReplyStream{ctx: ctx}
 	err = svc.Reply(&gilv1.ReplyRequest{
 		SessionId: s.ID,
-		Content:   "It's for a SaaS product",
+		Content:   "users are devs",
 	}, replyStream)
 	require.NoError(t, err)
 
 	// Should get a question back
 	require.Len(t, replyStream.events, 1)
-	evt := replyStream.events[0]
-	require.NotNil(t, evt.GetAgentTurn())
-	require.Contains(t, evt.GetAgentTurn().Content, "users")
+	agentTurn := replyStream.events[0].GetAgentTurn()
+	require.NotNil(t, agentTurn)
+	require.Equal(t, "Tell me about your users.", agentTurn.Content)
+}
+
+func TestInterviewService_Reply_AdvancesToConfirmWhenSaturated(t *testing.T) {
+	// Start (2) + Reply (slotfill that fills all slots + adversary [] + audit ready=true = 3) = 5
+	svc, repo, _ := newInterviewSvc(t, []string{
+		`{"domain":"x","domain_confidence":0.5}`,                            // sensing
+		`What's your goal?`,                                                  // first question
+		`{"updates":[
+			{"field":"goal.one_liner","value":"Build CLI"},
+			{"field":"goal.success_criteria_natural","value":["a","b","c"]},
+			{"field":"constraints.tech_stack","value":["go"]},
+			{"field":"verification.checks","value":[{"name":"build","kind":"SHELL","command":"go build","expected_exit_code":0}]},
+			{"field":"workspace.backend","value":"LOCAL_SANDBOX"},
+			{"field":"models.main","value":{"provider":"anthropic","modelId":"claude-opus-4-7"}},
+			{"field":"risk.autonomy","value":"FULL"}
+		]}`,                                                                  // slotfill — fills all required
+		`[]`,                                                                  // adversary clean
+		`{"ready":true,"reason":"all good"}`,                                  // audit pass
+	})
+	ctx := context.Background()
+
+	// Create and start session
+	s, err := repo.Create(ctx, session.CreateInput{WorkingDir: "/x"})
+	require.NoError(t, err)
+
+	startStream := &fakeInterviewStream{ctx: ctx}
+	err = svc.Start(&gilv1.StartInterviewRequest{
+		SessionId:  s.ID,
+		FirstInput: "build",
+		Provider:   "mock",
+	}, startStream)
+	require.NoError(t, err)
+
+	// Send reply that triggers saturation
+	replyStream := &fakeReplyStream{ctx: ctx}
+	err = svc.Reply(&gilv1.ReplyRequest{
+		SessionId: s.ID,
+		Content:   "go cli with everything",
+	}, replyStream)
+	require.NoError(t, err)
+
+	// Should get a StageTransition to confirm
+	require.Len(t, replyStream.events, 1)
+	stageEvt := replyStream.events[0].GetStage()
+	require.NotNil(t, stageEvt)
+	require.Equal(t, "conversation", stageEvt.From)
+	require.Equal(t, "confirm", stageEvt.To)
 }
 
 func TestInterviewService_Reply_NoActiveInterview_ReturnsError(t *testing.T) {

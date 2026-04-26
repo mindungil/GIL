@@ -35,8 +35,9 @@ type InterviewService struct {
 }
 
 type interviewSlot struct {
-	state  *interview.State
-	engine *interview.Engine
+	state      *interview.State
+	engine     *interview.Engine
+	richEngine *interview.EngineWithSubmodels
 }
 
 // NewInterviewService constructs the service. sessionsBase is the directory
@@ -82,10 +83,11 @@ func (s *InterviewService) Start(req *gilv1.StartInterviewRequest, stream gilv1.
 		model = req.Model
 	}
 	eng := interview.NewEngine(prov, model)
+	richEng := interview.NewEngineWithSubmodels(prov, model, model, model) // single-model for Phase 3
 	st := interview.NewState()
 
 	s.mu.Lock()
-	s.states[req.SessionId] = &interviewSlot{state: st, engine: eng}
+	s.states[req.SessionId] = &interviewSlot{state: st, engine: eng, richEngine: richEng}
 	s.mu.Unlock()
 
 	// Run Sensing
@@ -114,7 +116,9 @@ func (s *InterviewService) Start(req *gilv1.StartInterviewRequest, stream gilv1.
 	})
 }
 
-// Reply handles the Reply RPC: appends user content, generates next question.
+// Reply handles the Reply RPC: runs richEngine.RunReplyTurn which orchestrates
+// slot filling, adversary, audit, and either emits a StageTransition (to confirm)
+// or AgentTurn (next question).
 func (s *InterviewService) Reply(req *gilv1.ReplyRequest, stream gilv1.InterviewService_ReplyServer) error {
 	ctx := stream.Context()
 
@@ -125,17 +129,25 @@ func (s *InterviewService) Reply(req *gilv1.ReplyRequest, stream gilv1.Interview
 		return status.Errorf(codes.FailedPrecondition, "no active interview for session %q", req.SessionId)
 	}
 
-	slot.state.AppendUser(req.Content)
-
-	q, err := slot.engine.NextQuestion(ctx, slot.state)
+	turn, err := slot.richEngine.RunReplyTurn(ctx, slot.state, req.Content)
 	if err != nil {
-		return status.Errorf(codes.Internal, "next question: %v", err)
+		return status.Errorf(codes.Internal, "reply turn: %v", err)
 	}
-	slot.state.AppendAssistant(q)
 
-	return stream.Send(&gilv1.InterviewEvent{
-		Payload: &gilv1.InterviewEvent_AgentTurn{AgentTurn: &gilv1.AgentTurn{Content: q}},
-	})
+	switch turn.Outcome {
+	case interview.ReplyOutcomeReadyToConfirm:
+		return stream.Send(&gilv1.InterviewEvent{
+			Payload: &gilv1.InterviewEvent_Stage{Stage: &gilv1.StageTransition{
+				From: "conversation", To: "confirm", Reason: turn.Content,
+			}},
+		})
+	case interview.ReplyOutcomeNextQuestion:
+		return stream.Send(&gilv1.InterviewEvent{
+			Payload: &gilv1.InterviewEvent_AgentTurn{AgentTurn: &gilv1.AgentTurn{Content: turn.Content}},
+		})
+	default:
+		return status.Errorf(codes.Internal, "unknown reply outcome %d", turn.Outcome)
+	}
 }
 
 // Confirm finalizes the spec: requires all required slots filled, calls
