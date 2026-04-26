@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -13,9 +14,10 @@ import (
 
 // Persister writes events to a JSONL append-only file.
 type Persister struct {
-	mu   sync.Mutex
-	file *os.File
-	w    *bufio.Writer
+	mu     sync.Mutex
+	file   *os.File
+	w      *bufio.Writer
+	closed bool
 }
 
 // jsonEvent is the JSON serialization format (no proto, human-readable).
@@ -85,6 +87,10 @@ func (p *Persister) Sync() error {
 func (p *Persister) Close() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.closed {
+		return nil
+	}
+	p.closed = true
 	if p.w != nil {
 		_ = p.w.Flush()
 	}
@@ -108,7 +114,10 @@ func LoadAll(path string) ([]Event, error) {
 			if jerr := json.Unmarshal(line, &je); jerr != nil {
 				return nil, jerr
 			}
-			ts, _ := time.Parse(time.RFC3339Nano, je.Timestamp)
+			ts, err := time.Parse(time.RFC3339Nano, je.Timestamp)
+			if err != nil {
+				return nil, fmt.Errorf("event %d: invalid timestamp %q: %w", je.ID, je.Timestamp, err)
+			}
 			out = append(out, Event{
 				ID:        je.ID,
 				Timestamp: ts,

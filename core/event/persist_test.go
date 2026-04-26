@@ -1,6 +1,7 @@
 package event
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -26,4 +27,27 @@ func TestPersister_AppendAndLoad(t *testing.T) {
 	require.Len(t, loaded, 2)
 	require.Equal(t, "first", loaded[0].Type)
 	require.Equal(t, int64(2), loaded[1].ID)
+}
+
+func TestPersister_Close_Idempotent(t *testing.T) {
+	dir := t.TempDir()
+	p, err := NewPersister(dir)
+	require.NoError(t, err)
+
+	require.NoError(t, p.Close())
+	require.NoError(t, p.Close()) // second close should not error
+}
+
+func TestLoadAll_NonexistentFile_ReturnsError(t *testing.T) {
+	_, err := LoadAll(filepath.Join(t.TempDir(), "missing.jsonl"))
+	require.Error(t, err)
+}
+
+func TestLoadAll_MalformedLine_ReturnsError(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	require.NoError(t, os.WriteFile(path, []byte("not json\n"), 0o644))
+
+	_, err := LoadAll(path)
+	require.Error(t, err)
 }
