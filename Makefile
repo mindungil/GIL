@@ -1,4 +1,4 @@
-.PHONY: tidy test gen build install clean e2e e2e2 e2e3 e2e4 e2e5 e2e6 e2e7 e2e8 e2e9 e2e10-modal e2e-all python-protos python-test
+.PHONY: tidy test gen build install clean e2e e2e2 e2e3 e2e4 e2e5 e2e6 e2e7 e2e8 e2e9 e2e10-modal e2e-all python-protos python-test release release-host release-check
 
 tidy:
 	@for m in core runtime proto server cli tui sdk mcp; do \
@@ -61,8 +61,34 @@ e2e10-modal: build
 
 e2e-all: e2e e2e2 e2e3 e2e4 e2e5 e2e6 e2e7 e2e8 e2e9 e2e10-modal
 
+# --- release ---------------------------------------------------------------
+# `make release` builds the full 4-binary x 4-platform matrix locally via
+# GoReleaser snapshot mode. Nothing is published. Use this to verify the
+# release config before tagging. Requires `goreleaser` on PATH (see
+# .goreleaser.yaml comments / https://goreleaser.com/install/).
+release:
+	@command -v goreleaser >/dev/null 2>&1 || { \
+		echo "goreleaser not found on PATH"; \
+		echo "install: https://goreleaser.com/install/"; \
+		exit 1; \
+	}
+	@goreleaser release --snapshot --clean --skip=publish
+
+# Faster snapshot for the host platform only — useful while iterating
+# on the .goreleaser.yaml itself.
+release-host:
+	@command -v goreleaser >/dev/null 2>&1 || { \
+		echo "goreleaser not found on PATH"; exit 1; \
+	}
+	@TARGETS="$$(go env GOOS)/$$(go env GOARCH)" \
+		goreleaser release --snapshot --clean --skip=publish --single-target
+
+# Verify the snapshot produced the expected artifacts under dist/.
+release-check:
+	@bash tests/release/check_artifacts.sh
+
 clean:
-	@rm -rf bin
+	@rm -rf bin dist
 
 # --- Python (gil_atropos) -------------------------------------------------
 
