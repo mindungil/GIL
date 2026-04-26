@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8" />
+	<meta http-equiv="Content-Security-Policy"
+		content="default-src 'none'; style-src ${cspSource} 'unsafe-inline'; script-src ${cspSource} 'unsafe-inline'; font-src ${cspSource};" />
+	<title>gil</title>
+	<style>
+		:root {
+			color-scheme: light dark;
+			font-family: var(--vscode-font-family, system-ui);
+			font-size: var(--vscode-font-size, 13px);
+			color: var(--vscode-foreground);
+			background: var(--vscode-sideBar-background);
+		}
+		body {
+			margin: 0;
+			padding: 8px;
+			display: flex;
+			flex-direction: column;
+			height: 100vh;
+			box-sizing: border-box;
+		}
+		.toolbar {
+			display: flex;
+			gap: 6px;
+			margin-bottom: 8px;
+		}
+		button {
+			background: var(--vscode-button-background);
+			color: var(--vscode-button-foreground);
+			border: none;
+			padding: 4px 10px;
+			cursor: pointer;
+			font-size: inherit;
+		}
+		button:hover {
+			background: var(--vscode-button-hoverBackground);
+		}
+		button.secondary {
+			background: var(--vscode-button-secondaryBackground);
+			color: var(--vscode-button-secondaryForeground);
+		}
+		button.secondary:hover {
+			background: var(--vscode-button-secondaryHoverBackground);
+		}
+		.sessions {
+			max-height: 40%;
+			overflow-y: auto;
+			border: 1px solid var(--vscode-panel-border, transparent);
+			margin-bottom: 8px;
+		}
+		.session-row {
+			padding: 6px 8px;
+			border-bottom: 1px solid var(--vscode-panel-border, transparent);
+			display: flex;
+			flex-direction: column;
+			gap: 2px;
+			cursor: pointer;
+		}
+		.session-row.selected {
+			background: var(--vscode-list-activeSelectionBackground);
+			color: var(--vscode-list-activeSelectionForeground);
+		}
+		.session-row:hover {
+			background: var(--vscode-list-hoverBackground);
+		}
+		.session-id {
+			font-family: var(--vscode-editor-font-family, monospace);
+			font-size: 12px;
+			opacity: 0.85;
+		}
+		.session-meta {
+			display: flex;
+			gap: 6px;
+			align-items: center;
+			font-size: 11px;
+		}
+		.status-pill {
+			padding: 1px 6px;
+			border-radius: 8px;
+			background: var(--vscode-badge-background);
+			color: var(--vscode-badge-foreground);
+			font-size: 10px;
+		}
+		.session-actions {
+			display: flex;
+			gap: 4px;
+			margin-top: 2px;
+		}
+		.session-actions button {
+			padding: 2px 6px;
+			font-size: 11px;
+		}
+		.events-header {
+			display: flex;
+			justify-content: space-between;
+			align-items: center;
+			margin: 4px 0;
+		}
+		.events {
+			flex: 1;
+			overflow-y: auto;
+			background: var(--vscode-editor-background);
+			color: var(--vscode-editor-foreground);
+			font-family: var(--vscode-editor-font-family, monospace);
+			font-size: 12px;
+			padding: 6px;
+			white-space: pre-wrap;
+			word-break: break-word;
+		}
+		.event-line {
+			border-bottom: 1px dotted var(--vscode-panel-border, transparent);
+			padding: 2px 0;
+		}
+		.empty {
+			opacity: 0.6;
+			padding: 8px;
+			text-align: center;
+		}
+		.error {
+			color: var(--vscode-errorForeground);
+			padding: 4px 0;
+		}
+	</style>
+</head>
+<body>
+	<div class="toolbar">
+		<button id="refresh">Refresh</button>
+		<button id="create" class="secondary">New Session</button>
+		<button id="stopTail" class="secondary">Stop Tail</button>
+	</div>
+
+	<div class="sessions" id="sessions">
+		<div class="empty">Loading sessions…</div>
+	</div>
+
+	<div class="events-header">
+		<strong id="events-title">Events</strong>
+		<span id="tail-status" style="opacity:0.7;font-size:11px;"></span>
+	</div>
+	<div class="events" id="events">
+		<div class="empty">Select a session and click "Tail" to stream its events.</div>
+	</div>
+
+	<script>
+		const vscode = acquireVsCodeApi();
+		const sessionsEl = document.getElementById('sessions');
+		const eventsEl = document.getElementById('events');
+		const eventsTitleEl = document.getElementById('events-title');
+		const tailStatusEl = document.getElementById('tail-status');
+		const refreshBtn = document.getElementById('refresh');
+		const createBtn = document.getElementById('create');
+		const stopBtn = document.getElementById('stopTail');
+
+		let selectedSessionId = null;
+		let tailingSessionId = null;
+		let eventCount = 0;
+
+		function escapeHtml(s) {
+			return String(s)
+				.replace(/&/g, '&amp;')
+				.replace(/</g, '&lt;')
+				.replace(/>/g, '&gt;')
+				.replace(/"/g, '&quot;');
+		}
+
+		function renderSessions(sessions) {
+			if (!sessions || sessions.length === 0) {
+				sessionsEl.innerHTML = '<div class="empty">No sessions. Click "New Session" to create one.</div>';
+				return;
+			}
+			sessionsEl.innerHTML = '';
+			for (const s of sessions) {
+				const row = document.createElement('div');
+				row.className = 'session-row' + (s.id === selectedSessionId ? ' selected' : '');
+				row.dataset.id = s.id;
+				row.innerHTML =
+					'<div class="session-id">' + escapeHtml(s.id) + '</div>' +
+					'<div class="session-meta">' +
+					'<span class="status-pill">' + escapeHtml(s.status) + '</span>' +
+					'<span>' + escapeHtml(s.workingDir || '') + '</span>' +
+					'</div>' +
+					(s.goalHint ? '<div style="font-size:11px;opacity:0.8">' + escapeHtml(s.goalHint) + '</div>' : '') +
+					'<div class="session-actions">' +
+					'<button data-action="tail">Tail</button>' +
+					'<button data-action="run" class="secondary">Run</button>' +
+					'</div>';
+				row.addEventListener('click', (ev) => {
+					const btn = ev.target.closest('button');
+					if (btn) {
+						const action = btn.dataset.action;
+						if (action === 'tail') {
+							selectedSessionId = s.id;
+							eventsEl.innerHTML = '';
+							eventCount = 0;
+							eventsTitleEl.textContent = 'Events — ' + s.id;
+							tailStatusEl.textContent = 'starting…';
+							vscode.postMessage({ type: 'tail', sessionId: s.id });
+						} else if (action === 'run') {
+							vscode.postMessage({ type: 'run', sessionId: s.id });
+						}
+						return;
+					}
+					selectedSessionId = s.id;
+					renderSessions(sessions);
+				});
+				sessionsEl.appendChild(row);
+			}
+		}
+
+		function appendEvent(ev) {
+			eventCount += 1;
+			const line = document.createElement('div');
+			line.className = 'event-line';
+			const ts = new Date(ev.timestampMs).toISOString();
+			line.textContent = '#' + ev.id + ' ' + ts + ' ' + ev.source + '/' + ev.kind + ' ' + ev.type + ' ' + (ev.dataJson || '');
+			eventsEl.appendChild(line);
+			eventsEl.scrollTop = eventsEl.scrollHeight;
+			tailStatusEl.textContent = 'streaming · ' + eventCount + ' events';
+		}
+
+		function appendError(message) {
+			const line = document.createElement('div');
+			line.className = 'error';
+			line.textContent = message;
+			eventsEl.appendChild(line);
+		}
+
+		refreshBtn.addEventListener('click', () => vscode.postMessage({ type: 'refresh' }));
+		createBtn.addEventListener('click', () => vscode.postMessage({ type: 'createSession' }));
+		stopBtn.addEventListener('click', () => {
+			vscode.postMessage({ type: 'stopTail' });
+			tailStatusEl.textContent = 'stopped';
+		});
+
+		window.addEventListener('message', (event) => {
+			const msg = event.data;
+			if (!msg) return;
+			switch (msg.type) {
+				case 'sessions':
+					renderSessions(msg.sessions || []);
+					break;
+				case 'tailStarted':
+					tailingSessionId = msg.sessionId;
+					tailStatusEl.textContent = 'streaming · 0 events';
+					break;
+				case 'event':
+					if (msg.sessionId === selectedSessionId) {
+						appendEvent(msg.event);
+					}
+					break;
+				case 'tailEnded':
+					if (msg.sessionId === tailingSessionId) {
+						tailStatusEl.textContent = 'ended (' + eventCount + ' events)';
+						tailingSessionId = null;
+					}
+					break;
+				case 'error':
+					appendError(msg.message || 'unknown error');
+					break;
+			}
+		});
+
+		vscode.postMessage({ type: 'refresh' });
+	</script>
+</body>
+</html>
