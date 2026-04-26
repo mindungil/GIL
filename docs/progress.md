@@ -41,17 +41,23 @@
 - [x] gil resume (in-progress 인터뷰 재개)
 - [x] E2E phase03 sanity script
 
-**Phase 4: 검증 + Stop** (대기)
-- [ ] `core/verify` 셸 단언 실행기
-- [ ] `core/stuck` 5패턴 시맨틱 감지
-- [ ] 자가 회복 5단계
-- [ ] `core/budget` + grace call
+**Phase 4: Run Engine** (완료 — 2026-04-26)
+- [x] core/tool 인터페이스 + Bash + WriteFile + ReadFile
+- [x] core/verify Runner (shell 단언 실행기)
+- [x] core/provider Retry wrapper (exponential backoff for 5xx/timeout/rate_limit)
+- [x] core/runner AgentLoop with Anthropic native tool use
+- [x] proto RunService (Start sync + Tail stub)
+- [x] server/RunService 구현 (frozen→running→done/stopped 상태 전환)
+- [x] gild + SDK + CLI run 통합
+- [x] gil events 명령 (Phase 5 stub 처리 포함)
+- [x] E2E phase04 — autonomous hello.txt run with mock provider
 
-**Phase 5: 워크스페이스/체크포인트** (대기)
-- [ ] `core/checkpoint` shadow git
-- [ ] `runtime/local` (bwrap+Seatbelt)
-- [ ] `runtime/docker`
-- [ ] `runtime/ssh`
+**Phase 5: Run Engine 개선** (대기)
+- [ ] 진짜 sandbox (bwrap/Seatbelt)
+- [ ] Shadow git checkpoint
+- [ ] Stuck detection + 자가 회복
+- [ ] 비동기 run + Tail event stream
+- [ ] core/event session 통합
 
 **Phase 6: 컨텍스트/메모리** (대기)
 - [ ] `core/compact` 캐시 보존 압축
@@ -88,6 +94,7 @@
 | 2026-04-26 | Phase 1 (코어 골격) 완료 — gild + gil new/status + event/spec/session 영속화. 18 tasks, ~30 commits. |
 | 2026-04-26 | Phase 2 (인터뷰 엔진) 완료 — 데몬 자동 spawn + Anthropic provider + InterviewService gRPC + gil interview/spec CLI. 13 tasks. adversary/self-audit는 Phase 3로 이연. |
 | 2026-04-26 | Phase 3 (인터뷰 엔진 실작동) 완료 — SlotFiller + Adversary + SelfAuditGate + RunReplyTurn 오케스트레이션 + gil resume. 7 tasks. cross-restart resume + per-stage 모델 분리 + retry/backoff은 Phase 4로 이연. |
+| 2026-04-26 | Phase 4 (Run Engine) 완료 — Tool/Bash/WriteFile/ReadFile + verify.Runner + provider Retry + AgentLoop (Anthropic native tool use) + RunService gRPC + gil run/events. 9 tasks. e2e4가 mock으로 hello.txt 자율 생성 + verifier 통과 시연. Phase 5: sandbox + shadow git + stuck recovery + async run. |
 
 ## 차용 출처 (코드/패턴)
 
@@ -132,6 +139,18 @@
 - **gil resume**: empty first_input sentinel로 in-progress 인터뷰 마지막 agent turn 재현 (cross-restart resume은 Phase 4)
 - **검증**: `make e2e-all` (e2e + e2e2 + e2e3) 모두 통과
 - **다음 단계**: Phase 4 — 진정한 cross-restart resume (state 디스크 영속화) + Provider retry/backoff + per-stage 모델 분리 (main/weak/editor/adversary)
+
+## Phase 4 산출물 요약 (2026-04-26)
+
+- **Tool 추상화**: `core/tool.Tool` 인터페이스 + builtin (Bash with timeout/truncation, WriteFile with mkdir, ReadFile with 16KB cap)
+- **Verifier**: `core/verify.Runner` — `spec.Verification.Checks` 셸 단언 실행 (exit code 기반, per-check 60s timeout, stdout/stderr 4KB 캡)
+- **Provider Retry**: `core/provider.Retry` wrapper — exponential backoff for 5xx/timeout/rate_limit; ctx 취소 존중; 비-retryable 즉시 propagate
+- **AgentLoop**: `core/runner.AgentLoop` — Anthropic native tool use, 시스템 프롬프트가 verification.checks 명시, 도구 dispatch, verify 실패 시 피드백 → 다음 턴, max_iterations / "done" / "error" 종료
+- **RunService gRPC**: Start (sync), Tail (Phase 5 stub). 세션 status 전환: frozen → running → done/stopped
+- **gil run / gil events**: 사용자가 frozen session에 대해 자율 실행 트리거, 결과 (status/iterations/tokens/verify) 표시
+- **e2e4 시연**: GIL_MOCK_MODE=run-hello로 gild 띄우고, frozen spec 인젝션 후 `gil run`이 mock provider 통해 write_file 호출 → hello.txt 생성 → verifier 통과 → "done"
+- **검증**: `make e2e-all` 4 phase (e2e + e2e2 + e2e3 + e2e4) 모두 통과
+- **다음 단계**: Phase 5 — 진짜 OS sandbox (bwrap/Seatbelt) + shadow git checkpoint per step + stuck detection + 자가 회복 + 비동기 run + core/event session 통합
 
 ## 미해결 / 추후 결정
 
