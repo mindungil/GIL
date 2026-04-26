@@ -3,6 +3,7 @@ module github.com/jedutools/gil/mcp
 go 1.25.0
 
 require (
+	github.com/jedutools/gil/core v0.0.0
 	github.com/jedutools/gil/sdk v0.0.0
 	github.com/stretchr/testify v1.11.1
 )
@@ -21,6 +22,7 @@ require (
 )
 
 replace (
+	github.com/jedutools/gil/core => ../core
 	github.com/jedutools/gil/proto => ../proto
 	github.com/jedutools/gil/sdk => ../sdk
 )

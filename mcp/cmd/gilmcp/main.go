@@ -8,7 +8,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/jedutools/gil/mcp/internal/jsonrpc"
+	"github.com/jedutools/gil/core/mcp/jsonrpc"
 	"github.com/jedutools/gil/mcp/internal/server"
 	"github.com/jedutools/gil/sdk"
 )
