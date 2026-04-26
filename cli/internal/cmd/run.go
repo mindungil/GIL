@@ -12,9 +12,11 @@ import (
 // runCmd returns the `gil run <session-id>` command.
 // Runs the agent loop synchronously (server-side) and prints the result.
 // With --detach, returns immediately and the server runs the loop in background.
+// With --interactive, the run is started in detached mode and the CLI then
+// reads slash commands from stdin until /quit or EOF — see runInteractive.
 func runCmd() *cobra.Command {
 	var socket, providerName, model string
-	var detach bool
+	var detach, interactive bool
 	c := &cobra.Command{
 		Use:   "run <session-id>",
 		Short: "Run the agent loop for a frozen session",
@@ -34,12 +36,26 @@ func runCmd() *cobra.Command {
 			}
 			defer cli.Close()
 
-			resp, err := cli.StartRun(ctx, sessionID, providerName, model, detach)
+			// --interactive forces detach so the foreground CLI goroutine
+			// is free to read stdin while the agent loop runs server-side.
+			// The slash-command surface is observation-only (see Track C
+			// ground rules) so this can never strand the run mid-tool-call.
+			runDetached := detach
+			if interactive {
+				runDetached = true
+			}
+			resp, err := cli.StartRun(ctx, sessionID, providerName, model, runDetached)
 			if err != nil {
 				return wrapRPCError(err)
 			}
 
 			out := cmd.OutOrStdout()
+			if interactive {
+				if resp.Status != "started" && resp.Status != "" {
+					fmt.Fprintf(out, "(run completed before interactive loop started: %s)\n", resp.Status)
+				}
+				return runInteractive(ctx, cli, sessionID, cmd.InOrStdin(), out)
+			}
 			if detach && resp.Status == "started" {
 				fmt.Fprintf(out, "Started run for %s (background).\n", sessionID)
 				fmt.Fprintf(out, "Watch progress:  gil events %s --tail\n", sessionID)
@@ -68,5 +84,6 @@ func runCmd() *cobra.Command {
 	c.Flags().StringVar(&providerName, "provider", "anthropic", "LLM provider (anthropic|mock)")
 	c.Flags().StringVar(&model, "model", "", "LLM model id (empty → provider default)")
 	c.Flags().BoolVar(&detach, "detach", false, "start run in background and return immediately")
+	c.Flags().BoolVar(&interactive, "interactive", false, "start run in background and accept slash commands from stdin")
 	return c
 }
