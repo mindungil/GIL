@@ -3,6 +3,7 @@ syntax = "proto3";
 package gil.v1;
 
 import "google/protobuf/timestamp.proto";
+import "google/api/annotations.proto";
 
 option go_package = "github.com/jedutools/gil/proto/gen/gil/v1;gilv1";
 
@@ -34,9 +35,22 @@ enum SessionStatus {
 }
 
 service SessionService {
-  rpc Create(CreateRequest) returns (Session);
-  rpc Get(GetRequest) returns (Session);
-  rpc List(ListRequest) returns (ListResponse);
+  rpc Create(CreateRequest) returns (Session) {
+    option (google.api.http) = {
+      post: "/v1/sessions"
+      body: "*"
+    };
+  }
+  rpc Get(GetRequest) returns (Session) {
+    option (google.api.http) = {
+      get: "/v1/sessions/{id}"
+    };
+  }
+  rpc List(ListRequest) returns (ListResponse) {
+    option (google.api.http) = {
+      get: "/v1/sessions"
+    };
+  }
 }
 
 message CreateRequest {

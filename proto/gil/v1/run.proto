@@ -3,6 +3,7 @@ syntax = "proto3";
 package gil.v1;
 
 import "gil/v1/event.proto";
+import "google/api/annotations.proto";
 
 option go_package = "github.com/jedutools/gil/proto/gen/gil/v1;gilv1";
 
@@ -10,20 +11,39 @@ service RunService {
   // Start runs the agent loop synchronously and returns the final result.
   // For long-running runs the client may also Tail to observe progress.
   // (Phase 4: synchronous; Phase 5 will add async / detached runs.)
-  rpc Start(StartRunRequest) returns (StartRunResponse);
+  rpc Start(StartRunRequest) returns (StartRunResponse) {
+    option (google.api.http) = {
+      post: "/v1/sessions/{session_id}/run"
+      body: "*"
+    };
+  }
 
   // Tail subscribes to the session's event stream (live + replay).
   // (Phase 4 stub: returns Unimplemented or empty stream until event
   // integration completes in Phase 5.)
-  rpc Tail(TailRequest) returns (stream Event);
+  rpc Tail(TailRequest) returns (stream Event) {
+    option (google.api.http) = {
+      get: "/v1/sessions/{session_id}/events"
+    };
+  }
 
   // Restore rolls the session's workspace back to the Nth checkpoint snapshot.
   // The session must not be currently running.
-  rpc Restore(RestoreRequest) returns (RestoreResponse);
+  rpc Restore(RestoreRequest) returns (RestoreResponse) {
+    option (google.api.http) = {
+      post: "/v1/sessions/{session_id}/restore"
+      body: "*"
+    };
+  }
 
   // AnswerPermission delivers a yes/no response to a pending permission_ask.
   // delivered=false means the request_id wasn't pending (timed out or unknown).
-  rpc AnswerPermission(AnswerPermissionRequest) returns (AnswerPermissionResponse);
+  rpc AnswerPermission(AnswerPermissionRequest) returns (AnswerPermissionResponse) {
+    option (google.api.http) = {
+      post: "/v1/sessions/{session_id}/answer_permission"
+      body: "*"
+    };
+  }
 }
 
 message StartRunRequest {

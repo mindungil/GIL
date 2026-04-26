@@ -1,9 +1,14 @@
 version: v2
 modules:
   - path: .
+deps:
+  - buf.build/googleapis/googleapis
 lint:
   use:
     - STANDARD
+  ignore_only:
+    RPC_REQUEST_RESPONSE_UNIQUE:
+      - gil/v1/session.proto
 breaking:
   use:
     - FILE

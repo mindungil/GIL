@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -8,13 +9,16 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"syscall"
 
+	"github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
 	_ "modernc.org/sqlite"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/jedutools/gil/core/provider"
 	"github.com/jedutools/gil/core/session"
@@ -197,6 +201,7 @@ func main() {
 	defaultBase := filepath.Join(home, ".gil")
 	base := flag.String("base", defaultBase, "data directory")
 	foreground := flag.Bool("foreground", false, "run in foreground")
+	httpAddr := flag.String("http", "", "if non-empty, start HTTP/JSON gateway on this addr (e.g., :8080)")
 	flag.Parse()
 
 	if !*foreground {
@@ -221,6 +226,14 @@ func main() {
 
 	slog.Info("gild ready", "socket", sockPath, "db", dbPath)
 
+	if *httpAddr != "" {
+		go func() {
+			if err := runHTTPGateway(*httpAddr, sockPath); err != nil {
+				slog.Error("http gateway exited", "err", err)
+			}
+		}()
+	}
+
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 
@@ -238,4 +251,29 @@ func main() {
 		fmt.Fprintln(os.Stderr, "gild serve:", err)
 	}
 	srv.Stop()
+}
+
+// runHTTPGateway starts an HTTP/JSON reverse-proxy that translates REST calls
+// to gRPC on the Unix domain socket at sockPath.
+func runHTTPGateway(addr, sockPath string) error {
+	mux := runtime.NewServeMux()
+	ctx := context.Background()
+	opts := []grpc.DialOption{
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, "unix", sockPath)
+		}),
+	}
+	target := "unix:" + sockPath
+	if err := gilv1.RegisterSessionServiceHandlerFromEndpoint(ctx, mux, target, opts); err != nil {
+		return err
+	}
+	if err := gilv1.RegisterRunServiceHandlerFromEndpoint(ctx, mux, target, opts); err != nil {
+		return err
+	}
+	if err := gilv1.RegisterInterviewServiceHandlerFromEndpoint(ctx, mux, target, opts); err != nil {
+		return err
+	}
+	slog.Info("http gateway listening", "addr", addr)
+	return http.ListenAndServe(addr, mux)
 }

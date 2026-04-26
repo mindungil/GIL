@@ -7,6 +7,7 @@
 package gilv1
 
 import (
+	_ "google.golang.org/genproto/googleapis/api/annotations"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	reflect "reflect"
@@ -516,7 +517,7 @@ var File_gil_v1_run_proto protoreflect.FileDescriptor
 
 const file_gil_v1_run_proto_rawDesc = "" +
 	"\n" +
-	"\x10gil/v1/run.proto\x12\x06gil.v1\x1a\x12gil/v1/event.proto\"z\n" +
+	"\x10gil/v1/run.proto\x12\x06gil.v1\x1a\x12gil/v1/event.proto\x1a\x1cgoogle/api/annotations.proto\"z\n" +
 	"\x0fStartRunRequest\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x1a\n" +
@@ -557,13 +558,13 @@ const file_gil_v1_run_proto_rawDesc = "" +
 	"request_id\x18\x02 \x01(\tR\trequestId\x12\x14\n" +
 	"\x05allow\x18\x03 \x01(\bR\x05allow\"8\n" +
 	"\x18AnswerPermissionResponse\x12\x1c\n" +
-	"\tdelivered\x18\x01 \x01(\bR\tdelivered2\x89\x02\n" +
+	"\tdelivered\x18\x01 \x01(\bR\tdelivered2\xc4\x03\n" +
 	"\n" +
-	"RunService\x12:\n" +
-	"\x05Start\x12\x17.gil.v1.StartRunRequest\x1a\x18.gil.v1.StartRunResponse\x12,\n" +
-	"\x04Tail\x12\x13.gil.v1.TailRequest\x1a\r.gil.v1.Event0\x01\x12:\n" +
-	"\aRestore\x12\x16.gil.v1.RestoreRequest\x1a\x17.gil.v1.RestoreResponse\x12U\n" +
-	"\x10AnswerPermission\x12\x1f.gil.v1.AnswerPermissionRequest\x1a .gil.v1.AnswerPermissionResponseB1Z/github.com/jedutools/gil/proto/gen/gil/v1;gilv1b\x06proto3"
+	"RunService\x12d\n" +
+	"\x05Start\x12\x17.gil.v1.StartRunRequest\x1a\x18.gil.v1.StartRunResponse\"(\x82\xd3\xe4\x93\x02\":\x01*\"\x1d/v1/sessions/{session_id}/run\x12V\n" +
+	"\x04Tail\x12\x13.gil.v1.TailRequest\x1a\r.gil.v1.Event\"(\x82\xd3\xe4\x93\x02\"\x12 /v1/sessions/{session_id}/events0\x01\x12h\n" +
+	"\aRestore\x12\x16.gil.v1.RestoreRequest\x1a\x17.gil.v1.RestoreResponse\",\x82\xd3\xe4\x93\x02&:\x01*\"!/v1/sessions/{session_id}/restore\x12\x8d\x01\n" +
+	"\x10AnswerPermission\x12\x1f.gil.v1.AnswerPermissionRequest\x1a .gil.v1.AnswerPermissionResponse\"6\x82\xd3\xe4\x93\x020:\x01*\"+/v1/sessions/{session_id}/answer_permissionB1Z/github.com/jedutools/gil/proto/gen/gil/v1;gilv1b\x06proto3"
 
 var (
 	file_gil_v1_run_proto_rawDescOnce sync.Once

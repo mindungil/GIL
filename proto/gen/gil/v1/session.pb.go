@@ -7,6 +7,7 @@
 package gilv1
 
 import (
+	_ "google.golang.org/genproto/googleapis/api/annotations"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
@@ -408,7 +409,7 @@ var File_gil_v1_session_proto protoreflect.FileDescriptor
 
 const file_gil_v1_session_proto_rawDesc = "" +
 	"\n" +
-	"\x14gil/v1/session.proto\x12\x06gil.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xb2\x03\n" +
+	"\x14gil/v1/session.proto\x12\x06gil.v1\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x1cgoogle/api/annotations.proto\"\xb2\x03\n" +
 	"\aSession\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12-\n" +
 	"\x06status\x18\x02 \x01(\x0e2\x15.gil.v1.SessionStatusR\x06status\x129\n" +
@@ -446,11 +447,11 @@ const file_gil_v1_session_proto_rawDesc = "" +
 	"\aRUNNING\x10\x04\x12\x0f\n" +
 	"\vAUTO_PAUSED\x10\x05\x12\b\n" +
 	"\x04DONE\x10\x06\x12\v\n" +
-	"\aSTOPPED\x10\a2\xa1\x01\n" +
-	"\x0eSessionService\x120\n" +
-	"\x06Create\x12\x15.gil.v1.CreateRequest\x1a\x0f.gil.v1.Session\x12*\n" +
-	"\x03Get\x12\x12.gil.v1.GetRequest\x1a\x0f.gil.v1.Session\x121\n" +
-	"\x04List\x12\x13.gil.v1.ListRequest\x1a\x14.gil.v1.ListResponseB1Z/github.com/jedutools/gil/proto/gen/gil/v1;gilv1b\x06proto3"
+	"\aSTOPPED\x10\a2\xeb\x01\n" +
+	"\x0eSessionService\x12I\n" +
+	"\x06Create\x12\x15.gil.v1.CreateRequest\x1a\x0f.gil.v1.Session\"\x17\x82\xd3\xe4\x93\x02\x11:\x01*\"\f/v1/sessions\x12E\n" +
+	"\x03Get\x12\x12.gil.v1.GetRequest\x1a\x0f.gil.v1.Session\"\x19\x82\xd3\xe4\x93\x02\x13\x12\x11/v1/sessions/{id}\x12G\n" +
+	"\x04List\x12\x13.gil.v1.ListRequest\x1a\x14.gil.v1.ListResponse\"\x14\x82\xd3\xe4\x93\x02\x0e\x12\f/v1/sessionsB1Z/github.com/jedutools/gil/proto/gen/gil/v1;gilv1b\x06proto3"
 
 var (
 	file_gil_v1_session_proto_rawDescOnce sync.Once
