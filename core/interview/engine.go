@@ -76,3 +76,86 @@ Be brief (1-2 sentences). Output ONLY the question text — no markdown, no quot
 	}
 	return resp.Text, nil
 }
+
+// ReplyOutcome describes what the engine decided to do after a user reply.
+type ReplyOutcome int
+
+const (
+	// ReplyOutcomeNextQuestion means the engine generated the next interview question.
+	ReplyOutcomeNextQuestion ReplyOutcome = iota
+	// ReplyOutcomeReadyToConfirm means saturation reached + audit passed; stage advanced to Confirm.
+	ReplyOutcomeReadyToConfirm
+)
+
+// ReplyTurn is the result of RunReplyTurn.
+type ReplyTurn struct {
+	Outcome ReplyOutcome
+	Content string // next question OR audit reason
+}
+
+// EngineWithSubmodels combines the main Engine with SlotFiller, Adversary, and
+// SelfAuditGate sub-engines. All sub-engines may use the same provider but
+// different model names (Phase 4 will properly separate models).
+type EngineWithSubmodels struct {
+	*Engine
+	slotFiller *SlotFiller
+	adversary  *Adversary
+	audit      *SelfAuditGate
+}
+
+// NewEngineWithSubmodels returns an EngineWithSubmodels using the given
+// provider for all sub-engines. mainModel is used for question generation
+// and self-audit; slotModel for slot extraction; adversaryModel for critique.
+func NewEngineWithSubmodels(p provider.Provider, mainModel, slotModel, adversaryModel string) *EngineWithSubmodels {
+	return &EngineWithSubmodels{
+		Engine:     NewEngine(p, mainModel),
+		slotFiller: NewSlotFiller(p, slotModel),
+		adversary:  NewAdversary(p, adversaryModel),
+		audit:      NewSelfAuditGate(p, mainModel),
+	}
+}
+
+// RunReplyTurn orchestrates the per-reply pipeline:
+//
+//	1. Append the user reply to history.
+//	2. Run SlotFiller to update st.Spec from the reply.
+//	3. If all required slots are now filled AND no adversary has run yet,
+//	   run Adversary to detect blockers.
+//	4. If saturated (slots filled + adversary clean), run SelfAuditGate.
+//	   If gate passes, advance st.Stage to StageConfirm and return
+//	   ReplyOutcomeReadyToConfirm.
+//	5. Otherwise call NextQuestion, append assistant reply, return
+//	   ReplyOutcomeNextQuestion.
+func (e *EngineWithSubmodels) RunReplyTurn(ctx context.Context, st *State, userReply string) (*ReplyTurn, error) {
+	st.AppendUser(userReply)
+
+	if err := e.slotFiller.Apply(ctx, st, userReply); err != nil {
+		return nil, fmt.Errorf("RunReplyTurn slotfill: %w", err)
+	}
+
+	// First adversary round once all required slots are filled
+	if st.AllRequiredSlotsFilled() && st.AdversaryRounds == 0 {
+		if _, err := e.adversary.Critique(ctx, st); err != nil {
+			return nil, fmt.Errorf("RunReplyTurn adversary: %w", err)
+		}
+	}
+
+	if st.IsSaturated() {
+		ready, reason, err := e.audit.AuditConversationToConfirm(ctx, st)
+		if err != nil {
+			return nil, fmt.Errorf("RunReplyTurn audit: %w", err)
+		}
+		if ready {
+			st.Stage = StageConfirm
+			return &ReplyTurn{Outcome: ReplyOutcomeReadyToConfirm, Content: reason}, nil
+		}
+		// Audit blocks → fall through to NextQuestion
+	}
+
+	q, err := e.NextQuestion(ctx, st)
+	if err != nil {
+		return nil, fmt.Errorf("RunReplyTurn next question: %w", err)
+	}
+	st.AppendAssistant(q)
+	return &ReplyTurn{Outcome: ReplyOutcomeNextQuestion, Content: q}, nil
+}
