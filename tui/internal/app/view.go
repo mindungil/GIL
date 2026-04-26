@@ -27,6 +27,11 @@ var (
 // View implements tea.Model.
 func (m *Model) View() string {
 	base := m.viewBase()
+	// Slash prompt + last-output panel sit between the body and the
+	// permission modal so users still see them while a command is in
+	// flight; permission asks remain on top because they require an
+	// immediate y/n response.
+	base = overlaySlash(base, m.slash, m.width)
 	if m.pendingAsk == nil {
 		return base
 	}
@@ -57,6 +62,35 @@ func (m *Model) viewBase() string {
 	title := titleStyle.Render(" gil ") + lipgloss.NewStyle().Faint(true).Render(" — autonomous coding harness")
 	status := m.renderStatus()
 	return lipgloss.JoinVertical(lipgloss.Left, title, body, status)
+}
+
+// overlaySlash appends the slash-command input prompt and/or the last
+// command's output below the base view. nil-safe so unit tests that
+// build a Model literal without slash state still render.
+func overlaySlash(base string, st *slashState, w int) string {
+	if st == nil {
+		return base
+	}
+	out := base
+	if st.output != "" {
+		// Faint border to distinguish from the permission modal (yellow).
+		panel := lipgloss.NewStyle().
+			Border(lipgloss.NormalBorder()).
+			BorderForeground(lipgloss.Color("8")).
+			Padding(0, 1).
+			Render(st.output)
+		out = lipgloss.JoinVertical(lipgloss.Left, out, panel)
+	}
+	if st.inputting {
+		prompt := lipgloss.NewStyle().
+			Background(lipgloss.Color("4")).
+			Foreground(lipgloss.Color("15")).
+			Padding(0, 1).
+			Width(w).
+			Render("/" + st.buffer + "_")
+		out = lipgloss.JoinVertical(lipgloss.Left, out, prompt)
+	}
+	return out
 }
 
 // overlayModal appends a permission-request dialog below the base view.
@@ -128,7 +162,7 @@ func (m *Model) renderSessionDetail(w, h int) string {
 }
 
 func (m *Model) renderStatus() string {
-	keys := "k/↓: down  j/↑: up  r: refresh  q: quit"
+	keys := "k/↓: down  j/↑: up  r: refresh  /: command  q: quit"
 	if m.err != "" {
 		keys = "ERROR: " + m.err + "    " + keys
 	}

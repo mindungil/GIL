@@ -64,7 +64,27 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.err = msg.message
 		return m, nil
 
+	case slashResultMsg:
+		if m.slash != nil {
+			m.slash.output = msg.output
+		}
+		return m, nil
+
+	case slashQuitMsg:
+		// /quit dismisses the local TUI but does NOT cancel the run on
+		// the server — that's part of the "observation surface, not
+		// intervention surface" rule.
+		return m, tea.Quit
+
 	case tea.KeyMsg:
+		// Slash command surface owns "/" and ":" plus whatever input the
+		// prompt is currently capturing. Run before normal navigation so
+		// typing `/help` can't accidentally trigger refresh / movement.
+		if m.slash != nil {
+			if handled, mm, cmd := m.slashKeyHandler(msg); handled {
+				return mm, cmd
+			}
+		}
 		// When a permission modal is open, intercept ALL keys and handle y/n/esc.
 		if m.pendingAsk != nil {
 			ask := m.pendingAsk

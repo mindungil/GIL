@@ -9,15 +9,23 @@ type KeyMap struct {
 	Up      key.Binding
 	Down    key.Binding
 	Enter   key.Binding
+	// Slash opens the slash-command input prompt. We bind both "/" and
+	// ":" because users coming from vi-style TUIs reach for ":" first.
+	Slash key.Binding
+	// DismissSlash dismisses the previous slash-command output panel
+	// when no input prompt is open.
+	DismissSlash key.Binding
 }
 
 // DefaultKeys returns the default key bindings.
 func DefaultKeys() KeyMap {
 	return KeyMap{
-		Quit:    key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
-		Refresh: key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "refresh")),
-		Up:      key.NewBinding(key.WithKeys("up", "k"), key.WithHelp("k/↑", "up")),
-		Down:    key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("j/↓", "down")),
-		Enter:   key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "select")),
+		Quit:         key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
+		Refresh:      key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "refresh")),
+		Up:           key.NewBinding(key.WithKeys("up", "k"), key.WithHelp("k/↑", "up")),
+		Down:         key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("j/↓", "down")),
+		Enter:        key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "select")),
+		Slash:        key.NewBinding(key.WithKeys("/", ":"), key.WithHelp("/", "command")),
+		DismissSlash: key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "dismiss")),
 	}
 }

@@ -27,6 +27,11 @@ type Model struct {
 	events     []string    // ring buffer of formatted event lines for the active session
 
 	pendingAsk *pendingAskMsg // when non-nil, permission modal is shown
+
+	// slash holds the slash-command registry + transient input/output
+	// state. Constructed by New(); nil-safe in unit tests that build a
+	// Model literal without dialing gild.
+	slash *slashState
 }
 
 // startTailingSelected cancels any existing tail subscription and starts a new
@@ -54,11 +59,13 @@ func New(socket string) (*Model, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Model{
+	m := &Model{
 		socket: socket,
 		client: cli,
 		keys:   DefaultKeys(),
-	}, nil
+	}
+	m.slash = initSlashState(cli)
+	return m, nil
 }
 
 // Init returns the initial Cmd: load the session list.
