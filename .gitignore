@@ -37,3 +37,8 @@ snapshots/
 !.env.example
 *.pem
 *.key
+
+# VS Code extension build artifacts
+vscode/dist/
+vscode/node_modules/
+vscode/*.vsix
