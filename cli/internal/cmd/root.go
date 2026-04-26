@@ -53,6 +53,7 @@ func Root() *cobra.Command {
 	}
 	root.AddCommand(daemonCmd())
 	root.AddCommand(authCmd())
+	root.AddCommand(initCmd())
 	root.AddCommand(newCmd())
 	root.AddCommand(statusCmd())
 	root.AddCommand(interviewCmd())
