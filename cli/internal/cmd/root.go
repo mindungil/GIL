@@ -62,7 +62,11 @@ func Root() *cobra.Command {
 	root.AddCommand(specCmd())
 	root.AddCommand(runCmd())
 	root.AddCommand(eventsCmd())
+	root.AddCommand(exportCmd())
+	root.AddCommand(importCmd())
 	root.AddCommand(restoreCmd())
+	root.AddCommand(costCmd())
+	root.AddCommand(statsCmd())
 	root.AddCommand(newCompletionCmd(root))
 	return root
 }
