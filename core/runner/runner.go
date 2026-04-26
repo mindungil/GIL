@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/jedutools/gil/core/checkpoint"
+	"github.com/jedutools/gil/core/compact"
 	"github.com/jedutools/gil/core/event"
 	"github.com/jedutools/gil/core/provider"
 	"github.com/jedutools/gil/core/stuck"
@@ -46,10 +47,29 @@ type AgentLoop struct {
 	StuckThreshold int            // abort after this many UN-recovered signals; default 3 if zero
 	StuckCheckEvery int           // run detector every N iterations; default 1 if zero
 
+	// Compactor + budget. If nil, no compaction.
+	Compactor        *compact.Compactor
+	MaxContextTokens int // default 200_000 if zero; compaction triggers at 0.95 * this
+
 	// internal: buffer of recent events for the detector (ring of last 200)
 	recent      []event.Event
 	recentMax   int
 	unrecovered int // counter of stuck signals not handled by a recovery
+
+	// internal: set by compact_now tool; cleared after one compaction
+	compactNowRequested bool
+}
+
+// CompactRequester is satisfied by AgentLoop; the compact_now tool uses it
+// to signal that compaction should run at the next iteration boundary.
+type CompactRequester interface {
+	RequestCompact()
+}
+
+// RequestCompact implements CompactRequester. It sets the flag that causes
+// the next iteration to compact before calling the provider.
+func (a *AgentLoop) RequestCompact() {
+	a.compactNowRequested = true
 }
 
 // NewAgentLoop constructs a loop.
@@ -94,6 +114,41 @@ func (a *AgentLoop) Run(ctx context.Context) (*Result, error) {
 	var totalTokens int64
 	for iter := 1; iter <= maxIter; iter++ {
 		a.emit(event.SourceSystem, event.KindNote, "iteration_start", map[string]any{"iter": iter})
+
+		// Compaction check: runs before provider_request so the context is
+		// already trimmed before the next LLM call.
+		if a.Compactor != nil {
+			maxCtx := a.MaxContextTokens
+			if maxCtx <= 0 {
+				maxCtx = 200_000
+			}
+			estimated := estimateMessagesTokens(messages)
+			threshold := int64(float64(maxCtx) * 0.95)
+			forced := a.compactNowRequested
+			a.compactNowRequested = false
+			if forced || estimated >= threshold {
+				a.emit(event.SourceSystem, event.KindNote, "compact_start", map[string]any{
+					"estimated_tokens": estimated,
+					"threshold":        threshold,
+					"forced":           forced,
+				})
+				compacted, res, cerr := a.Compactor.Compact(ctx, messages)
+				if cerr != nil {
+					a.emit(event.SourceSystem, event.KindNote, "compact_error", map[string]any{
+						"err": cerr.Error(),
+					})
+					// Soft failure: continue with current messages.
+				} else {
+					a.emit(event.SourceSystem, event.KindNote, "compact_done", map[string]any{
+						"original":     res.OriginalCount,
+						"compacted":    res.CompactedCount,
+						"saved_tokens": res.SavedTokens,
+						"skipped":      res.Skipped,
+					})
+					messages = compacted
+				}
+			}
+		}
 
 		a.emit(event.SourceAgent, event.KindAction, "provider_request", map[string]any{
 			"model":   a.Model,
@@ -386,4 +441,19 @@ func truncateString(s string, max int) string {
 
 func truncateJSON(b []byte, max int) string {
 	return truncateString(string(b), max)
+}
+
+// estimateMessagesTokens uses the same 4-chars-per-token heuristic as compact.estimateTokens.
+func estimateMessagesTokens(msgs []provider.Message) int64 {
+	var total int64
+	for _, m := range msgs {
+		total += int64(len(m.Content)) / 4
+		for _, tc := range m.ToolCalls {
+			total += int64(len(tc.Input)) / 4
+		}
+		for _, tr := range m.ToolResults {
+			total += int64(len(tr.Content)) / 4
+		}
+	}
+	return total
 }

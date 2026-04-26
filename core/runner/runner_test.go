@@ -3,12 +3,15 @@ package runner
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os/exec"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/jedutools/gil/core/checkpoint"
+	"github.com/jedutools/gil/core/compact"
 	"github.com/jedutools/gil/core/event"
 	"github.com/jedutools/gil/core/provider"
 	"github.com/jedutools/gil/core/stuck"
@@ -688,4 +691,141 @@ func TestAgentLoop_CheckpointInitFailureSoftDisables(t *testing.T) {
 		require.NotEqual(t, "checkpoint_committed", e.Type, "no commits expected after init failure")
 	}
 	require.Equal(t, 1, initErrCount, "expected exactly one checkpoint_init_error event")
+}
+
+// noopTool is a minimal tool for use in compaction tests.
+type noopTool struct{}
+
+func (n *noopTool) Name() string                                             { return "noop" }
+func (n *noopTool) Description() string                                      { return "no-op" }
+func (n *noopTool) Schema() json.RawMessage                                  { return json.RawMessage(`{"type":"object"}`) }
+func (n *noopTool) Run(_ context.Context, _ json.RawMessage) (tool.Result, error) {
+	return tool.Result{Content: "ok"}, nil
+}
+
+func TestAgentLoop_AutoCompactsAtThreshold(t *testing.T) {
+	// Provider that returns large text responses to inflate token count.
+	bigText := strings.Repeat("x", 4000) // ~1000 tokens per response
+	seq := []provider.MockTurn{}
+	for i := 0; i < 10; i++ {
+		seq = append(seq, provider.MockTurn{Text: bigText, StopReason: "tool_use", ToolCalls: []provider.ToolCall{{
+			ID: fmt.Sprintf("c%d", i), Name: "noop", Input: json.RawMessage(`{}`),
+		}}})
+	}
+	seq = append(seq, provider.MockTurn{Text: "done", StopReason: "end_turn"})
+	prov := provider.NewMockToolProvider(seq)
+
+	// Compactor with mock provider that returns a short summary.
+	summaryProv := provider.NewMock([]string{"## Goal\n- summary"})
+	compactor := &compact.Compactor{Provider: summaryProv, Model: "m", HeadKeep: 1, TailKeep: 2, MinMiddle: 2}
+
+	tools := []tool.Tool{&noopTool{}}
+
+	spec := &gilv1.FrozenSpec{Budget: &gilv1.Budget{MaxIterations: 12}, Verification: &gilv1.Verification{}}
+	ver := verify.NewRunner(t.TempDir())
+
+	loop := &AgentLoop{
+		Spec: spec, Provider: prov, Model: "m", Tools: tools, Verifier: ver,
+		Compactor: compactor, MaxContextTokens: 5000, // low threshold to trigger compaction
+		Events: event.NewStream(),
+	}
+	sub := loop.Events.Subscribe(256)
+	var collected []event.Event
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for e := range sub.Events() {
+			collected = append(collected, e)
+		}
+	}()
+
+	res, err := loop.Run(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, res)
+	sub.Close()
+	<-done
+
+	// Assert at least one compact_done event was emitted.
+	var compactCount int
+	for _, e := range collected {
+		if e.Type == "compact_done" {
+			compactCount++
+		}
+	}
+	require.Greater(t, compactCount, 0, "expected at least one compact_done event")
+}
+
+func TestAgentLoop_NoCompactWhenCompactorNil(t *testing.T) {
+	// Same big-text provider, but Compactor=nil → no compact events.
+	bigText := strings.Repeat("x", 4000)
+	prov := provider.NewMockToolProvider([]provider.MockTurn{{Text: bigText, StopReason: "end_turn"}})
+	spec := &gilv1.FrozenSpec{Budget: &gilv1.Budget{MaxIterations: 2}, Verification: &gilv1.Verification{}}
+	ver := verify.NewRunner(t.TempDir())
+	loop := &AgentLoop{
+		Spec: spec, Provider: prov, Model: "m", Tools: nil, Verifier: ver,
+		Compactor: nil, MaxContextTokens: 100, // would trigger if enabled
+		Events: event.NewStream(),
+	}
+	sub := loop.Events.Subscribe(256)
+	done := make(chan struct{})
+	var collected []event.Event
+	go func() {
+		defer close(done)
+		for e := range sub.Events() {
+			collected = append(collected, e)
+		}
+	}()
+	_, err := loop.Run(context.Background())
+	require.NoError(t, err)
+	sub.Close()
+	<-done
+	for _, e := range collected {
+		require.NotEqual(t, "compact_start", e.Type)
+		require.NotEqual(t, "compact_done", e.Type)
+	}
+}
+
+func TestAgentLoop_CompactNow_TriggersCompaction(t *testing.T) {
+	// Provider returns one tool call to compact_now, then end_turn.
+	prov := provider.NewMockToolProvider([]provider.MockTurn{
+		{Text: "needing compact", ToolCalls: []provider.ToolCall{{
+			ID: "c1", Name: "compact_now", Input: json.RawMessage(`{"reason":"test"}`),
+		}}, StopReason: "tool_use"},
+		{Text: "done", StopReason: "end_turn"},
+	})
+	summaryProv := provider.NewMock([]string{"summary"})
+	compactor := &compact.Compactor{Provider: summaryProv, Model: "m", HeadKeep: 0, TailKeep: 0, MinMiddle: 0}
+	spec := &gilv1.FrozenSpec{Budget: &gilv1.Budget{MaxIterations: 5}, Verification: &gilv1.Verification{}}
+	ver := verify.NewRunner(t.TempDir())
+	loop := &AgentLoop{
+		Spec: spec, Provider: prov, Model: "m", Verifier: ver,
+		Compactor: compactor, MaxContextTokens: 10_000_000, // never triggers via threshold
+		Events: event.NewStream(),
+	}
+	// Wire compact_now tool with the loop as the requester.
+	loop.Tools = []tool.Tool{&tool.CompactNow{Requester: loop}}
+	sub := loop.Events.Subscribe(256)
+	done := make(chan struct{})
+	var collected []event.Event
+	go func() {
+		defer close(done)
+		for e := range sub.Events() {
+			collected = append(collected, e)
+		}
+	}()
+	_, err := loop.Run(context.Background())
+	require.NoError(t, err)
+	sub.Close()
+	<-done
+	var sawForced bool
+	for _, e := range collected {
+		if e.Type == "compact_start" {
+			var d map[string]any
+			_ = json.Unmarshal(e.Data, &d)
+			if v, ok := d["forced"].(bool); ok && v {
+				sawForced = true
+			}
+		}
+	}
+	require.True(t, sawForced, "expected compact_start with forced=true after compact_now tool call")
 }
