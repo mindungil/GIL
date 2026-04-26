@@ -16,6 +16,7 @@ import (
 
 	"github.com/jedutools/gil/core/checkpoint"
 	"github.com/jedutools/gil/core/event"
+	"github.com/jedutools/gil/core/exec"
 	"github.com/jedutools/gil/core/memory"
 	"github.com/jedutools/gil/core/permission"
 	"github.com/jedutools/gil/core/provider"
@@ -370,6 +371,22 @@ func (s *RunService) executeRun(
 		&tool.Edit{WorkingDir: workspaceDir},
 		&tool.ApplyPatch{WorkspaceDir: workspaceDir}, // NEW
 	)
+
+	// exec tool: Recipe runner. Inner tools = everything else built so far.
+	// Filtering happens inside ExecTool.Run defensively.
+	execTool := &exec.ExecTool{Tools: tools}
+	// Wire Emit so exec_step_* events flow to the per-session stream.
+	execTool.Emit = func(typ string, data map[string]any) {
+		b, _ := json.Marshal(data)
+		_, _ = stream.Append(event.Event{
+			Timestamp: time.Now().UTC(),
+			Source:    event.SourceSystem,
+			Kind:      event.KindNote,
+			Type:      typ,
+			Data:      b,
+		})
+	}
+	tools = append(tools, execTool)
 
 	loop := runner.NewAgentLoop(spec, prov, model, tools, ver)
 	loop.Events = stream
