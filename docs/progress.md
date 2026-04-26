@@ -4,26 +4,26 @@
 
 ## 현재 페이즈
 
-**Phase 0: 설계** (진행 중)
+**Phase 0: 설계** (완료)
 
 - [x] 사용자 요구사항 추출 (Q&A)
 - [x] 7개 참조 하네스 1차 분석 (web)
 - [x] 7개 참조 하네스 2차 분석 (git clone, 라인 레벨)
 - [x] 핵심 결정 사항 합의 (아키텍처 C, gRPC, MIT, gil 명령어)
 - [x] 설계 4섹션 narrative 합의 (architecture, stop, interview, context)
-- [ ] `docs/design.md` 작성
-- [ ] design.md self-review
-- [ ] 사용자 검토 + 승인
-- [ ] 구현 계획서 (`docs/plan.md`) 작성
+- [x] `docs/design.md` 작성
+- [x] design.md self-review
+- [x] 사용자 검토 + 승인
+- [x] 구현 계획서 (`docs/plan.md`) 작성
 
-**Phase 1: 코어 골격** (대기)
-- [ ] `go.work` + 모듈 8개 초기화
-- [ ] proto 정의 (gil/v1/*.proto)
-- [ ] `core/event` (이벤트 스트림)
-- [ ] `core/spec` (frozen spec)
-- [ ] `core/session` (SQLite + JSONL)
-- [ ] `server/` 데몬 + gRPC service stub
-- [ ] `cli/` 기본 명령어 (`gil daemon/new/status`)
+**Phase 1: 코어 골격** (완료 — 2026-04-26)
+- [x] `go.work` + 모듈 8개 초기화
+- [x] proto 정의 (gil/v1/*.proto)
+- [x] `core/event` (이벤트 스트림)
+- [x] `core/spec` (frozen spec)
+- [x] `core/session` (SQLite + JSONL)
+- [x] `server/` 데몬 + gRPC service stub
+- [x] `cli/` 기본 명령어 (`gil daemon/new/status`)
 
 **Phase 2: 인터뷰 엔진** (대기)
 - [ ] `core/interview` 에이전트 주도 대화
@@ -76,6 +76,7 @@
 | 2026-04-25 | 인터뷰 에이전트 주도, 시스템은 스키마/saturation/freeze만 |
 | 2026-04-25 | 페이즈 전환 시 self-audit gate 필수 |
 | 2026-04-25 | 살아있는 문서 (design/progress) 날짜 X, 단일 파일 유지 |
+| 2026-04-26 | Phase 1 (코어 골격) 완료 — gild + gil new/status + event/spec/session 영속화. 18 tasks, ~30 commits. |
 
 ## 차용 출처 (코드/패턴)
 
@@ -88,6 +89,14 @@
 - **Aider**: tree-sitter+PageRank repomap, SEARCH/REPLACE 4단 매칭, architect/editor 분리
 - **Cline**: shadow git checkpoint, Plan/Act 토글, 9-카테고리 auto-approve
 - **Hermes**: 캐시 보존 압축 불변식, execute_code 다단계 압축, IterationBudget grace call
+
+## Phase 1 산출물 요약 (2026-04-26)
+
+- **데몬**: `gild` (20MB) — gRPC over UDS, SQLite + 이벤트 영속화
+- **CLI**: `gil` (3.4MB) — `daemon` (가이드) / `new` (세션 생성) / `status` (목록)
+- **SDK**: Go 클라이언트 wrapper (Dial/Create/Get/List)
+- **검증**: `make test` 8 모듈 + `make e2e` 통합 테스트 모두 통과
+- **다음 단계**: Phase 2 — 인터뷰 엔진 + 데몬 자동 spawn + frozen spec lock 디스크 저장
 
 ## 미해결 / 추후 결정
 
