@@ -46,6 +46,8 @@ func (s *Stream) Len() int {
 	return len(s.events)
 }
 
+// Subscription represents a handle to receive events from a Stream.
+// Events are dropped if the consumer is slower than the producer.
 type Subscription struct {
 	ch     chan Event
 	mu     sync.Mutex
@@ -53,10 +55,13 @@ type Subscription struct {
 	stream *Stream
 }
 
+// Events returns a read-only channel of appended events.
 func (sub *Subscription) Events() <-chan Event {
 	return sub.ch
 }
 
+// Close idempotently closes the subscription and unsubscribes from the stream.
+// Calling Close more than once is safe.
 func (sub *Subscription) Close() {
 	sub.mu.Lock()
 	defer sub.mu.Unlock()
@@ -68,6 +73,8 @@ func (sub *Subscription) Close() {
 	sub.stream.removeSubscription(sub)
 }
 
+// Subscribe creates a new subscriber with a buffered channel of the given size.
+// Events are dropped (slow consumer policy) if the consumer falls behind.
 func (s *Stream) Subscribe(buffer int) *Subscription {
 	s.mu.Lock()
 	defer s.mu.Unlock()
