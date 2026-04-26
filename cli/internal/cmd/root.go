@@ -32,6 +32,7 @@ func Root() *cobra.Command {
 	root.AddCommand(newCmd())
 	root.AddCommand(statusCmd())
 	root.AddCommand(interviewCmd())
+	root.AddCommand(resumeCmd())
 	root.AddCommand(specCmd())
 	return root
 }

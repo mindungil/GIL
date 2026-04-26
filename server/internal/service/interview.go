@@ -61,14 +61,44 @@ func (s *InterviewService) sessionDir(sessionID string) string {
 func (s *InterviewService) Start(req *gilv1.StartInterviewRequest, stream gilv1.InterviewService_StartServer) error {
 	ctx := stream.Context()
 
-	// Validate session
-	if _, err := s.repo.Get(ctx, req.SessionId); err != nil {
+	sess, err := s.repo.Get(ctx, req.SessionId)
+	if err != nil {
 		if errors.Is(err, session.ErrNotFound) {
 			return status.Errorf(codes.NotFound, "session %q not found", req.SessionId)
 		}
 		return status.Errorf(codes.Internal, "session lookup: %v", err)
 	}
 
+	// Resume path: empty first_input + session already in 'interviewing' status + in-memory state exists
+	if req.FirstInput == "" && sess.Status == "interviewing" {
+		s.mu.Lock()
+		slot, ok := s.states[req.SessionId]
+		s.mu.Unlock()
+		if !ok {
+			return status.Errorf(codes.FailedPrecondition,
+				"session %q has interviewing status but no in-memory state (cross-restart resume not yet supported)",
+				req.SessionId)
+		}
+		// Emit a stage marker indicating resume + last assistant message if any
+		if err := stream.Send(&gilv1.InterviewEvent{
+			Payload: &gilv1.InterviewEvent_Stage{Stage: &gilv1.StageTransition{
+				From: "resume", To: slot.state.Stage.String(), Reason: "resumed in-progress interview",
+			}},
+		}); err != nil {
+			return err
+		}
+		// Find the last assistant turn and re-emit it
+		for i := len(slot.state.History) - 1; i >= 0; i-- {
+			if slot.state.History[i].Role == provider.RoleAssistant {
+				return stream.Send(&gilv1.InterviewEvent{
+					Payload: &gilv1.InterviewEvent_AgentTurn{AgentTurn: &gilv1.AgentTurn{Content: slot.state.History[i].Content}},
+				})
+			}
+		}
+		return nil
+	}
+
+	// Normal start path
 	// Mark session as interviewing
 	if err := s.repo.UpdateStatus(ctx, req.SessionId, "interviewing"); err != nil {
 		return status.Errorf(codes.Internal, "update status: %v", err)
