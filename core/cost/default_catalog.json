@@ -1,0 +1,8 @@
+{
+  "claude-opus-4-7":   {"input_per_m": 15.00, "output_per_m": 75.00, "cached_read_per_m": 1.50},
+  "claude-opus-4-6":   {"input_per_m": 15.00, "output_per_m": 75.00, "cached_read_per_m": 1.50},
+  "claude-sonnet-4-6": {"input_per_m":  3.00, "output_per_m": 15.00, "cached_read_per_m": 0.30},
+  "claude-haiku-4-5":  {"input_per_m":  1.00, "output_per_m":  5.00, "cached_read_per_m": 0.10},
+  "gpt-4o":            {"input_per_m":  2.50, "output_per_m": 10.00, "cached_read_per_m": 1.25},
+  "gpt-4o-mini":       {"input_per_m":  0.15, "output_per_m":  0.60, "cached_read_per_m": 0.075}
+}
