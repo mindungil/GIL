@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -24,24 +25,31 @@ import (
 	"github.com/jedutools/gil/core/provider"
 	"github.com/jedutools/gil/core/session"
 	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
+	"github.com/jedutools/gil/server/internal/auth"
 	"github.com/jedutools/gil/server/internal/metrics"
 	"github.com/jedutools/gil/server/internal/service"
 	"github.com/jedutools/gil/server/internal/uds"
 )
 
-// server wraps a gRPC server, Unix Domain Socket listener, and SQLite database,
-// providing unified startup and graceful shutdown for the gild daemon.
+// server wraps a gRPC server, Unix Domain Socket listener, optional TCP listener,
+// and SQLite database, providing unified startup and graceful shutdown for the
+// gild daemon.
 type server struct {
-	grpc *grpc.Server
-	lis  net.Listener
-	db   *sql.DB
+	grpc   *grpc.Server
+	lis    net.Listener
+	tcpLis net.Listener // nil when --grpc-tcp not set
+	db     *sql.DB
 }
 
 // newServer creates and initializes a gRPC server listening on sockPath with a SQLite
 // database at dbPath. It returns an error if the database cannot be opened, migrations
 // fail, the socket cannot be created, or gRPC registration fails. Partial failures
 // are cleaned up: if migration or socket creation fails, the database is closed.
-func newServer(dbPath, sockPath, sessionsBase string) (*server, error) {
+//
+// authMW, when non-nil, is registered as both a unary and a stream interceptor —
+// the same middleware enforces auth on every RPC regardless of transport, with
+// per-connection bypass for UDS handled inside the middleware itself.
+func newServer(dbPath, sockPath, sessionsBase string, authMW *auth.Middleware) (*server, error) {
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return nil, err
@@ -206,7 +214,14 @@ func newServer(dbPath, sockPath, sessionsBase string) (*server, error) {
 		}
 	}
 
-	g := grpc.NewServer()
+	var grpcOpts []grpc.ServerOption
+	if authMW != nil {
+		grpcOpts = append(grpcOpts,
+			grpc.UnaryInterceptor(authMW.UnaryInterceptor()),
+			grpc.StreamInterceptor(authMW.StreamInterceptor()),
+		)
+	}
+	g := grpc.NewServer(grpcOpts...)
 	repo := session.NewRepo(db)
 	runSvc := service.NewRunService(repo, sessionsBase, factory)
 	gilv1.RegisterSessionServiceServer(g, service.NewSessionService(repo, runSvc))
@@ -216,17 +231,46 @@ func newServer(dbPath, sockPath, sessionsBase string) (*server, error) {
 	return &server{grpc: g, lis: lis, db: db}, nil
 }
 
+// AttachTCP binds an additional TCP listener and serves the same gRPC server on it.
+// Useful when --grpc-tcp is set so gild accepts both UDS (local) and TCP (remote)
+// connections through the same auth middleware.
+func (s *server) AttachTCP(addr string) error {
+	lis, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("attach tcp %q: %w", addr, err)
+	}
+	s.tcpLis = lis
+	go func() {
+		if err := s.grpc.Serve(lis); err != nil && !errors.Is(err, grpc.ErrServerStopped) {
+			slog.Error("gild tcp listener exited", "err", err)
+		}
+	}()
+	return nil
+}
+
+// TCPAddr returns the actual bound TCP address (useful when caller passed :0).
+// Returns "" when no TCP listener is attached.
+func (s *server) TCPAddr() string {
+	if s.tcpLis == nil {
+		return ""
+	}
+	return s.tcpLis.Addr().String()
+}
+
 // Serve starts the gRPC server on the underlying Unix Domain Socket listener.
 // It blocks until the listener is closed or an error occurs.
 func (s *server) Serve() error {
 	return s.grpc.Serve(s.lis)
 }
 
-// Stop gracefully stops the gRPC server, closes the listener, and closes the database.
-// It is safe to call multiple times.
+// Stop gracefully stops the gRPC server, closes the listener(s), and closes the
+// database. It is safe to call multiple times.
 func (s *server) Stop() {
 	s.grpc.GracefulStop()
 	_ = s.lis.Close()
+	if s.tcpLis != nil {
+		_ = s.tcpLis.Close()
+	}
 	_ = s.db.Close()
 }
 
@@ -238,6 +282,11 @@ func main() {
 	httpAddr := flag.String("http", "", "if non-empty, start HTTP/JSON gateway on this addr (e.g., :8080)")
 	user := flag.String("user", "", "user namespace; data dir becomes <base>/users/<user>")
 	metricsAddr := flag.String("metrics", "", "if non-empty, expose Prometheus metrics on this addr (e.g., :9090)")
+	grpcTCP := flag.String("grpc-tcp", "", "if non-empty, also serve gRPC on this TCP addr (e.g., :7070); auth recommended for non-loopback binds")
+	authIssuer := flag.String("auth-issuer", "", "OIDC issuer URL (e.g., https://accounts.google.com); when set, enables bearer-token auth")
+	authAudience := flag.String("auth-audience", "", "expected OIDC token audience (`aud` claim); validated when --auth-issuer is set")
+	authAllowUDS := flag.Bool("auth-allow-uds", true, "skip auth on UDS connections (assumed local-trusted via socket file mode 0600)")
+	authEnforceSub := flag.String("auth-enforce-sub", "", "if non-empty, require token `sub` claim to equal this value (pairs with --user)")
 	flag.Parse()
 
 	if !*foreground {
@@ -260,10 +309,37 @@ func main() {
 	sockPath := filepath.Join(*base, "gild.sock")
 	sessionsBase := filepath.Join(*base, "sessions")
 
-	srv, err := newServer(dbPath, sockPath, sessionsBase)
+	// Optional OIDC auth: only construct the middleware when an issuer is set,
+	// so the default "no flags" gild behaviour is byte-for-byte unchanged.
+	var authMW *auth.Middleware
+	if *authIssuer != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		v, err := auth.NewVerifier(ctx, *authIssuer, *authAudience, 5*time.Minute, nil)
+		cancel()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "gild auth:", err)
+			os.Exit(1)
+		}
+		authMW = &auth.Middleware{
+			Verifier:       v,
+			AllowUDS:       *authAllowUDS,
+			EnforceUserSub: *authEnforceSub,
+		}
+		slog.Info("gild auth enabled", "issuer", *authIssuer, "audience", *authAudience, "allow_uds", *authAllowUDS)
+	}
+
+	srv, err := newServer(dbPath, sockPath, sessionsBase, authMW)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "gild:", err)
 		os.Exit(1)
+	}
+
+	if *grpcTCP != "" {
+		if err := srv.AttachTCP(*grpcTCP); err != nil {
+			fmt.Fprintln(os.Stderr, "gild:", err)
+			os.Exit(1)
+		}
+		slog.Info("gild tcp listening", "addr", srv.TCPAddr())
 	}
 
 	slog.Info("gild ready", "socket", sockPath, "db", dbPath)

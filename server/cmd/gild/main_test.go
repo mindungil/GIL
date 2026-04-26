@@ -21,7 +21,7 @@ func TestGild_StartsAndAcceptsCreate(t *testing.T) {
 	dbPath := filepath.Join(dir, "sessions.db")
 	sessionsBase := filepath.Join(dir, "sessions")
 
-	srv, err := newServer(dbPath, sockPath, sessionsBase)
+	srv, err := newServer(dbPath, sockPath, sessionsBase, nil)
 	require.NoError(t, err)
 
 	go func() {
