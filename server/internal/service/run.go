@@ -18,6 +18,7 @@ import (
 	"github.com/jedutools/gil/core/event"
 	"github.com/jedutools/gil/core/exec"
 	"github.com/jedutools/gil/core/memory"
+	"github.com/jedutools/gil/core/paths"
 	"github.com/jedutools/gil/core/permission"
 	"github.com/jedutools/gil/core/provider"
 	"github.com/jedutools/gil/core/runner"
@@ -26,6 +27,7 @@ import (
 	"github.com/jedutools/gil/core/stuck"
 	"github.com/jedutools/gil/core/tool"
 	"github.com/jedutools/gil/core/verify"
+	"github.com/jedutools/gil/core/workspace"
 	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
 	"github.com/jedutools/gil/runtime/cloud"
 	"github.com/jedutools/gil/runtime/daytona"
@@ -198,19 +200,42 @@ func (s *RunService) Start(ctx context.Context, req *gilv1.StartRunRequest) (*gi
 		return nil, status.Errorf(codes.Internal, "load spec: %v", err)
 	}
 
+	// Apply layered workspace defaults BEFORE we resolve provider /
+	// build tools, so that fields the interview left blank (provider,
+	// model, autonomy, backend) inherit from `<workspace>/.gil/config.toml`
+	// or `$XDG_CONFIG_HOME/gil/config.toml`. Spec values that ARE set
+	// always win — the interview is the source of truth, the layered
+	// config is only a backstop for what the user did not pin.
+	workspaceDir := sess.WorkingDir
+	if spec.Workspace != nil && spec.Workspace.Path != "" {
+		workspaceDir = spec.Workspace.Path
+	}
+	wsRoot, _ := workspace.Discover(workspaceDir)
+	var globalCfgPath string
+	if layout, lerr := paths.FromEnv(); lerr == nil {
+		globalCfgPath = layout.ConfigFile()
+	}
+	wsCfg, cfgErr := workspace.Resolve(globalCfgPath, workspace.LocalConfigFile(wsRoot))
+	if cfgErr != nil {
+		return nil, status.Errorf(codes.FailedPrecondition, "workspace config: %v", cfgErr)
+	}
+	spec = workspace.ApplyDefaults(spec, wsCfg)
+
 	prov, model, err := s.providerFactory(req.Provider)
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "provider: %v", err)
 	}
 	if req.Model != "" {
 		model = req.Model
+	} else if spec.Models != nil && spec.Models.Main != nil && spec.Models.Main.ModelId != "" {
+		// When the run request does NOT pin a model but the (now
+		// defaults-applied) spec does, honour the spec — otherwise the
+		// project-local config.toml's model would be ignored as soon as
+		// the provider factory returned its own default.
+		model = spec.Models.Main.ModelId
 	}
 	prov = provider.NewRetry(prov)
 
-	workspaceDir := sess.WorkingDir
-	if spec.Workspace != nil && spec.Workspace.Path != "" {
-		workspaceDir = spec.Workspace.Path
-	}
 	tools, err := buildTools(workspaceDir, spec.Workspace)
 	if err != nil {
 		return nil, status.Errorf(codes.FailedPrecondition, "workspace backend: %v", err)
