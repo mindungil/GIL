@@ -100,6 +100,44 @@ func contentsOf(msgs []provider.Message) []string {
 	return out
 }
 
+func TestCompactor_AntiThrashing_SkipsWhenHistoryThrashing(t *testing.T) {
+	h := &History{}
+	h.Record(CompactionEvent{OriginalTokens: 1000, SavedTokens: 30}) // 3%
+	h.Record(CompactionEvent{OriginalTokens: 1000, SavedTokens: 50}) // 5%
+	msgs := makeMessages(20)
+	mock := provider.NewMock([]string{"summary"}) // would be consumed if Compact ran
+	c := &Compactor{Provider: mock, Model: "m", History: h}
+	out, res, err := c.Compact(context.Background(), msgs)
+	require.NoError(t, err)
+	require.True(t, res.Skipped, "history should have triggered skip")
+	require.Equal(t, 20, len(out))
+}
+
+func TestCompactor_RecordsEventOnSuccessfulCompact(t *testing.T) {
+	h := &History{}
+	msgs := makeMessages(20)
+	mock := provider.NewMock([]string{"summary"})
+	c := &Compactor{Provider: mock, Model: "m", History: h}
+	_, res, err := c.Compact(context.Background(), msgs)
+	require.NoError(t, err)
+	require.False(t, res.Skipped)
+	snap := h.Snapshot()
+	require.Len(t, snap, 1)
+	require.Equal(t, res.SavedTokens, snap[0].SavedTokens)
+	require.Greater(t, snap[0].OriginalTokens, int64(0))
+}
+
+func TestCompactor_DoesNotRecordOnSkip(t *testing.T) {
+	h := &History{}
+	msgs := makeMessages(10) // too small → skip path inside Compact
+	mock := provider.NewMock(nil)
+	c := &Compactor{Provider: mock, Model: "m", History: h}
+	_, res, err := c.Compact(context.Background(), msgs)
+	require.NoError(t, err)
+	require.True(t, res.Skipped)
+	require.Empty(t, h.Snapshot(), "skipped compactions should not be recorded")
+}
+
 // errProvider returns the configured error from Complete.
 type errProvider struct{ err error }
 

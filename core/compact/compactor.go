@@ -8,6 +8,7 @@ package compact
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/jedutools/gil/core/provider"
 )
@@ -25,9 +26,10 @@ type Result struct {
 type Compactor struct {
 	Provider  provider.Provider
 	Model     string
-	HeadKeep  int // first N messages kept verbatim; default 2
-	TailKeep  int // last N messages kept verbatim; default 6
-	MinMiddle int // skip if middle has fewer than this many messages; default 8
+	HeadKeep  int      // first N messages kept verbatim; default 2
+	TailKeep  int      // last N messages kept verbatim; default 6
+	MinMiddle int      // skip if middle has fewer than this many messages; default 8
+	History   *History // optional anti-thrashing tracker; nil disables tracking
 }
 
 // Compact returns a NEW message slice. The original is not mutated (deep-copy semantics).
@@ -46,6 +48,19 @@ func (c *Compactor) Compact(ctx context.Context, msgs []provider.Message) ([]pro
 	minMiddle := c.MinMiddle
 	if minMiddle <= 0 {
 		minMiddle = 8
+	}
+
+	// Anti-thrashing: skip when history signals low value from recent compactions.
+	if c.History != nil && c.History.ShouldSkip() {
+		out := make([]provider.Message, len(msgs))
+		for i := range msgs {
+			out[i] = cloneMessage(msgs[i])
+		}
+		return out, Result{
+			OriginalCount:  len(msgs),
+			CompactedCount: len(msgs),
+			Skipped:        true,
+		}, nil
 	}
 
 	// Always return a NEW slice — never mutate original.
@@ -96,6 +111,15 @@ func (c *Compactor) Compact(ctx context.Context, msgs []provider.Message) ([]pro
 	saved := estimateTokens(middle) - estimateTokens([]provider.Message{{Content: resp.Text}})
 	if saved < 0 {
 		saved = 0
+	}
+	if c.History != nil {
+		// Estimate original tokens from the WHOLE input slice (not just middle)
+		// for a meaningful percentage. SavedTokens uses the value already computed.
+		c.History.Record(CompactionEvent{
+			OriginalTokens: estimateTokens(msgs),
+			SavedTokens:    saved,
+			Timestamp:      time.Now().UTC(),
+		})
 	}
 	return out, Result{
 		OriginalCount:   len(msgs),
