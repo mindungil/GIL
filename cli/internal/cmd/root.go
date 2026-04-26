@@ -7,9 +7,13 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// defaultBase returns the default base directory for gil data (~/.gil).
+// defaultBase returns the default gil data directory (~/.gil).
+// If the user's home directory cannot be resolved, falls back to /tmp/gil.
 func defaultBase() string {
-	home, _ := os.UserHomeDir()
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return "/tmp/gil"
+	}
 	return filepath.Join(home, ".gil")
 }
 
