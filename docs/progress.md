@@ -25,12 +25,12 @@
 - [x] `server/` 데몬 + gRPC service stub
 - [x] `cli/` 기본 명령어 (`gil daemon/new/status`)
 
-**Phase 2: 인터뷰 엔진** (대기)
-- [ ] `core/interview` 에이전트 주도 대화
-- [ ] adversary critique 라운드
-- [ ] self-audit gate
-- [ ] saturation 객관 측정
-- [ ] freeze + SHA-256 lock
+**Phase 2: 인터뷰 엔진** (완료 — 2026-04-26)
+- [x] `core/interview` 에이전트 주도 대화
+- [ ] adversary critique 라운드 (Phase 3로 이연)
+- [ ] self-audit gate (Phase 3로 이연)
+- [x] saturation 객관 측정
+- [x] freeze + SHA-256 lock
 
 **Phase 3: 검증 + Stop** (대기)
 - [ ] `core/verify` 셸 단언 실행기
@@ -77,6 +77,7 @@
 | 2026-04-25 | 페이즈 전환 시 self-audit gate 필수 |
 | 2026-04-25 | 살아있는 문서 (design/progress) 날짜 X, 단일 파일 유지 |
 | 2026-04-26 | Phase 1 (코어 골격) 완료 — gild + gil new/status + event/spec/session 영속화. 18 tasks, ~30 commits. |
+| 2026-04-26 | Phase 2 (인터뷰 엔진) 완료 — 데몬 자동 spawn + Anthropic provider + InterviewService gRPC + gil interview/spec CLI. 13 tasks. adversary/self-audit는 Phase 3로 이연. |
 
 ## 차용 출처 (코드/패턴)
 
@@ -97,6 +98,19 @@
 - **SDK**: Go 클라이언트 wrapper (Dial/Create/Get/List)
 - **검증**: `make test` 8 모듈 + `make e2e` 통합 테스트 모두 통과
 - **다음 단계**: Phase 2 — 인터뷰 엔진 + 데몬 자동 spawn + frozen spec lock 디스크 저장
+
+## Phase 2 산출물 요약 (2026-04-26)
+
+- **데몬 자동 spawn**: `gil new` 첫 실행 시 `gild` background 자동 기동 (수동 실행 불필요)
+- **LLM provider 추상화**: `core/provider` 인터페이스 + Mock + Anthropic 어댑터 (anthropic-sdk-go v1.38.0)
+- **인터뷰 엔진**: `core/interview` State 머신 (Sensing → Conversation) + Engine (RunSensing + NextQuestion)
+- **Spec 영속화**: `core/specstore` (spec.yaml + spec.lock, tamper detection via spec.VerifyLock)
+- **InterviewService gRPC**: Start/Reply/Confirm/GetSpec, per-session state with cleanup on Confirm
+- **CLI**: `gil interview <id>` 대화형 + `gil spec <id>` (JSON view) + `gil spec freeze <id>`
+- **세션 status 전환**: created → interviewing → frozen
+- **검증**: `make test` + `make e2e` (Phase 1) + `make e2e2` (Phase 2 sanity) 모두 통과
+- **gild 바이너리**: 33MB (+13MB from Phase 1, due to Anthropic SDK)
+- **다음 단계**: Phase 3 — adversary critique + self-audit gate + dynamic spec slot filling
 
 ## 미해결 / 추후 결정
 
