@@ -7,6 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/jedutools/gil/core/cliutil"
 	"github.com/jedutools/gil/sdk"
 )
 
@@ -28,17 +29,21 @@ The session must not be currently running.`,
 			sessionID := args[0]
 			step, err := strconv.Atoi(args[1])
 			if err != nil {
-				return fmt.Errorf("step must be an integer, got %q", args[1])
+				return cliutil.New(
+					fmt.Sprintf("step must be an integer, got %q", args[1]),
+					`use 1 (oldest), -1 (newest), or any non-zero integer`)
 			}
 			if step == 0 {
-				return fmt.Errorf("step must be non-zero")
+				return cliutil.New(
+					"step must be non-zero",
+					`use 1 (oldest), -1 (newest), or any non-zero integer`)
 			}
 			ctx := cmd.Context()
 			if ctx == nil {
 				ctx = context.Background()
 			}
 			if err := ensureDaemon(socket, defaultBase()); err != nil {
-				return fmt.Errorf("ensure daemon: %w", err)
+				return err
 			}
 			cli, err := sdk.Dial(socket)
 			if err != nil {
@@ -47,7 +52,7 @@ The session must not be currently running.`,
 			defer cli.Close()
 			resp, err := cli.RestoreRun(ctx, sessionID, int32(step))
 			if err != nil {
-				return fmt.Errorf("restore: %w", err)
+				return wrapRPCError(err)
 			}
 			sha := resp.CommitSha
 			if len(sha) > 12 {

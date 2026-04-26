@@ -22,7 +22,7 @@ func newCmd() *cobra.Command {
 				ctx = context.Background()
 			}
 			if err := ensureDaemon(socket, defaultBase()); err != nil {
-				return fmt.Errorf("ensure daemon: %w", err)
+				return err
 			}
 			cli, err := sdk.Dial(socket)
 			if err != nil {
@@ -34,7 +34,7 @@ func newCmd() *cobra.Command {
 				GoalHint:   goalHint,
 			})
 			if err != nil {
-				return fmt.Errorf("create: %w", err)
+				return wrapRPCError(err)
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "Session created: %s\n", s.ID)
 			return nil

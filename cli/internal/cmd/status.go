@@ -7,6 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/jedutools/gil/core/cliutil"
 	"github.com/jedutools/gil/sdk"
 )
 
@@ -20,14 +21,16 @@ func statusCmd() *cobra.Command {
 		Short: "List sessions",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if limit <= 0 {
-				return fmt.Errorf("--limit must be positive, got %d", limit)
+				return cliutil.New(
+					fmt.Sprintf("--limit must be positive, got %d", limit),
+					`try --limit 100 (or any positive integer)`)
 			}
 			ctx := cmd.Context()
 			if ctx == nil {
 				ctx = context.Background()
 			}
 			if err := ensureDaemon(socket, defaultBase()); err != nil {
-				return fmt.Errorf("ensure daemon: %w", err)
+				return err
 			}
 			cli, err := sdk.Dial(socket)
 			if err != nil {
@@ -36,7 +39,7 @@ func statusCmd() *cobra.Command {
 			defer cli.Close()
 			list, err := cli.ListSessions(ctx, limit)
 			if err != nil {
-				return fmt.Errorf("list: %w", err)
+				return wrapRPCError(err)
 			}
 			tw := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
 			fmt.Fprintln(tw, "ID\tSTATUS\tITER\tTOKENS\tWORKING_DIR\tGOAL")

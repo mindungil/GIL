@@ -25,7 +25,7 @@ func specCmd() *cobra.Command {
 				ctx = context.Background()
 			}
 			if err := ensureDaemon(socket, defaultBase()); err != nil {
-				return fmt.Errorf("ensure daemon: %w", err)
+				return err
 			}
 			cli, err := sdk.Dial(socket)
 			if err != nil {
@@ -35,7 +35,7 @@ func specCmd() *cobra.Command {
 
 			fs, err := cli.GetSpec(ctx, sessionID)
 			if err != nil {
-				return fmt.Errorf("get spec: %w", err)
+				return wrapRPCError(err)
 			}
 			data, err := protojson.MarshalOptions{Indent: "  "}.Marshal(fs)
 			if err != nil {
@@ -64,7 +64,7 @@ func specFreezeCmd() *cobra.Command {
 				ctx = context.Background()
 			}
 			if err := ensureDaemon(socket, defaultBase()); err != nil {
-				return fmt.Errorf("ensure daemon: %w", err)
+				return err
 			}
 			cli, err := sdk.Dial(socket)
 			if err != nil {
@@ -74,7 +74,7 @@ func specFreezeCmd() *cobra.Command {
 
 			specID, hex, err := cli.ConfirmInterview(ctx, sessionID)
 			if err != nil {
-				return fmt.Errorf("confirm: %w", err)
+				return wrapRPCError(err)
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "Frozen: spec_id=%s sha256=%s\n", specID, hex)
 			return nil

@@ -64,7 +64,7 @@ func interviewCmd() *cobra.Command {
 				ctx = context.Background()
 			}
 			if err := ensureDaemon(socket, defaultBase()); err != nil {
-				return fmt.Errorf("ensure daemon: %w", err)
+				return err
 			}
 			cli, err := sdk.Dial(socket)
 			if err != nil {
@@ -84,7 +84,7 @@ func interviewCmd() *cobra.Command {
 
 			startStream, err := cli.StartInterview(ctx, sessionID, firstLine, providerName, model, sdk.InterviewModels{})
 			if err != nil {
-				return fmt.Errorf("start: %w", err)
+				return wrapRPCError(err)
 			}
 			if err := drainEvents(out, startStream); err != nil {
 				return err
@@ -106,7 +106,7 @@ func interviewCmd() *cobra.Command {
 				}
 				replyStream, err := cli.ReplyInterview(ctx, sessionID, line)
 				if err != nil {
-					return fmt.Errorf("reply: %w", err)
+					return wrapRPCError(err)
 				}
 				if err := drainEvents(out, replyStream); err != nil {
 					return err

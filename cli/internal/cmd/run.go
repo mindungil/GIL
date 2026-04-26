@@ -26,7 +26,7 @@ func runCmd() *cobra.Command {
 				ctx = context.Background()
 			}
 			if err := ensureDaemon(socket, defaultBase()); err != nil {
-				return fmt.Errorf("ensure daemon: %w", err)
+				return err
 			}
 			cli, err := sdk.Dial(socket)
 			if err != nil {
@@ -36,7 +36,7 @@ func runCmd() *cobra.Command {
 
 			resp, err := cli.StartRun(ctx, sessionID, providerName, model, detach)
 			if err != nil {
-				return fmt.Errorf("run: %w", err)
+				return wrapRPCError(err)
 			}
 
 			out := cmd.OutOrStdout()

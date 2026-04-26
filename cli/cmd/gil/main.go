@@ -1,15 +1,14 @@
 package main
 
 import (
-	"fmt"
-	"os"
-
 	"github.com/jedutools/gil/cli/internal/cmd"
+	"github.com/jedutools/gil/core/cliutil"
 )
 
 func main() {
-	if err := cmd.Root().Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
+	// Cobra prints command-usage messages itself; everything that escapes here
+	// is a real failure. cliutil.Exit detects *UserError (anywhere in the
+	// wrap chain) and prints "Error: ...\nHint: ..."; plain errors fall back
+	// to a single "Error: ..." line. nil is a no-op.
+	cliutil.Exit(cmd.Root().Execute())
 }

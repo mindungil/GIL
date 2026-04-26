@@ -8,6 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/jedutools/gil/core/cliutil"
 	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
 	"github.com/jedutools/gil/sdk"
 )
@@ -29,10 +30,12 @@ func eventsCmd() *cobra.Command {
 				ctx = context.Background()
 			}
 			if !tail {
-				return fmt.Errorf("replay-from-disk not yet implemented (Phase 6); use --tail to stream live events")
+				return cliutil.New(
+					"replay-from-disk is not implemented yet",
+					`pass --tail to stream events from a live run`)
 			}
 			if err := ensureDaemon(socket, defaultBase()); err != nil {
-				return fmt.Errorf("ensure daemon: %w", err)
+				return err
 			}
 			cli, err := sdk.Dial(socket)
 			if err != nil {
@@ -42,7 +45,7 @@ func eventsCmd() *cobra.Command {
 
 			stream, err := cli.TailRun(ctx, sessionID)
 			if err != nil {
-				return fmt.Errorf("tail: %w", err)
+				return wrapRPCError(err)
 			}
 
 			return tailEvents(ctx, stream, cmd.OutOrStdout())

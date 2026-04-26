@@ -26,7 +26,7 @@ func resumeCmd() *cobra.Command {
 				ctx = context.Background()
 			}
 			if err := ensureDaemon(socket, defaultBase()); err != nil {
-				return fmt.Errorf("ensure daemon: %w", err)
+				return err
 			}
 			cli, err := sdk.Dial(socket)
 			if err != nil {
@@ -37,7 +37,7 @@ func resumeCmd() *cobra.Command {
 			out := cmd.OutOrStdout()
 			stream, err := cli.StartInterview(ctx, sessionID, "", providerName, model, sdk.InterviewModels{})
 			if err != nil {
-				return fmt.Errorf("resume: %w", err)
+				return wrapRPCError(err)
 			}
 			for {
 				evt, err := stream.Recv()
