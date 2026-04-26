@@ -21,7 +21,9 @@ func TestGild_StartsAndAcceptsCreate(t *testing.T) {
 	dbPath := filepath.Join(dir, "sessions.db")
 	sessionsBase := filepath.Join(dir, "sessions")
 
-	srv, err := newServer(dbPath, sockPath, sessionsBase, nil)
+	// authFile = "" disables credstore lookup; this test only exercises
+	// the gRPC plumbing, not the provider factory's credential resolution.
+	srv, err := newServer(dbPath, sockPath, sessionsBase, "", nil)
 	require.NoError(t, err)
 
 	go func() {
