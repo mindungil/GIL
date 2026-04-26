@@ -258,6 +258,72 @@ func (a *AgentLoop) Run(ctx context.Context) (*Result, error) {
 				})
 			}
 			if allPass {
+				// Memory milestone gate: if Memory is non-nil, give the agent one
+				// chance to call memory_update before we declare done.
+				if a.Memory != nil {
+					a.emit(event.SourceSystem, event.KindNote, "memory_milestone_start", nil)
+					nudge := provider.Message{
+						Role:    provider.RoleUser,
+						Content: "Verification passed. Before declaring done, review the memory bank: is there anything from this run worth recording for future sessions? If yes, call memory_update once or twice now. If no, just reply with 'no update'.",
+					}
+					milestoneMsgs := append(messages[:len(messages):len(messages)], nudge)
+					mResp, mErr := a.Provider.Complete(ctx, provider.Request{
+						Model:     a.Model,
+						System:    system,
+						Messages:  milestoneMsgs,
+						Tools:     tools,
+						MaxTokens: 1024,
+					})
+					if mErr != nil {
+						// Soft failure: log + proceed to done as if no milestone existed.
+						a.emit(event.SourceSystem, event.KindNote, "memory_milestone_error", map[string]any{"err": mErr.Error()})
+					} else {
+						totalTokens += mResp.InputTokens + mResp.OutputTokens
+						a.emit(event.SourceAgent, event.KindObservation, "memory_milestone_response", map[string]any{
+							"tool_calls":  len(mResp.ToolCalls),
+							"stop_reason": mResp.StopReason,
+						})
+						// Dispatch any memory_update / memory_load tool calls.
+						// Other tools are ignored (memory-only gate; no broader work).
+						for _, tc := range mResp.ToolCalls {
+							if tc.Name != "memory_update" && tc.Name != "memory_load" {
+								a.emit(event.SourceSystem, event.KindNote, "memory_milestone_tool_skipped", map[string]any{
+									"name":   tc.Name,
+									"reason": "only memory_* tools allowed at milestone",
+								})
+								continue
+							}
+							t, ok := toolByName[tc.Name]
+							if !ok {
+								continue
+							}
+							a.emit(event.SourceAgent, event.KindAction, "tool_call", map[string]any{
+								"name":      tc.Name,
+								"input":     truncateJSON(tc.Input, 512),
+								"milestone": true,
+							})
+							r, err := t.Run(ctx, tc.Input)
+							if err != nil {
+								a.emit(event.SourceEnvironment, event.KindObservation, "tool_result", map[string]any{
+									"name":      tc.Name,
+									"is_error":  true,
+									"content":   truncateString(err.Error(), 512),
+									"milestone": true,
+								})
+								continue
+							}
+							a.emit(event.SourceEnvironment, event.KindObservation, "tool_result", map[string]any{
+								"name":      tc.Name,
+								"is_error":  r.IsError,
+								"content":   truncateString(r.Content, 512),
+								"milestone": true,
+							})
+						}
+						a.emit(event.SourceSystem, event.KindNote, "memory_milestone_done", map[string]any{
+							"memory_calls": countMemoryCalls(mResp.ToolCalls),
+						})
+					}
+				}
 				a.emit(event.SourceSystem, event.KindNote, "run_done", map[string]any{"iterations": iter, "tokens": totalTokens})
 				if a.Checkpoint != nil {
 					sha, err := a.Checkpoint.Commit(ctx, fmt.Sprintf("done iter %d", iter))
@@ -527,6 +593,17 @@ func truncateString(s string, max int) string {
 
 func truncateJSON(b []byte, max int) string {
 	return truncateString(string(b), max)
+}
+
+// countMemoryCalls returns how many of the given tool calls are memory_update or memory_load.
+func countMemoryCalls(calls []provider.ToolCall) int {
+	n := 0
+	for _, c := range calls {
+		if c.Name == "memory_update" || c.Name == "memory_load" {
+			n++
+		}
+	}
+	return n
 }
 
 // estimateMessagesTokens uses the same 4-chars-per-token heuristic as compact.estimateTokens.

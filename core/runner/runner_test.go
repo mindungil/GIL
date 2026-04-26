@@ -885,3 +885,215 @@ func TestAgentLoop_EmptyBank_NoMemorySection(t *testing.T) {
 	sysPrompt := buildSystemPrompt(spec, nil, bank)
 	require.NotContains(t, sysPrompt, "## Memory Bank")
 }
+
+func TestAgentLoop_MilestoneGate_AgentCallsMemoryUpdate(t *testing.T) {
+	workspace := t.TempDir()
+	bankDir := filepath.Join(workspace, "memory")
+	bank := memory.New(bankDir)
+	require.NoError(t, bank.Init())
+
+	// Provider scripted: turn 1 = no tool calls (triggers verifier), turn 2 (milestone) = call memory_update
+	prov := provider.NewMockToolProvider([]provider.MockTurn{
+		{Text: "I think I'm done.", StopReason: "end_turn"}, // initial done attempt
+		{ // milestone turn
+			Text: "Recording progress.",
+			ToolCalls: []provider.ToolCall{{
+				ID:    "m1",
+				Name:  "memory_update",
+				Input: json.RawMessage(`{"file":"progress","content":"completed test step","section":"Done"}`),
+			}},
+			StopReason: "tool_use",
+		},
+	})
+
+	spec := &gilv1.FrozenSpec{
+		Goal:         &gilv1.Goal{OneLiner: "test"},
+		Verification: &gilv1.Verification{}, // no checks → allPass=true
+	}
+	ver := verify.NewRunner(workspace)
+
+	loop := &AgentLoop{
+		Spec:     spec,
+		Provider: prov,
+		Model:    "m",
+		Tools:    []tool.Tool{&tool.MemoryUpdate{Bank: bank}, &tool.MemoryLoad{Bank: bank}},
+		Verifier: ver,
+		Memory:   bank,
+		Events:   event.NewStream(),
+	}
+	sub := loop.Events.Subscribe(256)
+	var collected []event.Event
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for e := range sub.Events() {
+			collected = append(collected, e)
+		}
+	}()
+
+	res, err := loop.Run(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "done", res.Status)
+	sub.Close()
+	<-done
+
+	// Bank should now contain the appended content
+	progress, err := bank.Read(memory.FileProgress)
+	require.NoError(t, err)
+	require.Contains(t, progress, "completed test step")
+
+	// Expect milestone events
+	var startSeen, doneSeen, callsCount int
+	for _, e := range collected {
+		switch e.Type {
+		case "memory_milestone_start":
+			startSeen++
+		case "memory_milestone_done":
+			doneSeen++
+		case "tool_call":
+			callsCount++
+		}
+	}
+	require.Equal(t, 1, startSeen)
+	require.Equal(t, 1, doneSeen)
+	require.GreaterOrEqual(t, callsCount, 1)
+}
+
+func TestAgentLoop_MilestoneGate_AgentSkips(t *testing.T) {
+	workspace := t.TempDir()
+	bank := memory.New(filepath.Join(workspace, "memory"))
+	require.NoError(t, bank.Init())
+
+	prov := provider.NewMockToolProvider([]provider.MockTurn{
+		{Text: "done", StopReason: "end_turn"},      // initial done
+		{Text: "no update", StopReason: "end_turn"}, // milestone reply with no tools
+	})
+
+	spec := &gilv1.FrozenSpec{
+		Goal:         &gilv1.Goal{OneLiner: "test"},
+		Verification: &gilv1.Verification{},
+	}
+	ver := verify.NewRunner(workspace)
+	loop := &AgentLoop{
+		Spec:     spec,
+		Provider: prov,
+		Model:    "m",
+		Tools:    []tool.Tool{&tool.MemoryUpdate{Bank: bank}},
+		Verifier: ver,
+		Memory:   bank,
+		Events:   event.NewStream(),
+	}
+	sub := loop.Events.Subscribe(256)
+	var collected []event.Event
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for e := range sub.Events() {
+			collected = append(collected, e)
+		}
+	}()
+
+	res, err := loop.Run(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "done", res.Status)
+	sub.Close()
+	<-done
+
+	// memory_milestone_done was emitted with memory_calls=0
+	var doneEvents int
+	for _, e := range collected {
+		if e.Type == "memory_milestone_done" {
+			doneEvents++
+			var d map[string]any
+			_ = json.Unmarshal(e.Data, &d)
+			require.Equal(t, float64(0), d["memory_calls"])
+		}
+	}
+	require.Equal(t, 1, doneEvents)
+}
+
+func TestAgentLoop_MilestoneGate_SkippedWhenBankNil(t *testing.T) {
+	workspace := t.TempDir()
+	prov := provider.NewMockToolProvider([]provider.MockTurn{
+		{Text: "done", StopReason: "end_turn"},
+	})
+	spec := &gilv1.FrozenSpec{Goal: &gilv1.Goal{OneLiner: "test"}, Verification: &gilv1.Verification{}}
+	ver := verify.NewRunner(workspace)
+	loop := &AgentLoop{
+		Spec:     spec,
+		Provider: prov,
+		Model:    "m",
+		Verifier: ver,
+		Memory:   nil,
+		Events:   event.NewStream(),
+	}
+	sub := loop.Events.Subscribe(256)
+	var collected []event.Event
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for e := range sub.Events() {
+			collected = append(collected, e)
+		}
+	}()
+	res, err := loop.Run(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "done", res.Status)
+	sub.Close()
+	<-done
+	for _, e := range collected {
+		require.NotEqual(t, "memory_milestone_start", e.Type)
+		require.NotEqual(t, "memory_milestone_done", e.Type)
+	}
+}
+
+func TestAgentLoop_MilestoneGate_NonMemoryToolsIgnored(t *testing.T) {
+	workspace := t.TempDir()
+	bank := memory.New(filepath.Join(workspace, "memory"))
+	require.NoError(t, bank.Init())
+
+	prov := provider.NewMockToolProvider([]provider.MockTurn{
+		{Text: "done", StopReason: "end_turn"},
+		{ // milestone turn calling a non-memory tool — should be skipped
+			Text: "trying bash",
+			ToolCalls: []provider.ToolCall{{
+				ID:    "x",
+				Name:  "bash",
+				Input: json.RawMessage(`{"command":"echo hi"}`),
+			}},
+			StopReason: "tool_use",
+		},
+	})
+	spec := &gilv1.FrozenSpec{Goal: &gilv1.Goal{OneLiner: "test"}, Verification: &gilv1.Verification{}}
+	ver := verify.NewRunner(workspace)
+	loop := &AgentLoop{
+		Spec:     spec,
+		Provider: prov,
+		Model:    "m",
+		Tools:    []tool.Tool{&tool.Bash{WorkingDir: workspace}, &tool.MemoryUpdate{Bank: bank}},
+		Verifier: ver,
+		Memory:   bank,
+		Events:   event.NewStream(),
+	}
+	sub := loop.Events.Subscribe(256)
+	var collected []event.Event
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for e := range sub.Events() {
+			collected = append(collected, e)
+		}
+	}()
+	res, err := loop.Run(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "done", res.Status)
+	sub.Close()
+	<-done
+	var skipSeen bool
+	for _, e := range collected {
+		if e.Type == "memory_milestone_tool_skipped" {
+			skipSeen = true
+		}
+	}
+	require.True(t, skipSeen)
+}
