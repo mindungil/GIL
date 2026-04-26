@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"sync"
 
@@ -18,6 +19,7 @@ import (
 	"github.com/jedutools/gil/core/tool"
 	"github.com/jedutools/gil/core/verify"
 	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
+	"github.com/jedutools/gil/runtime/local"
 )
 
 // runProgressSnap holds live iteration/token counters for an active run.
@@ -68,6 +70,41 @@ func (s *RunService) sessionDir(sessionID string) string {
 	return filepath.Join(s.sessionsBase, sessionID)
 }
 
+// buildTools returns the tool set for a run, configured per spec.Workspace.Backend.
+// Returns (tools, error). Unsupported backends produce errors so RunService.Start
+// can refuse the run rather than silently degrading.
+func buildTools(workspaceDir string, ws *gilv1.Workspace) ([]tool.Tool, error) {
+	backend := gilv1.WorkspaceBackend_LOCAL_NATIVE
+	if ws != nil && ws.Backend != gilv1.WorkspaceBackend_BACKEND_UNSPECIFIED {
+		backend = ws.Backend
+	}
+	switch backend {
+	case gilv1.WorkspaceBackend_LOCAL_NATIVE:
+		return []tool.Tool{
+			&tool.Bash{WorkingDir: workspaceDir},
+			&tool.WriteFile{WorkingDir: workspaceDir},
+			&tool.ReadFile{WorkingDir: workspaceDir},
+		}, nil
+	case gilv1.WorkspaceBackend_LOCAL_SANDBOX:
+		if !local.Available() {
+			return nil, fmt.Errorf("workspace backend LOCAL_SANDBOX requires bwrap, but it is not installed")
+		}
+		sb := &local.Sandbox{
+			WorkspaceDir: workspaceDir,
+			Mode:         local.ModeWorkspaceWrite,
+		}
+		return []tool.Tool{
+			&tool.Bash{WorkingDir: workspaceDir, Wrapper: sb},
+			&tool.WriteFile{WorkingDir: workspaceDir},
+			&tool.ReadFile{WorkingDir: workspaceDir},
+		}, nil
+	case gilv1.WorkspaceBackend_DOCKER, gilv1.WorkspaceBackend_SSH, gilv1.WorkspaceBackend_VM:
+		return nil, fmt.Errorf("workspace backend %s not yet supported (Phase 6)", backend.String())
+	default:
+		return nil, fmt.Errorf("unknown workspace backend: %v", backend)
+	}
+}
+
 // Start runs the agent loop and returns the result. When req.Detach is true,
 // the loop runs in a goroutine and the method returns immediately with
 // Status="started".
@@ -103,10 +140,9 @@ func (s *RunService) Start(ctx context.Context, req *gilv1.StartRunRequest) (*gi
 	if spec.Workspace != nil && spec.Workspace.Path != "" {
 		workspaceDir = spec.Workspace.Path
 	}
-	tools := []tool.Tool{
-		&tool.Bash{WorkingDir: workspaceDir},
-		&tool.WriteFile{WorkingDir: workspaceDir},
-		&tool.ReadFile{WorkingDir: workspaceDir},
+	tools, err := buildTools(workspaceDir, spec.Workspace)
+	if err != nil {
+		return nil, status.Errorf(codes.FailedPrecondition, "workspace backend: %v", err)
 	}
 	ver := verify.NewRunner(workspaceDir)
 

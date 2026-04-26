@@ -20,7 +20,9 @@ import (
 	"github.com/jedutools/gil/core/provider"
 	"github.com/jedutools/gil/core/session"
 	"github.com/jedutools/gil/core/specstore"
+	"github.com/jedutools/gil/core/tool"
 	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
+	"github.com/jedutools/gil/runtime/local"
 )
 
 func newRunSvc(t *testing.T, mockTurns []provider.MockTurn) (*RunService, *session.Repo, string) {
@@ -293,4 +295,80 @@ func TestRunService_Start_Detach_ReturnsStarted(t *testing.T) {
 		iters, _, ok := svc.Progress(s.ID)
 		return ok && iters > 0
 	}, 2*time.Second, 10*time.Millisecond, "expected progress to be tracked for detached run")
+}
+
+func TestBuildTools_LocalNative_NoSandbox(t *testing.T) {
+	tools, err := buildTools("/work", &gilv1.Workspace{Backend: gilv1.WorkspaceBackend_LOCAL_NATIVE})
+	require.NoError(t, err)
+	require.Len(t, tools, 3)
+
+	bash, ok := tools[0].(*tool.Bash)
+	require.True(t, ok, "first tool should be *tool.Bash")
+	require.Nil(t, bash.Wrapper, "Wrapper should be nil for LOCAL_NATIVE")
+
+	wf, ok := tools[1].(*tool.WriteFile)
+	require.True(t, ok, "second tool should be *tool.WriteFile")
+	require.False(t, wf.ReadOnly, "ReadOnly should be false for LOCAL_NATIVE")
+}
+
+func TestBuildTools_Unspecified_DefaultsToLocalNative(t *testing.T) {
+	// BACKEND_UNSPECIFIED should behave like LOCAL_NATIVE
+	tools, err := buildTools("/work", &gilv1.Workspace{Backend: gilv1.WorkspaceBackend_BACKEND_UNSPECIFIED})
+	require.NoError(t, err)
+	require.Len(t, tools, 3)
+	bash, ok := tools[0].(*tool.Bash)
+	require.True(t, ok)
+	require.Nil(t, bash.Wrapper)
+
+	// nil workspace should also behave like LOCAL_NATIVE
+	tools2, err2 := buildTools("/work", nil)
+	require.NoError(t, err2)
+	require.Len(t, tools2, 3)
+	bash2, ok2 := tools2[0].(*tool.Bash)
+	require.True(t, ok2)
+	require.Nil(t, bash2.Wrapper)
+}
+
+func TestBuildTools_LocalSandbox_Behavior(t *testing.T) {
+	t.Run("withBwrap", func(t *testing.T) {
+		if !local.Available() {
+			t.Skip("bwrap not installed on this machine")
+		}
+		tools, err := buildTools("/work", &gilv1.Workspace{Backend: gilv1.WorkspaceBackend_LOCAL_SANDBOX})
+		require.NoError(t, err)
+		require.Len(t, tools, 3)
+
+		bash, ok := tools[0].(*tool.Bash)
+		require.True(t, ok)
+		require.NotNil(t, bash.Wrapper, "Wrapper should be set for LOCAL_SANDBOX")
+
+		sb, ok := bash.Wrapper.(*local.Sandbox)
+		require.True(t, ok, "Wrapper should be *local.Sandbox")
+		require.Equal(t, "/work", sb.WorkspaceDir)
+		require.Equal(t, local.ModeWorkspaceWrite, sb.Mode)
+	})
+	t.Run("withoutBwrap", func(t *testing.T) {
+		if local.Available() {
+			t.Skip("bwrap is installed; cannot test missing-bwrap path")
+		}
+		_, err := buildTools("/work", &gilv1.Workspace{Backend: gilv1.WorkspaceBackend_LOCAL_SANDBOX})
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "requires bwrap")
+	})
+}
+
+func TestBuildTools_Docker_Returns_NotSupported(t *testing.T) {
+	unsupported := []gilv1.WorkspaceBackend{
+		gilv1.WorkspaceBackend_DOCKER,
+		gilv1.WorkspaceBackend_SSH,
+		gilv1.WorkspaceBackend_VM,
+	}
+	for _, backend := range unsupported {
+		backend := backend
+		t.Run(backend.String(), func(t *testing.T) {
+			_, err := buildTools("/work", &gilv1.Workspace{Backend: backend})
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "not yet supported")
+		})
+	}
 }
