@@ -38,3 +38,34 @@ func TestStream_Len(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 2, s.Len())
 }
+
+func TestStream_Subscribe_ReceivesAppendedEvents(t *testing.T) {
+	s := NewStream()
+	sub := s.Subscribe(10)
+	defer sub.Close()
+
+	go func() {
+		s.Append(Event{Type: "first"})
+		s.Append(Event{Type: "second"})
+	}()
+
+	got1 := <-sub.Events()
+	got2 := <-sub.Events()
+	require.Equal(t, "first", got1.Type)
+	require.Equal(t, "second", got2.Type)
+}
+
+func TestStream_Subscribe_MultipleSubscribers(t *testing.T) {
+	s := NewStream()
+	sub1 := s.Subscribe(5)
+	defer sub1.Close()
+	sub2 := s.Subscribe(5)
+	defer sub2.Close()
+
+	s.Append(Event{Type: "broadcast"})
+
+	r1 := <-sub1.Events()
+	r2 := <-sub2.Events()
+	require.Equal(t, "broadcast", r1.Type)
+	require.Equal(t, "broadcast", r2.Type)
+}
