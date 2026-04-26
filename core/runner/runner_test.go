@@ -3,16 +3,34 @@ package runner
 import (
 	"context"
 	"encoding/json"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/jedutools/gil/core/event"
 	"github.com/jedutools/gil/core/provider"
+	"github.com/jedutools/gil/core/stuck"
 	"github.com/jedutools/gil/core/tool"
 	"github.com/jedutools/gil/core/verify"
 	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
 	"github.com/stretchr/testify/require"
 )
+
+// loopProvider is a test provider that forever returns the same scripted turn.
+type loopProvider struct {
+	turn provider.MockTurn
+}
+
+func (l *loopProvider) Name() string { return "loop-mock" }
+func (l *loopProvider) Complete(_ context.Context, _ provider.Request) (provider.Response, error) {
+	return provider.Response{
+		Text:         l.turn.Text,
+		ToolCalls:    l.turn.ToolCalls,
+		StopReason:   l.turn.StopReason,
+		InputTokens:  10,
+		OutputTokens: int64(len(l.turn.Text)),
+	}, nil
+}
 
 func TestAgentLoop_HelloWorld_Done(t *testing.T) {
 	dir := t.TempDir()
@@ -228,4 +246,186 @@ collectLoop:
 	require.Greater(t, types["tool_result"], 0)
 	require.Greater(t, types["verify_result"], 0)
 	require.Greater(t, types["run_done"], 0)
+}
+
+// TestAgentLoop_StuckAbortsAfterThreshold verifies that without a recovery
+// strategy the loop aborts with status="stuck" after StuckThreshold unrecovered
+// signals, well before MaxIterations.
+func TestAgentLoop_StuckAbortsAfterThreshold(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Always emit the exact same bash tool call so PatternRepeatedActionObservation
+	// fires as soon as 4 identical pairs accumulate.
+	mock := &loopProvider{turn: provider.MockTurn{
+		Text:       "looping",
+		ToolCalls:  []provider.ToolCall{{ID: "x", Name: "bash", Input: json.RawMessage(`{"command":"echo loop"}`)}},
+		StopReason: "tool_use",
+	}}
+
+	spec := &gilv1.FrozenSpec{
+		Goal: &gilv1.Goal{OneLiner: "loop forever"},
+		Verification: &gilv1.Verification{
+			Checks: []*gilv1.Check{{Name: "never", Kind: gilv1.CheckKind_SHELL, Command: "false", ExpectedExitCode: 0}},
+		},
+		Budget: &gilv1.Budget{MaxIterations: 30},
+	}
+	tools := []tool.Tool{&tool.Bash{WorkingDir: t.TempDir()}}
+
+	loop := &AgentLoop{
+		Spec:          spec,
+		Provider:      mock,
+		Model:         "m1",
+		Tools:         tools,
+		Verifier:      verify.NewRunner(t.TempDir()),
+		StuckDetector: &stuck.Detector{Window: 50},
+		// No StuckStrategy — every detected signal is unrecovered.
+		StuckThreshold: 3,
+	}
+
+	res, err := loop.Run(ctx)
+	require.NoError(t, err)
+	require.Equal(t, "stuck", res.Status)
+	require.Less(t, res.Iterations, 30, "expected early abort, got %d iterations", res.Iterations)
+	require.NotNil(t, res.FinalError)
+}
+
+// TestAgentLoop_StuckRecoversViaModelEscalate verifies that ModelEscalateStrategy
+// swaps a.Model on each detection, and after exhausting the chain the loop
+// eventually aborts with status="stuck". The stream must contain 2 stuck_recovered
+// events for models "m2" and "m3".
+func TestAgentLoop_StuckRecoversViaModelEscalate(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	mock := &loopProvider{turn: provider.MockTurn{
+		Text:       "looping",
+		ToolCalls:  []provider.ToolCall{{ID: "x", Name: "bash", Input: json.RawMessage(`{"command":"echo loop"}`)}},
+		StopReason: "tool_use",
+	}}
+
+	spec := &gilv1.FrozenSpec{
+		Goal: &gilv1.Goal{OneLiner: "loop forever"},
+		Verification: &gilv1.Verification{
+			Checks: []*gilv1.Check{{Name: "never", Kind: gilv1.CheckKind_SHELL, Command: "false", ExpectedExitCode: 0}},
+		},
+		Budget: &gilv1.Budget{MaxIterations: 100},
+	}
+	tools := []tool.Tool{&tool.Bash{WorkingDir: t.TempDir()}}
+
+	stream := event.NewStream()
+	sub := stream.Subscribe(256)
+	defer sub.Close()
+
+	loop := &AgentLoop{
+		Spec:           spec,
+		Provider:       mock,
+		Model:          "m1",
+		Tools:          tools,
+		Verifier:       verify.NewRunner(t.TempDir()),
+		Events:         stream,
+		StuckDetector:  &stuck.Detector{Window: 50},
+		StuckStrategy:  stuck.ModelEscalateStrategy{},
+		ModelChain:     []string{"m1", "m2", "m3"},
+		StuckThreshold: 3,
+	}
+
+	// Collect all events in a goroutine before (and while) the loop runs.
+	var mu sync.Mutex
+	var collected []event.Event
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case e, ok := <-sub.Events():
+				if !ok {
+					return
+				}
+				mu.Lock()
+				collected = append(collected, e)
+				mu.Unlock()
+				if e.Type == "stuck_unrecovered" || e.Type == "run_done" || e.Type == "run_max_iterations" {
+					return
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	res, err := loop.Run(ctx)
+	require.NoError(t, err)
+	require.Equal(t, "stuck", res.Status)
+
+	// Wait for collector to drain.
+	select {
+	case <-done:
+	case <-time.After(1 * time.Second):
+	}
+
+	mu.Lock()
+	evs := collected
+	mu.Unlock()
+
+	// Count stuck_recovered events and check new_model values.
+	type recoveredInfo struct{ newModel string }
+	var recoveries []recoveredInfo
+	for _, e := range evs {
+		if e.Type != "stuck_recovered" {
+			continue
+		}
+		var d map[string]any
+		require.NoError(t, json.Unmarshal(e.Data, &d))
+		nm, _ := d["new_model"].(string)
+		recoveries = append(recoveries, recoveredInfo{nm})
+	}
+
+	require.GreaterOrEqual(t, len(recoveries), 2, "expected at least 2 model switches, got %d", len(recoveries))
+
+	// Verify m2 was escalated to before m3 (order may have more than 2 entries
+	// if the detector fires on the same iteration for different patterns).
+	models := make([]string, len(recoveries))
+	for i, r := range recoveries {
+		models[i] = r.newModel
+	}
+	require.Contains(t, models, "m2")
+	require.Contains(t, models, "m3")
+}
+
+// TestAgentLoop_NoDetectorMeansNoStuckAbort verifies that when StuckDetector is
+// nil the loop runs to MaxIterations with no early abort despite the same loopy
+// provider.
+func TestAgentLoop_NoDetectorMeansNoStuckAbort(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	mock := &loopProvider{turn: provider.MockTurn{
+		Text:       "looping",
+		ToolCalls:  []provider.ToolCall{{ID: "x", Name: "bash", Input: json.RawMessage(`{"command":"echo loop"}`)}},
+		StopReason: "tool_use",
+	}}
+
+	spec := &gilv1.FrozenSpec{
+		Goal: &gilv1.Goal{OneLiner: "loop forever"},
+		Verification: &gilv1.Verification{
+			Checks: []*gilv1.Check{{Name: "never", Kind: gilv1.CheckKind_SHELL, Command: "false", ExpectedExitCode: 0}},
+		},
+		Budget: &gilv1.Budget{MaxIterations: 10},
+	}
+	tools := []tool.Tool{&tool.Bash{WorkingDir: t.TempDir()}}
+
+	loop := &AgentLoop{
+		Spec:          spec,
+		Provider:      mock,
+		Model:         "m1",
+		Tools:         tools,
+		Verifier:      verify.NewRunner(t.TempDir()),
+		StuckDetector: nil, // no detector → no abort
+	}
+
+	res, err := loop.Run(ctx)
+	require.NoError(t, err)
+	require.Equal(t, "max_iterations", res.Status)
+	require.Equal(t, 10, res.Iterations)
 }
