@@ -3,10 +3,12 @@ package runner
 import (
 	"context"
 	"encoding/json"
+	"os/exec"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/jedutools/gil/core/checkpoint"
 	"github.com/jedutools/gil/core/event"
 	"github.com/jedutools/gil/core/provider"
 	"github.com/jedutools/gil/core/stuck"
@@ -428,4 +430,262 @@ func TestAgentLoop_NoDetectorMeansNoStuckAbort(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "max_iterations", res.Status)
 	require.Equal(t, 10, res.Iterations)
+}
+
+// TestAgentLoop_CheckpointsCommittedPerToolIteration verifies that ShadowGit
+// receives a commit after each tool-using iteration and a final commit at done.
+func TestAgentLoop_CheckpointsCommittedPerToolIteration(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not in PATH")
+	}
+
+	workDir := t.TempDir()
+	baseDir := t.TempDir()
+
+	prov := provider.NewMockToolProvider([]provider.MockTurn{
+		{ToolCalls: []provider.ToolCall{{ID: "a", Name: "write_file", Input: json.RawMessage(`{"path":"a.txt","content":"a"}`)}}, StopReason: "tool_use"},
+		{ToolCalls: []provider.ToolCall{{ID: "b", Name: "write_file", Input: json.RawMessage(`{"path":"b.txt","content":"b"}`)}}, StopReason: "tool_use"},
+		{Text: "done", StopReason: "end_turn"},
+	})
+
+	spec := &gilv1.FrozenSpec{
+		Goal:         &gilv1.Goal{OneLiner: "write files"},
+		Verification: &gilv1.Verification{Checks: []*gilv1.Check{}},
+		Budget:       &gilv1.Budget{MaxIterations: 10},
+	}
+
+	tools := []tool.Tool{&tool.WriteFile{WorkingDir: workDir}}
+	sg := checkpoint.New(workDir, baseDir)
+
+	stream := event.NewStream()
+	sub := stream.Subscribe(128)
+	defer sub.Close()
+
+	loop := &AgentLoop{
+		Spec:       spec,
+		Provider:   prov,
+		Model:      "test",
+		Tools:      tools,
+		Verifier:   verify.NewRunner(workDir),
+		Events:     stream,
+		Checkpoint: sg,
+	}
+
+	// Collect events while the loop runs.
+	var mu sync.Mutex
+	var collected []event.Event
+	collectorDone := make(chan struct{})
+	go func() {
+		defer close(collectorDone)
+		for {
+			select {
+			case e, ok := <-sub.Events():
+				if !ok {
+					return
+				}
+				mu.Lock()
+				collected = append(collected, e)
+				mu.Unlock()
+				if e.Type == "run_done" || e.Type == "run_max_iterations" || e.Type == "run_error" {
+					return
+				}
+			case <-time.After(5 * time.Second):
+				return
+			}
+		}
+	}()
+
+	res, err := loop.Run(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "done", res.Status)
+
+	select {
+	case <-collectorDone:
+	case <-time.After(2 * time.Second):
+	}
+
+	mu.Lock()
+	evs := collected
+	mu.Unlock()
+
+	// Count checkpoint_committed events and verify sha fields are non-empty.
+	var checkpointEvents []event.Event
+	for _, e := range evs {
+		if e.Type == "checkpoint_committed" {
+			checkpointEvents = append(checkpointEvents, e)
+		}
+	}
+	require.GreaterOrEqual(t, len(checkpointEvents), 2, "expected at least 2 checkpoint_committed events")
+
+	for _, e := range checkpointEvents {
+		var d map[string]any
+		require.NoError(t, json.Unmarshal(e.Data, &d))
+		sha, _ := d["sha"].(string)
+		require.NotEmpty(t, sha, "checkpoint_committed event missing sha: %s", string(e.Data))
+	}
+
+	// Verify commits exist in the shadow git.
+	commits, err := sg.ListCommits(context.Background())
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(commits), 3, "expected at least 3 commits (2 tool iters + 1 final)")
+}
+
+// TestAgentLoop_NoCheckpointWithoutField verifies that nil Checkpoint causes no
+// checkpoint events and no errors.
+func TestAgentLoop_NoCheckpointWithoutField(t *testing.T) {
+	workDir := t.TempDir()
+
+	prov := provider.NewMockToolProvider([]provider.MockTurn{
+		{ToolCalls: []provider.ToolCall{{ID: "a", Name: "write_file", Input: json.RawMessage(`{"path":"a.txt","content":"a"}`)}}, StopReason: "tool_use"},
+		{ToolCalls: []provider.ToolCall{{ID: "b", Name: "write_file", Input: json.RawMessage(`{"path":"b.txt","content":"b"}`)}}, StopReason: "tool_use"},
+		{Text: "done", StopReason: "end_turn"},
+	})
+
+	spec := &gilv1.FrozenSpec{
+		Goal:         &gilv1.Goal{OneLiner: "write files"},
+		Verification: &gilv1.Verification{Checks: []*gilv1.Check{}},
+		Budget:       &gilv1.Budget{MaxIterations: 10},
+	}
+
+	tools := []tool.Tool{&tool.WriteFile{WorkingDir: workDir}}
+
+	stream := event.NewStream()
+	sub := stream.Subscribe(128)
+	defer sub.Close()
+
+	loop := &AgentLoop{
+		Spec:       spec,
+		Provider:   prov,
+		Model:      "test",
+		Tools:      tools,
+		Verifier:   verify.NewRunner(workDir),
+		Events:     stream,
+		Checkpoint: nil, // no checkpointing
+	}
+
+	var mu sync.Mutex
+	var collected []event.Event
+	collectorDone := make(chan struct{})
+	go func() {
+		defer close(collectorDone)
+		for {
+			select {
+			case e, ok := <-sub.Events():
+				if !ok {
+					return
+				}
+				mu.Lock()
+				collected = append(collected, e)
+				mu.Unlock()
+				if e.Type == "run_done" || e.Type == "run_max_iterations" || e.Type == "run_error" {
+					return
+				}
+			case <-time.After(5 * time.Second):
+				return
+			}
+		}
+	}()
+
+	res, err := loop.Run(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "done", res.Status)
+
+	select {
+	case <-collectorDone:
+	case <-time.After(2 * time.Second):
+	}
+
+	mu.Lock()
+	evs := collected
+	mu.Unlock()
+
+	for _, e := range evs {
+		require.NotEqual(t, "checkpoint_committed", e.Type, "unexpected checkpoint event when Checkpoint is nil")
+		require.NotEqual(t, "checkpoint_init", e.Type)
+		require.NotEqual(t, "checkpoint_init_error", e.Type)
+		require.NotEqual(t, "checkpoint_error", e.Type)
+	}
+}
+
+// TestAgentLoop_CheckpointInitFailureSoftDisables verifies that a failing Init
+// emits checkpoint_init_error but does NOT abort the run.
+func TestAgentLoop_CheckpointInitFailureSoftDisables(t *testing.T) {
+	workDir := t.TempDir()
+	baseDir := t.TempDir()
+
+	prov := provider.NewMockToolProvider([]provider.MockTurn{
+		{ToolCalls: []provider.ToolCall{{ID: "a", Name: "write_file", Input: json.RawMessage(`{"path":"a.txt","content":"a"}`)}}, StopReason: "tool_use"},
+		{Text: "done", StopReason: "end_turn"},
+	})
+
+	spec := &gilv1.FrozenSpec{
+		Goal:         &gilv1.Goal{OneLiner: "write files"},
+		Verification: &gilv1.Verification{Checks: []*gilv1.Check{}},
+		Budget:       &gilv1.Budget{MaxIterations: 10},
+	}
+
+	tools := []tool.Tool{&tool.WriteFile{WorkingDir: workDir}}
+
+	// Build a ShadowGit with a non-existent git binary so Init will fail.
+	sg := checkpoint.New(workDir, baseDir)
+	sg.GitBin = "git-does-not-exist-xyz"
+
+	stream := event.NewStream()
+	sub := stream.Subscribe(128)
+	defer sub.Close()
+
+	loop := &AgentLoop{
+		Spec:       spec,
+		Provider:   prov,
+		Model:      "test",
+		Tools:      tools,
+		Verifier:   verify.NewRunner(workDir),
+		Events:     stream,
+		Checkpoint: sg,
+	}
+
+	var mu sync.Mutex
+	var collected []event.Event
+	collectorDone := make(chan struct{})
+	go func() {
+		defer close(collectorDone)
+		for {
+			select {
+			case e, ok := <-sub.Events():
+				if !ok {
+					return
+				}
+				mu.Lock()
+				collected = append(collected, e)
+				mu.Unlock()
+				if e.Type == "run_done" || e.Type == "run_max_iterations" || e.Type == "run_error" {
+					return
+				}
+			case <-time.After(5 * time.Second):
+				return
+			}
+		}
+	}()
+
+	res, err := loop.Run(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "done", res.Status, "init failure should not abort run")
+
+	select {
+	case <-collectorDone:
+	case <-time.After(2 * time.Second):
+	}
+
+	mu.Lock()
+	evs := collected
+	mu.Unlock()
+
+	var initErrCount int
+	for _, e := range evs {
+		if e.Type == "checkpoint_init_error" {
+			initErrCount++
+		}
+		require.NotEqual(t, "checkpoint_committed", e.Type, "no commits expected after init failure")
+	}
+	require.Equal(t, 1, initErrCount, "expected exactly one checkpoint_init_error event")
 }

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/jedutools/gil/core/checkpoint"
 	"github.com/jedutools/gil/core/event"
 	"github.com/jedutools/gil/core/provider"
 	"github.com/jedutools/gil/core/stuck"
@@ -34,6 +35,9 @@ type AgentLoop struct {
 	Tools    []tool.Tool
 	Verifier *verify.Runner
 	Events   *event.Stream // optional; if nil, no events emitted
+
+	// Checkpoint is optional; if non-nil, committed after each tool-using iteration.
+	Checkpoint *checkpoint.ShadowGit
 
 	// Stuck detector + recovery strategy. Both optional. If nil, no detection.
 	StuckDetector  *stuck.Detector
@@ -76,6 +80,16 @@ func (a *AgentLoop) Run(ctx context.Context) (*Result, error) {
 		Role:    provider.RoleUser,
 		Content: "Begin. Use the tools to satisfy the verification checks. When you believe you're done, stop calling tools.",
 	}}
+
+	if a.Checkpoint != nil {
+		if err := a.Checkpoint.Init(ctx); err != nil {
+			a.emit(event.SourceSystem, event.KindNote, "checkpoint_init_error", map[string]any{"err": err.Error()})
+			// Soft failure: disable checkpointing for the rest of the run.
+			a.Checkpoint = nil
+		} else {
+			a.emit(event.SourceSystem, event.KindNote, "checkpoint_init", map[string]any{"git_dir": a.Checkpoint.GitDir})
+		}
+	}
 
 	var totalTokens int64
 	for iter := 1; iter <= maxIter; iter++ {
@@ -184,6 +198,14 @@ func (a *AgentLoop) Run(ctx context.Context) (*Result, error) {
 			}
 			if allPass {
 				a.emit(event.SourceSystem, event.KindNote, "run_done", map[string]any{"iterations": iter, "tokens": totalTokens})
+				if a.Checkpoint != nil {
+					sha, err := a.Checkpoint.Commit(ctx, fmt.Sprintf("done iter %d", iter))
+					if err == nil {
+						a.emit(event.SourceSystem, event.KindNote, "checkpoint_committed", map[string]any{
+							"iter": iter, "sha": sha, "final": true,
+						})
+					}
+				}
 				return &Result{Status: "done", Iterations: iter, Tokens: totalTokens, VerifyAll: results}, nil
 			}
 			// Feed verifier failures back as a user message and let agent continue.
@@ -249,6 +271,20 @@ func (a *AgentLoop) Run(ctx context.Context) (*Result, error) {
 			Role:        provider.RoleUser,
 			ToolResults: toolResults,
 		})
+		if a.Checkpoint != nil && len(resp.ToolCalls) > 0 {
+			sha, err := a.Checkpoint.Commit(ctx, fmt.Sprintf("iter %d", iter))
+			if err != nil {
+				a.emit(event.SourceSystem, event.KindNote, "checkpoint_error", map[string]any{
+					"iter": iter,
+					"err":  err.Error(),
+				})
+			} else {
+				a.emit(event.SourceSystem, event.KindNote, "checkpoint_committed", map[string]any{
+					"iter": iter,
+					"sha":  sha,
+				})
+			}
+		}
 	}
 
 	a.emit(event.SourceSystem, event.KindNote, "run_max_iterations", map[string]any{"iterations": maxIter, "tokens": totalTokens})
