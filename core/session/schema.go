@@ -1,7 +1,9 @@
+// Package session provides SQLite schema management and session data access for gil.
 package session
 
 import (
 	"database/sql"
+	"fmt"
 )
 
 // currentSchemaVersion is the latest schema version. When new migrations
@@ -15,11 +17,6 @@ const currentSchemaVersion = 1
 var migrations = []string{
 	// v1
 	`
-	CREATE TABLE IF NOT EXISTS schema_version (
-		version INTEGER PRIMARY KEY,
-		applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-	);
-
 	CREATE TABLE IF NOT EXISTS sessions (
 		id            TEXT PRIMARY KEY,
 		status        TEXT NOT NULL DEFAULT 'created',
@@ -44,6 +41,11 @@ var migrations = []string{
 // Migrate is idempotent: it can be safely called multiple times and will only apply
 // migrations that haven't been applied yet.
 func Migrate(db *sql.DB) error {
+	if currentSchemaVersion != len(migrations) {
+		return fmt.Errorf("schema version mismatch: currentSchemaVersion=%d but migrations slice has %d entries",
+			currentSchemaVersion, len(migrations))
+	}
+
 	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY, applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)`); err != nil {
 		return err
 	}
@@ -60,12 +62,16 @@ func Migrate(db *sql.DB) error {
 			return err
 		}
 		if _, err := tx.Exec(migrations[v-1]); err != nil {
-			_ = tx.Rollback()
-			return err
+			if rbErr := tx.Rollback(); rbErr != nil {
+				return fmt.Errorf("migration v%d failed: %w; rollback also failed: %v", v, err, rbErr)
+			}
+			return fmt.Errorf("migration v%d failed: %w", v, err)
 		}
 		if _, err := tx.Exec("INSERT INTO schema_version (version) VALUES (?)", v); err != nil {
-			_ = tx.Rollback()
-			return err
+			if rbErr := tx.Rollback(); rbErr != nil {
+				return fmt.Errorf("schema_version insert v%d failed: %w; rollback also failed: %v", v, err, rbErr)
+			}
+			return fmt.Errorf("schema_version insert v%d failed: %w", v, err)
 		}
 		if err := tx.Commit(); err != nil {
 			return err
