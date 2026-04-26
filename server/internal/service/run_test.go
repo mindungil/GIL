@@ -310,7 +310,7 @@ func TestRunService_Start_Detach_ReturnsStarted(t *testing.T) {
 func TestBuildTools_LocalNative_NoSandbox(t *testing.T) {
 	tools, err := buildTools("/work", &gilv1.Workspace{Backend: gilv1.WorkspaceBackend_LOCAL_NATIVE})
 	require.NoError(t, err)
-	require.Len(t, tools, 3)
+	require.Len(t, tools, 4)
 
 	bash, ok := tools[0].(*tool.Bash)
 	require.True(t, ok, "first tool should be *tool.Bash")
@@ -319,13 +319,17 @@ func TestBuildTools_LocalNative_NoSandbox(t *testing.T) {
 	wf, ok := tools[1].(*tool.WriteFile)
 	require.True(t, ok, "second tool should be *tool.WriteFile")
 	require.False(t, wf.ReadOnly, "ReadOnly should be false for LOCAL_NATIVE")
+
+	rm, ok := tools[3].(*tool.Repomap)
+	require.True(t, ok, "fourth tool should be *tool.Repomap")
+	require.Equal(t, "/work", rm.Root)
 }
 
 func TestBuildTools_Unspecified_DefaultsToLocalNative(t *testing.T) {
 	// BACKEND_UNSPECIFIED should behave like LOCAL_NATIVE
 	tools, err := buildTools("/work", &gilv1.Workspace{Backend: gilv1.WorkspaceBackend_BACKEND_UNSPECIFIED})
 	require.NoError(t, err)
-	require.Len(t, tools, 3)
+	require.Len(t, tools, 4)
 	bash, ok := tools[0].(*tool.Bash)
 	require.True(t, ok)
 	require.Nil(t, bash.Wrapper)
@@ -333,7 +337,7 @@ func TestBuildTools_Unspecified_DefaultsToLocalNative(t *testing.T) {
 	// nil workspace should also behave like LOCAL_NATIVE
 	tools2, err2 := buildTools("/work", nil)
 	require.NoError(t, err2)
-	require.Len(t, tools2, 3)
+	require.Len(t, tools2, 4)
 	bash2, ok2 := tools2[0].(*tool.Bash)
 	require.True(t, ok2)
 	require.Nil(t, bash2.Wrapper)
@@ -346,7 +350,7 @@ func TestBuildTools_LocalSandbox_Behavior(t *testing.T) {
 		}
 		tools, err := buildTools("/work", &gilv1.Workspace{Backend: gilv1.WorkspaceBackend_LOCAL_SANDBOX})
 		require.NoError(t, err)
-		require.Len(t, tools, 3)
+		require.Len(t, tools, 4)
 
 		bash, ok := tools[0].(*tool.Bash)
 		require.True(t, ok)

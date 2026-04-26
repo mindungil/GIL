@@ -85,6 +85,7 @@ func buildTools(workspaceDir string, ws *gilv1.Workspace) ([]tool.Tool, error) {
 			&tool.Bash{WorkingDir: workspaceDir},
 			&tool.WriteFile{WorkingDir: workspaceDir},
 			&tool.ReadFile{WorkingDir: workspaceDir},
+			&tool.Repomap{Root: workspaceDir},
 		}, nil
 	case gilv1.WorkspaceBackend_LOCAL_SANDBOX:
 		if !local.Available() {
@@ -98,6 +99,7 @@ func buildTools(workspaceDir string, ws *gilv1.Workspace) ([]tool.Tool, error) {
 			&tool.Bash{WorkingDir: workspaceDir, Wrapper: sb},
 			&tool.WriteFile{WorkingDir: workspaceDir},
 			&tool.ReadFile{WorkingDir: workspaceDir},
+			&tool.Repomap{Root: workspaceDir},
 		}, nil
 	case gilv1.WorkspaceBackend_DOCKER, gilv1.WorkspaceBackend_SSH, gilv1.WorkspaceBackend_VM:
 		return nil, fmt.Errorf("workspace backend %s not yet supported (Phase 6)", backend.String())
