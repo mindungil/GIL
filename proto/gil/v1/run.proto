@@ -1,0 +1,46 @@
+syntax = "proto3";
+
+package gil.v1;
+
+import "gil/v1/event.proto";
+
+option go_package = "github.com/jedutools/gil/proto/gen/gil/v1;gilv1";
+
+service RunService {
+  // Start runs the agent loop synchronously and returns the final result.
+  // For long-running runs the client may also Tail to observe progress.
+  // (Phase 4: synchronous; Phase 5 will add async / detached runs.)
+  rpc Start(StartRunRequest) returns (StartRunResponse);
+
+  // Tail subscribes to the session's event stream (live + replay).
+  // (Phase 4 stub: returns Unimplemented or empty stream until event
+  // integration completes in Phase 5.)
+  rpc Tail(TailRequest) returns (stream Event);
+}
+
+message StartRunRequest {
+  string session_id = 1;
+  string provider = 2;          // "anthropic" | "mock" | "" (server default)
+  string model = 3;              // empty → provider default
+}
+
+message StartRunResponse {
+  string status = 1;             // "done" | "max_iterations" | "error"
+  int32  iterations = 2;
+  int64  tokens = 3;
+  double cost_usd = 4;
+  repeated VerifyResult verify_results = 5;
+  string error_message = 6;
+}
+
+message VerifyResult {
+  string name = 1;
+  bool   passed = 2;
+  int32  exit_code = 3;
+  string stdout = 4;
+  string stderr = 5;
+}
+
+message TailRequest {
+  string session_id = 1;
+}
