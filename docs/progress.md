@@ -4,7 +4,7 @@
 
 ## 현재 페이즈
 
-**Phase 6: 컨텍스트/메모리/Repomap** (완료 — 2026-04-26). 다음 → Phase 7.
+**Phase 7: Edit/Patch/Permission/TUI** (완료 — 2026-04-26). 다음 → Phase 8.
 
 **Phase 0: 설계** (완료)
 
@@ -87,16 +87,20 @@
 - [x] runtime/local Seatbelt sandbox (Codex lift, darwin only) + non-darwin stub
 - [x] e2e phase06 (repomap + memory + milestone gate sanity)
 
-**Phase 7: 도구/편집** (대기)
-- [ ] `core/edit` SEARCH/REPLACE 4단 매칭
-- [ ] `core/patch` apply_patch DSL
-- [ ] `core/exec` 다단계 도구 압축
-- [ ] `core/permission` allow/ask/deny + glob
+**Phase 7: Edit/Patch/Permission/TUI** (완료 — 2026-04-26)
+- [x] core/edit: 4-tier MatchEngine (Aider editblock_coder.py lift) + DSL parser + edit tool + find_similar_lines hint
+- [x] core/patch: apply_patch DSL parser + applier + tool (Codex apply-patch lift)
+- [x] core/permission: Evaluator (last-wins glob, OpenCode lift) + AgentLoop gate + spec.risk.autonomy 기반 rule 생성
+- [x] tui: Bubbletea 3-pane (sessions/detail/status) + 라이브 event tail + permission_ask 모달 + AnswerPermission RPC
+- [x] Stuck Recovery SubagentBranch 실작동 (read-only sub-loop으로 정찰)
+- [x] runtime/docker: Wrapper + Container lifecycle (per-command exec)
+- [x] e2e phase07 (edit + apply_patch + permission deny sanity)
 
-**Phase 8: TUI + SDK** (대기)
-- [ ] `tui/` Bubbletea
-- [ ] `sdk/` Go 클라이언트
-- [ ] `mcp/` 빌트인 MCP 서버
+**Phase 8: MCP + Exec + 통합** (대기)
+- [ ] `core/exec` UDS RPC 다단계 (Hermes execute_code 패턴)
+- [ ] `mcp/` 빌트인 MCP 서버 (Goose MCP 6 백엔드)
+- [ ] SSH workspace backend
+- [ ] HTTP/JSON gateway (grpc-gateway, browser clients)
 
 **Phase 9: 통합 테스트 + 첫 자율 작업 시연** (대기)
 - [ ] e2e: 인터뷰 → freeze → run → 검증 통과 → 보고
@@ -120,6 +124,7 @@
 | 2026-04-26 | Phase 4 (Run Engine) 완료 — Tool/Bash/WriteFile/ReadFile + verify.Runner + provider Retry + AgentLoop (Anthropic native tool use) + RunService gRPC + gil run/events. 9 tasks. e2e4가 mock으로 hello.txt 자율 생성 + verifier 통과 시연. Phase 5: sandbox + shadow git + stuck recovery + async run. |
 | 2026-04-25 | Phase 5 (Run Engine 개선) 완료 — 18 tasks. secret masking + AgentLoop event emit + per-session Stream/Persister + RunService.Tail real + gil events --tail real + gil run --detach + 라이브 iteration/tokens + 5-pattern Stuck Detector + ModelEscalate recovery + 3-strike abort + bwrap Sandbox + WorkspaceBackend 라우팅 + Shadow Git checkpoint + gil restore + per-stage interview models + e2e5 + make install. e2e-all 5 페이즈 통과. Phase 6: 컨텍스트/메모리/리포맵. |
 | 2026-04-26 | Phase 6 (컨텍스트/메모리/Repomap) 완료 — 20 tasks + 1 fix. core/compact (Hermes 캐시 보존 + OpenCode 템플릿 + anti-thrashing + system-and-3 cache_control) + AgentLoop 95% auto-compact + compact_now 도구. core/memory.Bank 6 file + 2 tools + 시스템 프롬프트 prepend + post-verify 마일스톤 게이트. core/repomap (CGO 회피하여 stdlib go/parser + py/js/ts regex로 대체; PageRank + binary-search Fit + TTL cache tool). Stuck recovery 4종 풀 구현 (Cline loop-detection lift + Cline resetHead lift + Goose adversary_inspector lift). runtime/local Seatbelt (Codex seatbelt.rs lift, darwin only). e2e6 통과. server-side memory bank wiring fix 포함. e2e-all 6 페이즈 통과. |
+| 2026-04-26 | Phase 7 (Edit/Patch/Permission/TUI) 완료 — 16 tasks. core/edit (Aider editblock_coder.py 4-tier MatchEngine + DSL parser + find_similar_lines hint, edit tool). core/patch (Codex apply-patch parser + applier with seek_sequence 3-tier, apply_patch tool). core/permission (OpenCode evaluate.ts + wildcard.ts: last-wins glob with " *" 트레일링 옵셔널 quirk; AgentLoop gate; spec.risk.autonomy 기반 rule generator FULL/ASK_DESTRUCTIVE/ASK_PER_ACTION/PLAN_ONLY). tui (Bubbletea 3-pane + live event tail + permission_ask 모달 + AnswerPermission RPC, AskCallback 60s timeout). Stuck SubagentBranch 실작동 (read-only sub-loop, AgentLoop.RunSubagent 어댑터). runtime/docker (per-command exec wrapper + Container lifecycle). e2e7 (edit + apply_patch + ASK_DESTRUCTIVE rm 차단 sanity) 통과. e2e-all 7 페이즈 통과. 각 reference lift는 commit 메시지에 출처 명기. |
 
 ## 차용 출처 (코드/패턴)
 
@@ -200,6 +205,18 @@
 - **macOS Seatbelt**: Codex seatbelt.rs + seatbelt_base_policy.sbpl 발췌 (deny-default + minimal allow rules). bwrap.go와 동일한 Mode/Wrap API. darwin build tag + non-darwin stub.
 - **검증**: `make e2e-all` 6 페이즈 모두 통과 (e2e6 = repomap + memory_update + write_file + verify + milestone memory_update). 각 reference lift는 commit 메시지에 출처 명기.
 - **다음 단계**: Phase 7 — core/edit (SEARCH/REPLACE 4단), core/patch (apply_patch DSL), core/permission (allow/ask/deny + glob), TUI (Bubbletea), DOCKER/SSH workspace backends.
+
+## Phase 7 산출물 요약 (2026-04-26)
+
+- **core/edit (Aider)**: 4-tier MatchEngine (exact / leading-WS / trailing-WS / fuzzy via LCS ratio ≥0.8). DSL parser handles 5-9 char `<<<<<` markers, fenced filename detection, currentFilename fallback for consecutive blocks. edit tool reports per-block status; on miss surfaces `find_similar_lines` hint (closest 6-line chunk). RunService wires the tool.
+- **core/patch (Codex)**: 1108-line Codex parser ported to ~400 lines Go (strict mode only; lenient/streaming Phase 8+). Three hunk kinds (Add / Delete / Update with optional Move). seek_sequence 3-tier (exact → rstrip → trim-both) with EOF anchoring. apply_patch tool reports per-hunk; per-hunk failure continues vs Codex which bails.
+- **core/permission (OpenCode)**: Evaluator with `findLast` semantics — last matching rule wins, default Ask. Wildcard supports `*`/`?` + the OpenCode trailing-" *" optional quirk (so `"ls *"` matches both `"ls"` and `"ls -la"`). FromAutonomy maps spec.risk.autonomy → rules: FULL = no gate, ASK_DESTRUCTIVE_ONLY = allow-all + deny rm/mv/chmod/chown/dd/mkfs/sudo, ASK_PER_ACTION = allow only read-only, PLAN_ONLY = deny all.
+- **AgentLoop permission gate**: pre-tool dispatch evaluation with permissionKeyFor extractor (bash→command, file ops→path, memory_*→file). AskCallback hook for interactive Ask path; without callback, Ask = Deny (Phase 7 fallback).
+- **TUI (Bubbletea)**: 3-pane layout (sessions / detail / status). j/k navigation, r refresh, q quit. Live event tail per RUNNING session (200-event ring buffer). permission_ask 모달 (y/n/esc) → AnswerPermission RPC unblocks the run. 60s timeout = deny.
+- **Stuck SubagentBranch**: read-only sub-loop (read_file + repomap + memory_load) investigates project, returns 1-3 sentence finding. AgentLoop.RunSubagent 어댑터로 import cycle 회피. Result.FinalText로 sub-loop output 노출.
+- **runtime/docker**: Wrapper builds `docker exec [-w wd] [-u user] container cmd args`. Container.Start/Stop manages per-session container lifecycle. RunService rewires Bash.Wrapper after Container.Start in DOCKER backend.
+- **검증**: `make e2e-all` 7 페이즈 모두 통과 (e2e7 = edit + apply_patch + ASK_DESTRUCTIVE deny).
+- **다음 단계**: Phase 8 — core/exec (Hermes execute_code 다단계 도구 압축), mcp/ (Goose MCP 백엔드), SSH workspace backend, HTTP/JSON gateway, 첫 dogfood.
 
 ## 미해결 / 추후 결정
 
