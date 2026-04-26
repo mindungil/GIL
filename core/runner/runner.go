@@ -64,6 +64,11 @@ type AgentLoop struct {
 
 	// internal: set by compact_now tool; cleared after one compaction
 	compactNowRequested bool
+
+	// extraSystemNote, when non-empty, is appended to the system prompt for the
+	// NEXT iteration only and then cleared. Used by stuck recovery strategies
+	// (AltToolOrder, AdversaryConsult) to inject one-shot guidance.
+	extraSystemNote string
 }
 
 // CompactRequester is satisfied by AgentLoop; the compact_now tool uses it
@@ -162,9 +167,18 @@ func (a *AgentLoop) Run(ctx context.Context) (*Result, error) {
 			"tools":   len(tools),
 		})
 
+		// Build the effective system prompt for this iteration. When
+		// extraSystemNote is set (injected by a stuck-recovery strategy),
+		// append it as an URGENT NOTE and then clear it (single-shot).
+		iterSystem := system
+		if a.extraSystemNote != "" {
+			iterSystem = system + "\n\n## URGENT NOTE\n" + a.extraSystemNote
+			a.extraSystemNote = "" // single-shot: clear after one use
+		}
+
 		resp, err := a.Provider.Complete(ctx, provider.Request{
 			Model:     a.Model,
-			System:    system,
+			System:    iterSystem,
 			Messages:  messages,
 			Tools:     tools,
 			MaxTokens: 4096,
@@ -212,6 +226,15 @@ func (a *AgentLoop) Run(ctx context.Context) (*Result, error) {
 								"explanation": dec.Explanation,
 							})
 							a.Model = dec.NewModel
+							recovered = true
+						}
+						if err == nil && dec.Action == stuck.ActionAltToolOrder {
+							a.emit(event.SourceSystem, event.KindNote, "stuck_recovered", map[string]any{
+								"strategy":    a.StuckStrategy.Name(),
+								"action":      "alt_tool_order",
+								"explanation": dec.Explanation,
+							})
+							a.extraSystemNote = dec.Explanation
 							recovered = true
 						}
 					}

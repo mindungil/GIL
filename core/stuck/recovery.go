@@ -3,6 +3,7 @@ package stuck
 import (
 	"context"
 	"errors"
+	"fmt"
 )
 
 // Strategy is one tactic for recovering from a detected stuck Signal.
@@ -105,13 +106,46 @@ func (ModelEscalateStrategy) Apply(ctx context.Context, req ApplyRequest) (Decis
 // Phase 6 stub strategies
 // --------------------------------------------------------------------------
 
-// AltToolOrderStrategy will reorder tool preference in the system prompt.
-// Phase 6: requires AgentLoop to support per-iteration prompt mutation.
+// AltToolOrderStrategy hints the agent to try a different tool sequence after
+// a repeat-loop pattern fires. Inspired by Cline's loop-detection soft warning
+// (cline/src/core/task/loop-detection.ts: when consecutiveIdenticalToolCount
+// hits LOOP_DETECTION_SOFT_THRESHOLD=3, a warning is injected to give the LLM
+// one chance to self-correct before hard escalation).
+//
+// Applies only to action-level repetition patterns:
+//   - PatternRepeatedActionObservation
+//   - PatternRepeatedActionError
+//   - PatternPingPong
+//
+// For other patterns (Monologue, ContextWindow), returns ErrNoFallback so
+// the next strategy in the chain can handle it.
 type AltToolOrderStrategy struct{}
 
 func (AltToolOrderStrategy) Name() string { return "alt_tool_order" }
-func (AltToolOrderStrategy) Apply(ctx context.Context, req ApplyRequest) (Decision, error) {
-	return Decision{}, ErrNoFallback // Phase 6
+
+func (s AltToolOrderStrategy) Apply(ctx context.Context, req ApplyRequest) (Decision, error) {
+	switch req.Signal.Pattern {
+	case PatternRepeatedActionObservation,
+		PatternRepeatedActionError,
+		PatternPingPong:
+		// Build a one-line nudge that the runner will prepend to the next
+		// iteration's system prompt. Keep it terse — Cline's pattern is to
+		// give ONE chance to self-correct before escalating.
+		explanation := buildAltToolOrderHint(req.Signal)
+		return Decision{
+			Action:      ActionAltToolOrder,
+			Explanation: explanation,
+		}, nil
+	default:
+		return Decision{}, ErrNoFallback
+	}
+}
+
+func buildAltToolOrderHint(sig Signal) string {
+	return fmt.Sprintf(
+		"STUCK PATTERN DETECTED (%s): you just repeated the same action %d times. Try a DIFFERENT tool or different arguments on this iteration. If the previous approach was fundamentally wrong, take a step back and reconsider. Detail: %s",
+		sig.Pattern.String(), sig.Count, sig.Detail,
+	)
 }
 
 // SubagentBranchStrategy will dispatch a fresh sub-engine on the same goal.

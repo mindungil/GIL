@@ -1047,6 +1047,217 @@ func TestAgentLoop_MilestoneGate_SkippedWhenBankNil(t *testing.T) {
 	}
 }
 
+// recordingProvider records every provider.Request so tests can inspect the
+// system prompt that was passed to each Complete call. It always returns the
+// same tool call (triggering stuck pattern detection).
+type recordingProvider struct {
+	mu       sync.Mutex
+	requests []provider.Request
+}
+
+func (r *recordingProvider) Name() string { return "recording" }
+func (r *recordingProvider) Complete(ctx context.Context, req provider.Request) (provider.Response, error) {
+	r.mu.Lock()
+	r.requests = append(r.requests, req)
+	r.mu.Unlock()
+	return provider.Response{
+		Text:         "looping",
+		ToolCalls:    []provider.ToolCall{{ID: "x", Name: "noop", Input: json.RawMessage(`{}`)}},
+		StopReason:   "tool_use",
+		InputTokens:  10,
+		OutputTokens: 7,
+	}, nil
+}
+
+func (r *recordingProvider) anySysContains(sub string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, req := range r.requests {
+		if strings.Contains(req.System, sub) {
+			return true
+		}
+	}
+	return false
+}
+
+// TestAgentLoop_AltToolOrder_InjectsHintAndContinues verifies that when
+// AltToolOrderStrategy recovers from a stuck pattern, the runner:
+//  1. Emits a stuck_recovered event with action=alt_tool_order.
+//  2. Injects an URGENT NOTE into the system prompt for the next iteration.
+//  3. Continues running (does not immediately abort).
+func TestAgentLoop_AltToolOrder_InjectsHintAndContinues(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	rec := &recordingProvider{}
+
+	spec := &gilv1.FrozenSpec{
+		Goal: &gilv1.Goal{OneLiner: "loop forever"},
+		Verification: &gilv1.Verification{
+			Checks: []*gilv1.Check{{Name: "never", Kind: gilv1.CheckKind_SHELL, Command: "false", ExpectedExitCode: 0}},
+		},
+		Budget: &gilv1.Budget{MaxIterations: 20},
+	}
+
+	// noopTool is already defined above in this file; reuse it.
+	tools := []tool.Tool{&noopTool{}}
+
+	stream := event.NewStream()
+	sub := stream.Subscribe(512)
+
+	loop := &AgentLoop{
+		Spec:           spec,
+		Provider:       rec,
+		Model:          "m",
+		Tools:          tools,
+		Verifier:       verify.NewRunner(t.TempDir()),
+		Events:         stream,
+		StuckDetector:  &stuck.Detector{Window: 50},
+		StuckStrategy:  stuck.AltToolOrderStrategy{},
+		StuckThreshold: 5, // give it several recoveries before aborting
+	}
+
+	var mu sync.Mutex
+	var collected []event.Event
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case e, ok := <-sub.Events():
+				if !ok {
+					return
+				}
+				mu.Lock()
+				collected = append(collected, e)
+				mu.Unlock()
+				if e.Type == "stuck_unrecovered" || e.Type == "run_done" || e.Type == "run_max_iterations" {
+					return
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	res, err := loop.Run(ctx)
+	require.NoError(t, err)
+	// Loop should either exhaust iterations or be aborted by stuck threshold,
+	// not by a hard error.
+	require.Contains(t, []string{"stuck", "max_iterations"}, res.Status)
+
+	// Wait for collector to drain.
+	select {
+	case <-done:
+	case <-time.After(1 * time.Second):
+	}
+
+	sub.Close()
+
+	mu.Lock()
+	evs := collected
+	mu.Unlock()
+
+	// 1. Expect at least one stuck_recovered with action=alt_tool_order.
+	var altRecov int
+	for _, e := range evs {
+		if e.Type != "stuck_recovered" {
+			continue
+		}
+		var d map[string]any
+		require.NoError(t, json.Unmarshal(e.Data, &d))
+		if d["action"] == "alt_tool_order" {
+			altRecov++
+		}
+	}
+	require.Greater(t, altRecov, 0, "expected at least one alt_tool_order recovery event")
+
+	// 2. Expect the URGENT NOTE to have been injected into at least one request.
+	require.True(t, rec.anySysContains("URGENT NOTE"),
+		"expected at least one provider request to contain URGENT NOTE in system prompt")
+	require.True(t, rec.anySysContains("STUCK PATTERN DETECTED"),
+		"expected URGENT NOTE to contain STUCK PATTERN DETECTED hint")
+}
+
+func TestAgentLoop_AltToolOrder_NoteIsSingleShot(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	rec := &recordingProvider{}
+
+	spec := &gilv1.FrozenSpec{
+		Goal: &gilv1.Goal{OneLiner: "loop forever"},
+		Verification: &gilv1.Verification{
+			Checks: []*gilv1.Check{{Name: "never", Kind: gilv1.CheckKind_SHELL, Command: "false", ExpectedExitCode: 0}},
+		},
+		Budget: &gilv1.Budget{MaxIterations: 25},
+	}
+
+	tools := []tool.Tool{&noopTool{}}
+
+	stream := event.NewStream()
+	sub := stream.Subscribe(512)
+
+	loop := &AgentLoop{
+		Spec:           spec,
+		Provider:       rec,
+		Model:          "m",
+		Tools:          tools,
+		Verifier:       verify.NewRunner(t.TempDir()),
+		Events:         stream,
+		StuckDetector:  &stuck.Detector{Window: 50},
+		StuckStrategy:  stuck.AltToolOrderStrategy{},
+		StuckThreshold: 5,
+	}
+
+	var collected []event.Event
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case e, ok := <-sub.Events():
+				if !ok {
+					return
+				}
+				collected = append(collected, e)
+				if e.Type == "stuck_unrecovered" || e.Type == "run_done" || e.Type == "run_max_iterations" {
+					return
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	_, err := loop.Run(ctx)
+	require.NoError(t, err)
+	select {
+	case <-done:
+	case <-time.After(1 * time.Second):
+	}
+	sub.Close()
+
+	rec.mu.Lock()
+	reqs := rec.requests
+	rec.mu.Unlock()
+
+	// Count how many requests contain URGENT NOTE. Must be strictly less than
+	// total requests (i.e. the note is NOT present on every request).
+	var urgentCount int
+	for _, req := range reqs {
+		if strings.Contains(req.System, "URGENT NOTE") {
+			urgentCount++
+		}
+	}
+	// Sanity: we ran at least a few iterations.
+	require.Greater(t, len(reqs), 4, "expected multiple requests")
+	// The note must have appeared at least once (recovery fired).
+	require.Greater(t, urgentCount, 0, "expected at least one injection of URGENT NOTE")
+	// And must be strictly less than all requests (it's single-shot, so most won't have it).
+	require.Less(t, urgentCount, len(reqs), "URGENT NOTE should be single-shot, not in every request")
+}
+
 func TestAgentLoop_MilestoneGate_NonMemoryToolsIgnored(t *testing.T) {
 	workspace := t.TempDir()
 	bank := memory.New(filepath.Join(workspace, "memory"))
