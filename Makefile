@@ -20,12 +20,14 @@ build:
 	@cd cli && go build -o ../bin/gil ./cmd/gil
 	@cd server && go build -o ../bin/gild ./cmd/gild
 	@cd tui && go build -o ../bin/giltui ./cmd/giltui
+	@cd mcp && go build -o ../bin/gilmcp ./cmd/gilmcp
 
 install: build
 	@install -m 0755 bin/gil    /usr/local/bin/gil    2>/dev/null || sudo install -m 0755 bin/gil    /usr/local/bin/gil
 	@install -m 0755 bin/gild   /usr/local/bin/gild   2>/dev/null || sudo install -m 0755 bin/gild   /usr/local/bin/gild
 	@install -m 0755 bin/giltui /usr/local/bin/giltui 2>/dev/null || sudo install -m 0755 bin/giltui /usr/local/bin/giltui
-	@echo "Installed gil, gild, giltui to /usr/local/bin"
+	@install -m 0755 bin/gilmcp /usr/local/bin/gilmcp 2>/dev/null || sudo install -m 0755 bin/gilmcp /usr/local/bin/gilmcp
+	@echo "Installed gil, gild, giltui, gilmcp to /usr/local/bin"
 
 e2e: build
 	@bash tests/e2e/phase01_test.sh
