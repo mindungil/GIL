@@ -36,3 +36,18 @@ func TestStatus_ListsSessions(t *testing.T) {
 	lines := bytes.Count([]byte(out), []byte("\n"))
 	require.GreaterOrEqual(t, lines, 3)
 }
+
+func TestStatus_RejectsNonPositiveLimit(t *testing.T) {
+	var buf bytes.Buffer
+	cmd := statusCmd()
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetArgs([]string{"--limit", "0"})
+	require.Error(t, cmd.ExecuteContext(context.Background()))
+
+	cmd2 := statusCmd()
+	cmd2.SetOut(&buf)
+	cmd2.SetErr(&buf)
+	cmd2.SetArgs([]string{"--limit", "-5"})
+	require.Error(t, cmd2.ExecuteContext(context.Background()))
+}

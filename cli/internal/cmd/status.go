@@ -19,6 +19,9 @@ func statusCmd() *cobra.Command {
 		Use:   "status",
 		Short: "List sessions",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if limit <= 0 {
+				return fmt.Errorf("--limit must be positive, got %d", limit)
+			}
 			ctx := cmd.Context()
 			if ctx == nil {
 				ctx = context.Background()
