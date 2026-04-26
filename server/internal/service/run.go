@@ -14,6 +14,7 @@ import (
 	"github.com/jedutools/gil/core/checkpoint"
 	"github.com/jedutools/gil/core/event"
 	"github.com/jedutools/gil/core/memory"
+	"github.com/jedutools/gil/core/permission"
 	"github.com/jedutools/gil/core/provider"
 	"github.com/jedutools/gil/core/runner"
 	"github.com/jedutools/gil/core/session"
@@ -251,6 +252,13 @@ func (s *RunService) executeRun(
 	loop := runner.NewAgentLoop(spec, prov, model, tools, ver)
 	loop.Events = stream
 	loop.Memory = bank
+
+	// Build permission gate from spec.risk.autonomy. Returns nil for FULL.
+	var autonomy gilv1.AutonomyDial
+	if spec.Risk != nil {
+		autonomy = spec.Risk.Autonomy
+	}
+	loop.Permission = permission.FromAutonomy(autonomy)
 
 	shadowBase := filepath.Join(s.sessionDir(sessionID), "shadow")
 	loop.Checkpoint = checkpoint.New(workspaceDir, shadowBase)
