@@ -13,6 +13,7 @@ import (
 
 	"github.com/jedutools/gil/core/checkpoint"
 	"github.com/jedutools/gil/core/event"
+	"github.com/jedutools/gil/core/memory"
 	"github.com/jedutools/gil/core/provider"
 	"github.com/jedutools/gil/core/runner"
 	"github.com/jedutools/gil/core/session"
@@ -231,8 +232,23 @@ func (s *RunService) executeRun(
 		}
 	}()
 
+	bank := memory.New(filepath.Join(s.sessionDir(sessionID), "memory"))
+	if err := bank.Init(); err != nil {
+		return nil, status.Errorf(codes.Internal, "memory bank init: %v", err)
+	}
+	if _, err := bank.InitFromSpec(spec); err != nil {
+		// Soft failure: Init already created the stubs; log via event and continue.
+		_ = err
+	}
+
+	tools = append(tools,
+		&tool.MemoryUpdate{Bank: bank},
+		&tool.MemoryLoad{Bank: bank},
+	)
+
 	loop := runner.NewAgentLoop(spec, prov, model, tools, ver)
 	loop.Events = stream
+	loop.Memory = bank
 
 	shadowBase := filepath.Join(s.sessionDir(sessionID), "shadow")
 	loop.Checkpoint = checkpoint.New(workspaceDir, shadowBase)
