@@ -2,7 +2,7 @@
 
 자율 코딩 하네스. 길고 철저한 인터뷰로 모든 요구사항을 추출한 뒤, 며칠이 걸리더라도 사용자에게 다시 묻지 않고 끝까지 작업을 수행하는 CLI 에이전트.
 
-**상태**: Phase 9 완료. e2e 9 페이즈 전부 green. 4 binary (`gil` / `gild` / `giltui` / `gilmcp`) build + install 가능.
+**상태**: Phase 10 완료. e2e 12 단계 전부 green (1-9 + modal + daytona + oidc). 4 binary (`gil` / `gild` / `giltui` / `gilmcp`) build + install 가능. VS Code 확장 + Python Atropos 어댑터 scaffold. GoReleaser로 16-binary release matrix 빌드 가능 (linux/darwin × amd64/arm64 × 4 binary + deb + rpm + brew formula).
 
 ## 빠른 시작
 
@@ -164,6 +164,20 @@ In Phase 9 the "Ask" path uses TUI dialog if connected; non-interactive runs fal
 | Recipe / multi-step compression | Hermes Agent |
 | MCP server/client | Goose (Block) |
 | HTTP gateway | gRPC ecosystem (grpc-gateway) |
+| VS Code extension scaffold | Cline (saoudrizwan) |
+| OIDC JWT verifier | Hermes Agent (auth.py decode pattern) |
+| Atropos environment adapter | Hermes Agent (HermesAgentBaseEnv) |
+
+## 외부 자원이 필요한 잔여 항목
+
+코드 경로는 모두 존재하되 실제 검증은 사용자 자원이 필요:
+
+- **실제 Anthropic dogfood**: `ANTHROPIC_API_KEY` 필요. 절차는 [docs/dogfood/](docs/dogfood/).
+- **Modal / Daytona 실제 deployment**: 각각 Modal / Daytona 계정 + 토큰 필요. driver 코드 + e2e (fake CLI / httptest) 모두 green.
+- **OIDC 실제 IdP**: Google / Auth0 등 실제 issuer 설정. middleware + mock IdP e2e 모두 green.
+- **VS Code Marketplace 게시**: `vsce package` → publisher 등록 → publish.
+- **Homebrew tap**: `jedutools/homebrew-tap` 리포 생성 + GoReleaser brews 블록의 token 시크릿 등록.
+- **Atropos 실제 training run**: hermes-agent 설치 + `OPENROUTER_API_KEY` + Atropos server.
 
 ## License
 

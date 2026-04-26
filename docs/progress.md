@@ -4,7 +4,7 @@
 
 ## 현재 페이즈
 
-**Phase 9: Remote sync / Cloud / Soak / Polish** (완료 — 2026-04-26). 다음 → Phase 10 (실제 클라우드 deployment + dogfood + VS Code).
+**Phase 10: Cloud real impl / VS Code / OIDC / Packaging / Atropos** (완료 — 2026-04-26). 외부 자원(API key, cloud account, real IdP) 필요한 항목만 잔여.
 
 **Phase 0: 설계** (완료)
 
@@ -254,7 +254,18 @@
 - **Prometheus metrics**: `gild --metrics :PORT` 엔드포인트. 6 metrics: `gil_run_iterations_total` (counter), `gil_compact_done_total` (counter), `gil_stuck_detected_total{pattern}` (counter), `gil_tool_calls_total{tool,result}` (counter), `gil_sessions_running` (gauge), `gil_build_info{version}` (gauge). RunService에 third event subscriber goroutine 추가 — event type/data 파싱하여 적절한 counter bump.
 - **문서 폴리시**: README.md를 placeholder에서 빠른 시작 가이드 + ASCII 아키텍처 다이어그램 + 명령어 표 + workspace 백엔드 매트릭스 + 자율성 다이얼 + lift 출처 매트릭스로 교체. docs/install.md 단계별 설치 가이드 (요구사항/빌드/환경설정/첫 실행/옵션 백엔드 활성화/문제 해결/검증).
 - **검증**: `make e2e-all` 9 페이즈 모두 통과. `make build` 4 binary 생성.
-- **다음 단계**: Phase 10 — 실제 Anthropic-driven dogfood 실행 + Modal/Daytona 실제 deployment + VS Code 확장 + OAuth multi-user + Atropos RL 통합 (모두 외부 자원/계정 필요).
+- **다음 단계**: Phase 10 — Modal/Daytona 진짜 driver, VS Code 확장 scaffold, OIDC 인증, Atropos Python 어댑터, GoReleaser 패키징.
+
+## Phase 10 산출물 요약 (2026-04-26)
+
+- **Modal 진짜 driver (CLI shell-out)**: `runtime/modal.Provider.Provision`이 ephemeral Python manifest (`/tmp/gil-modal-<sessionID>.py`) 생성 — `modal.App`, `Image.debian_slim`, `Mount.from_local_dir(workspace, "/workspace")`, `exec_in_sandbox(cmd, args)` 함수 정의. Wrapper.Wrap이 `modal run <manifest>::exec_in_sandbox --cmd <cmd> --args <json>` argv 생성. Teardown이 `modal app stop` + manifest 삭제. `MODAL_BIN` env override로 fake CLI 주입 가능 → 14 unit tests + e2e10-modal 모두 fake binary 기반.
+- **Daytona 진짜 driver (REST)**: `runtime/daytona.Client` (CreateWorkspace/GetWorkspace/Exec/Delete/WaitReady) — POST/GET/POST/DELETE `/workspaces/{id}` + Bearer auth. `DAYTONA_API_BASE` override로 httptest 주입. **`core/tool.RemoteExecutor` optional interface** 도입 — Wrapper가 구현하면 bash가 `exec.Cmd` 우회하고 `ExecRemote(ctx, cmd, args) → (stdout, stderr, exit, err)` 직접 호출. 기존 wrapper(local/bwrap/docker/ssh/modal) 모두 미구현 = 기존 경로 보존. cloud 모듈에는 `runtime → core` 의존성 회피용 twinned interface. 27 daytona tests + e2e10-daytona httptest 기반.
+- **OIDC 인증 미들웨어 (mock)**: `server/internal/auth` — pure-stdlib JWT 검증 (RS256/PKCS1v15 + ES256, base64url, exp/nbf/aud/iss + leeway, aud-as-string-or-array per RFC 7519). JWKS 캐시 (per-kid TTL + miss-driven rotation refetch). `Verifier`+`Discover` (`/.well-known/openid-configuration`). gRPC `UnaryInterceptor`+`StreamInterceptor`. UDS bypass via `peer.FromContext + Addr.Network()=="unix"` (default ON). `EnforceUserSub`로 sub claim 강제 (PermissionDenied vs Unauthenticated). gild에 `--grpc-tcp`, `--auth-issuer`, `--auth-audience`, `--auth-allow-uds`, `--auth-enforce-sub` 플래그. 13 middleware tests + e2e10-oidc (RSA keygen + mock IdP + valid/expired/missing 시나리오).
+- **VS Code 확장 scaffold (Cline lift)**: `vscode/` TypeScript 프로젝트 — `package.json`, `tsconfig.json`, `esbuild.mjs` 모두 Cline에서 lift하되 React + 다중 SDK + 마켓플레이스 + 텔레메트리 다 떼고 슬림화. `extension.ts`가 4 명령(startSession/runSession/tailEvents/openPanel) + sidebar viewProvider 등록. `gild_client.ts`가 `@grpc/grpc-js` + `@grpc/proto-loader`로 5 proto 로드 → UDS gRPC client. `webview.html`은 vanilla HTML+JS panel (세션 리스트 + tail/run 버튼 + scrolling event log). `vsce package`로 .vsix 생성 가능 (실제 패키징은 `npm install` 필요).
+- **GoReleaser 패키징**: `.goreleaser.yaml` v2 (4 binary × 4 platform = 16 binary, 4 archives, 2 deb + 2 rpm, brew formula placeholder). 멀티 모듈은 `dir:` per-build + `main: ./cmd/<bin>` 패턴 — workspace replace 디렉티브 자연 해소. `.github/workflows/release.yml` (tag `v*.*.*` → `goreleaser-action@v6`). `make release` (snapshot, --skip=publish), `make release-host` (single-target), `make release-check` (artifact 11/11 검증). goreleaser v2.15.4 OSS로 검증 완료 — full matrix snapshot ~2분.
+- **Atropos RL 환경 어댑터 (Python)**: `python/gil_atropos` — `GilGrpcClient` (UDS over `~/.gil/gild.sock` + lazy stub), `GilCodingEnv` (Hermes `HermesAgentBaseEnv` 서브클래스 또는 standalone fallback) — setup/get_next_item/format_prompt/compute_reward/evaluate/wandb_log per hermes-atropos-environments skill 계약. 5 bundled coding tasks (fibonacci/reverse_string/is_palindrome/fizzbuzz/sum_csv_column) + heredoc-pytest verifier. `gil-atropos-eval` CLI. `compile_protos.py`로 grpc stubs 재생성. 9/9 smoke test pass (mock client 기반).
+- **검증**: `make e2e-all` 12 페이즈 모두 통과 (1-9 + phase10-modal + phase10-daytona + phase10-oidc).
+- **다음 단계 (외부 자원 필요)**: 실제 Anthropic dogfood (API key), Modal/Daytona 실제 deployment, OIDC 실제 IdP (Google/Auth0) 통합, VS Code Marketplace 게시, Atropos 실제 training run, Homebrew tap 등록.
 
 ## 미해결 / 추후 결정
 
