@@ -74,6 +74,42 @@ func newServer(dbPath, sockPath, sessionsBase string) (*server, error) {
 						StopReason: "end_turn",
 					},
 				}), "mock-model", nil
+			case "run-edit-patch-permission":
+				// Scripted scenario for Phase 7 e2e: edit → apply_patch → bash rm (denied) → end_turn.
+				return provider.NewMockToolProvider([]provider.MockTurn{
+					// 1) Edit existing file: add FOO function via SEARCH/REPLACE
+					{
+						Text: "Adding FOO via edit",
+						ToolCalls: []provider.ToolCall{{
+							ID: "e1", Name: "edit",
+							Input: json.RawMessage(`{"blocks":"main.go\n<<<<<<< SEARCH\nfunc Bar() string { return \"bar\" }\n=======\nfunc FOO() string { return \"foo\" }\nfunc Bar() string { return \"bar\" }\n>>>>>>> REPLACE\n"}`),
+						}},
+						StopReason: "tool_use",
+					},
+					// 2) apply_patch: add a new file
+					{
+						Text: "Adding extra file via apply_patch",
+						ToolCalls: []provider.ToolCall{{
+							ID: "p1", Name: "apply_patch",
+							Input: json.RawMessage(`{"patch":"*** Begin Patch\n*** Add File: added.txt\n+hello added\n*** End Patch\n"}`),
+						}},
+						StopReason: "tool_use",
+					},
+					// 3) Attempt destructive bash that should be denied
+					{
+						Text: "Trying rm",
+						ToolCalls: []provider.ToolCall{{
+							ID: "b1", Name: "bash",
+							Input: json.RawMessage(`{"command":"rm -rf /"}`),
+						}},
+						StopReason: "tool_use",
+					},
+					// 4) Acknowledge the deny and end turn
+					{
+						Text:       "Permission denied, recognized; finalizing.",
+						StopReason: "end_turn",
+					},
+				}), "mock-model", nil
 			case "run-memory-repomap":
 				// Scripted scenario for Phase 6 e2e: repomap → memory_update → write_file → end → milestone update.
 				return provider.NewMockToolProvider([]provider.MockTurn{
