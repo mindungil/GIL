@@ -16,6 +16,7 @@ import (
 	"github.com/jedutools/gil/core/compact"
 	"github.com/jedutools/gil/core/event"
 	"github.com/jedutools/gil/core/memory"
+	"github.com/jedutools/gil/core/permission"
 	"github.com/jedutools/gil/core/provider"
 	"github.com/jedutools/gil/core/stuck"
 	"github.com/jedutools/gil/core/tool"
@@ -1512,4 +1513,148 @@ func TestAgentLoop_MilestoneGate_NonMemoryToolsIgnored(t *testing.T) {
 		}
 	}
 	require.True(t, skipSeen)
+}
+
+func TestAgentLoop_Permission_AllowsWhenNil(t *testing.T) {
+	workspace := t.TempDir()
+	prov := provider.NewMockToolProvider([]provider.MockTurn{
+		{Text: "writing", ToolCalls: []provider.ToolCall{{
+			ID: "x", Name: "write_file", Input: json.RawMessage(`{"path":"a.txt","content":"hi"}`),
+		}}, StopReason: "tool_use"},
+		{Text: "done", StopReason: "end_turn"},
+	})
+	spec := &gilv1.FrozenSpec{Goal: &gilv1.Goal{OneLiner: "test"}, Verification: &gilv1.Verification{}}
+	loop := &AgentLoop{
+		Spec: spec, Provider: prov, Model: "m",
+		Tools:    []tool.Tool{&tool.WriteFile{WorkingDir: workspace}},
+		Verifier: verify.NewRunner(workspace),
+		// Permission: nil → allow all
+	}
+	res, err := loop.Run(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "done", res.Status)
+	// File was written
+	_, err = os.Stat(filepath.Join(workspace, "a.txt"))
+	require.NoError(t, err)
+}
+
+func TestAgentLoop_Permission_DeniesAndContinues(t *testing.T) {
+	workspace := t.TempDir()
+	prov := provider.NewMockToolProvider([]provider.MockTurn{
+		{Text: "trying bash", ToolCalls: []provider.ToolCall{{
+			ID: "x", Name: "bash", Input: json.RawMessage(`{"command":"rm -rf /"}`),
+		}}, StopReason: "tool_use"},
+		{Text: "ok giving up", StopReason: "end_turn"},
+	})
+	spec := &gilv1.FrozenSpec{Goal: &gilv1.Goal{OneLiner: "test"}, Verification: &gilv1.Verification{}}
+	loop := &AgentLoop{
+		Spec: spec, Provider: prov, Model: "m",
+		Tools:    []tool.Tool{&tool.Bash{WorkingDir: workspace}},
+		Verifier: verify.NewRunner(workspace),
+		Permission: &permission.Evaluator{Rules: []permission.Rule{
+			{Tool: "bash", Key: "rm *", Action: permission.DecisionDeny},
+		}},
+		Events: event.NewStream(),
+	}
+	sub := loop.Events.Subscribe(256)
+	var collected []event.Event
+	done := make(chan struct{})
+	go func() { defer close(done); for e := range sub.Events() { collected = append(collected, e) } }()
+	res, err := loop.Run(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "done", res.Status)
+	sub.Close()
+	<-done
+	// Expect at least one permission_denied event
+	var deniedSeen bool
+	for _, e := range collected {
+		if e.Type == "permission_denied" {
+			deniedSeen = true
+		}
+	}
+	require.True(t, deniedSeen)
+}
+
+func TestAgentLoop_Permission_AskTreatedAsDenyInPhase7(t *testing.T) {
+	workspace := t.TempDir()
+	prov := provider.NewMockToolProvider([]provider.MockTurn{
+		{Text: "trying", ToolCalls: []provider.ToolCall{{
+			ID: "x", Name: "bash", Input: json.RawMessage(`{"command":"ls"}`),
+		}}, StopReason: "tool_use"},
+		{Text: "giving up", StopReason: "end_turn"},
+	})
+	spec := &gilv1.FrozenSpec{Goal: &gilv1.Goal{OneLiner: "test"}, Verification: &gilv1.Verification{}}
+	loop := &AgentLoop{
+		Spec: spec, Provider: prov, Model: "m",
+		Tools:    []tool.Tool{&tool.Bash{WorkingDir: workspace}},
+		Verifier: verify.NewRunner(workspace),
+		// Empty rules → default Ask
+		Permission: &permission.Evaluator{},
+		Events:     event.NewStream(),
+	}
+	sub := loop.Events.Subscribe(256)
+	var collected []event.Event
+	done := make(chan struct{})
+	go func() { defer close(done); for e := range sub.Events() { collected = append(collected, e) } }()
+	res, err := loop.Run(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "done", res.Status)
+	sub.Close()
+	<-done
+	// Expect a permission_denied event with decision=ask
+	var askDenied bool
+	for _, e := range collected {
+		if e.Type == "permission_denied" {
+			var d map[string]any
+			_ = json.Unmarshal(e.Data, &d)
+			if d["decision"] == "ask" {
+				askDenied = true
+			}
+		}
+	}
+	require.True(t, askDenied, "expected permission_denied with decision=ask")
+}
+
+func TestAgentLoop_Permission_AllowMatchPasses(t *testing.T) {
+	workspace := t.TempDir()
+	prov := provider.NewMockToolProvider([]provider.MockTurn{
+		{Text: "writing", ToolCalls: []provider.ToolCall{{
+			ID: "x", Name: "write_file", Input: json.RawMessage(`{"path":"ok.txt","content":"hi"}`),
+		}}, StopReason: "tool_use"},
+		{Text: "done", StopReason: "end_turn"},
+	})
+	spec := &gilv1.FrozenSpec{Goal: &gilv1.Goal{OneLiner: "test"}, Verification: &gilv1.Verification{}}
+	loop := &AgentLoop{
+		Spec: spec, Provider: prov, Model: "m",
+		Tools:    []tool.Tool{&tool.WriteFile{WorkingDir: workspace}},
+		Verifier: verify.NewRunner(workspace),
+		Permission: &permission.Evaluator{Rules: []permission.Rule{
+			{Tool: "write_file", Key: "*.txt", Action: permission.DecisionAllow},
+		}},
+	}
+	res, err := loop.Run(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "done", res.Status)
+	_, err = os.Stat(filepath.Join(workspace, "ok.txt"))
+	require.NoError(t, err)
+}
+
+func TestPermissionKeyFor(t *testing.T) {
+	cases := []struct {
+		tool  string
+		input string
+		want  string
+	}{
+		{"bash", `{"command":"ls -la"}`, "ls -la"},
+		{"write_file", `{"path":"a/b.txt","content":"x"}`, "a/b.txt"},
+		{"read_file", `{"path":"x"}`, "x"},
+		{"memory_update", `{"file":"progress","content":"x"}`, "progress"},
+		{"edit", `{"blocks":"..."}`, ""},
+		{"unknown", `{"x":"y"}`, ""},
+		{"bash", `{not json`, ""},
+	}
+	for _, c := range cases {
+		got := permissionKeyFor(c.tool, json.RawMessage(c.input))
+		require.Equal(t, c.want, got, "tool=%s input=%s", c.tool, c.input)
+	}
 }

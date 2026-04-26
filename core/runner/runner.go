@@ -14,6 +14,7 @@ import (
 	"github.com/jedutools/gil/core/compact"
 	"github.com/jedutools/gil/core/event"
 	"github.com/jedutools/gil/core/memory"
+	"github.com/jedutools/gil/core/permission"
 	"github.com/jedutools/gil/core/provider"
 	"github.com/jedutools/gil/core/stuck"
 	"github.com/jedutools/gil/core/tool"
@@ -52,6 +53,9 @@ type AgentLoop struct {
 	// AdversaryModel is used by AdversaryConsultStrategy. If empty, falls back
 	// to a.Model.
 	AdversaryModel string
+
+	// Permission, when non-nil, gates each tool call. nil → no gating (Allow all).
+	Permission *permission.Evaluator
 
 	// Memory bank, optional. If non-nil, the system prompt prepends bank
 	// contents (full when small, progress-only when large).
@@ -412,6 +416,36 @@ func (a *AgentLoop) Run(ctx context.Context) (*Result, error) {
 				"input": truncateJSON(tc.Input, 512),
 			})
 
+			if a.Permission != nil {
+				key := permissionKeyFor(tc.Name, tc.Input)
+				decision := a.Permission.Evaluate(tc.Name, key)
+				if decision != permission.DecisionAllow {
+					// Deny + Ask both refuse the call (Ask = Deny in non-interactive Phase 7;
+					// Phase 8 TUI integration adds a real Ask path).
+					reason := "permission denied"
+					if decision == permission.DecisionAsk {
+						reason = "permission requires interactive ask (not supported in this run mode); treating as deny"
+					}
+					a.emit(event.SourceSystem, event.KindNote, "permission_denied", map[string]any{
+						"tool":     tc.Name,
+						"key":      key,
+						"decision": decision.String(),
+					})
+					toolResults = append(toolResults, provider.ToolResult{
+						ToolUseID: tc.ID,
+						Content:   reason,
+						IsError:   true,
+					})
+					a.emit(event.SourceEnvironment, event.KindObservation, "tool_result", map[string]any{
+						"name":             tc.Name,
+						"is_error":         true,
+						"content":          reason,
+						"permission_block": true,
+					})
+					continue
+				}
+			}
+
 			t, ok := toolByName[tc.Name]
 			if !ok {
 				toolResults = append(toolResults, provider.ToolResult{
@@ -676,6 +710,40 @@ func snapshotMessages(msgs []provider.Message, n int) []provider.Message {
 	out := make([]provider.Message, len(msgs)-start)
 	copy(out, msgs[start:])
 	return out
+}
+
+// permissionKeyFor extracts the tool-specific detail string used as the
+// permission key. Best-effort: parses tc.Input as JSON and pulls a
+// well-known field (command for bash, path for file ops, blocks/patch for
+// edit/apply_patch). Falls back to the raw input JSON when no field matches.
+func permissionKeyFor(toolName string, input json.RawMessage) string {
+	var m map[string]any
+	if err := json.Unmarshal(input, &m); err != nil {
+		return ""
+	}
+	switch toolName {
+	case "bash":
+		if v, ok := m["command"].(string); ok {
+			return v
+		}
+	case "write_file", "read_file":
+		if v, ok := m["path"].(string); ok {
+			return v
+		}
+	case "memory_update", "memory_load":
+		if v, ok := m["file"].(string); ok {
+			return v
+		}
+	case "edit":
+		// Per-block path matching is not meaningful (one tool call may touch
+		// many files). Use empty key — rules should match by tool name only.
+		return ""
+	case "apply_patch":
+		return ""
+	case "repomap", "compact_now":
+		return ""
+	}
+	return ""
 }
 
 // estimateMessagesTokens uses the same 4-chars-per-token heuristic as compact.estimateTokens.
