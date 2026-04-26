@@ -1,0 +1,12 @@
+go 1.22.2
+
+use (
+	./cli
+	./core
+	./mcp
+	./proto
+	./runtime
+	./sdk
+	./server
+	./tui
+)
