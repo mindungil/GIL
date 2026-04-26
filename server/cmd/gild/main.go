@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -53,10 +54,33 @@ func newServer(dbPath, sockPath, sessionsBase string) (*server, error) {
 	factory := func(name string) (provider.Provider, string, error) {
 		switch name {
 		case "mock":
-			return provider.NewMock([]string{
-				`{"domain":"unknown","domain_confidence":0.5,"tech_hints":[],"scale_hint":"unknown","ambiguity":"none"}`,
-				"What's your project goal?",
-			}), "mock-model", nil
+			switch os.Getenv("GIL_MOCK_MODE") {
+			case "run-hello":
+				// MockToolProvider with scripted hello-world turns for RunService
+				return provider.NewMockToolProvider([]provider.MockTurn{
+					{
+						Text: "Creating hello.txt",
+						ToolCalls: []provider.ToolCall{
+							{
+								ID:    "c1",
+								Name:  "write_file",
+								Input: json.RawMessage(`{"path":"hello.txt","content":"hello\n"}`),
+							},
+						},
+						StopReason: "tool_use",
+					},
+					{
+						Text:       "Done.",
+						StopReason: "end_turn",
+					},
+				}), "mock-model", nil
+			default:
+				// Text-only Mock for InterviewService scenarios
+				return provider.NewMock([]string{
+					`{"domain":"unknown","domain_confidence":0.5,"tech_hints":[],"scale_hint":"unknown","ambiguity":"none"}`,
+					"What's your project goal?",
+				}), "mock-model", nil
+			}
 		case "anthropic", "":
 			key := os.Getenv("ANTHROPIC_API_KEY")
 			if key == "" {
