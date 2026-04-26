@@ -4,7 +4,7 @@
 
 ## 현재 페이즈
 
-**Phase 5: Run Engine 개선** (완료 — 2026-04-25). 다음 → Phase 6.
+**Phase 6: 컨텍스트/메모리/Repomap** (완료 — 2026-04-26). 다음 → Phase 7.
 
 **Phase 0: 설계** (완료)
 
@@ -74,10 +74,18 @@
 - [x] e2e phase05 (async + checkpoint + restore + sandbox sanity)
 - [x] make install 타겟
 
-**Phase 6: 컨텍스트/메모리** (대기)
-- [ ] `core/compact` 캐시 보존 압축
-- [ ] `core/memory` 6 마크다운 뱅크 (진짜 구현)
-- [ ] `core/repomap` tree-sitter + PageRank
+**Phase 6: 컨텍스트/메모리/Repomap** (완료 — 2026-04-26)
+- [x] core/compact: Compactor (Head/Middle/Tail) + OpenCode 템플릿 + anti-thrashing + Anthropic cache_control
+- [x] AgentLoop 95% 자동 압축 + compact_now 도구
+- [x] core/memory: Bank (6 markdown) + memory_update / memory_load tools
+- [x] AgentLoop 시스템 프롬프트에 bank prepend (full < 4k tokens, else progress only)
+- [x] post-verify milestone gate (memory_update 권유)
+- [x] core/repomap: ParseFile (Go: stdlib go/parser, py/js/ts: regex; CGO 회피)
+- [x] WalkProject (sensible exclusions) + PageRank scoring + token-budget Fit
+- [x] repomap tool (TTL cache) + RunService 통합
+- [x] Stuck Recovery 4종 모두 실작동: ModelEscalate + AltToolOrder (Cline lift) + ResetSection (Cline lift) + AdversaryConsult (Goose lift)
+- [x] runtime/local Seatbelt sandbox (Codex lift, darwin only) + non-darwin stub
+- [x] e2e phase06 (repomap + memory + milestone gate sanity)
 
 **Phase 7: 도구/편집** (대기)
 - [ ] `core/edit` SEARCH/REPLACE 4단 매칭
@@ -111,6 +119,7 @@
 | 2026-04-26 | Phase 3 (인터뷰 엔진 실작동) 완료 — SlotFiller + Adversary + SelfAuditGate + RunReplyTurn 오케스트레이션 + gil resume. 7 tasks. cross-restart resume + per-stage 모델 분리 + retry/backoff은 Phase 4로 이연. |
 | 2026-04-26 | Phase 4 (Run Engine) 완료 — Tool/Bash/WriteFile/ReadFile + verify.Runner + provider Retry + AgentLoop (Anthropic native tool use) + RunService gRPC + gil run/events. 9 tasks. e2e4가 mock으로 hello.txt 자율 생성 + verifier 통과 시연. Phase 5: sandbox + shadow git + stuck recovery + async run. |
 | 2026-04-25 | Phase 5 (Run Engine 개선) 완료 — 18 tasks. secret masking + AgentLoop event emit + per-session Stream/Persister + RunService.Tail real + gil events --tail real + gil run --detach + 라이브 iteration/tokens + 5-pattern Stuck Detector + ModelEscalate recovery + 3-strike abort + bwrap Sandbox + WorkspaceBackend 라우팅 + Shadow Git checkpoint + gil restore + per-stage interview models + e2e5 + make install. e2e-all 5 페이즈 통과. Phase 6: 컨텍스트/메모리/리포맵. |
+| 2026-04-26 | Phase 6 (컨텍스트/메모리/Repomap) 완료 — 20 tasks + 1 fix. core/compact (Hermes 캐시 보존 + OpenCode 템플릿 + anti-thrashing + system-and-3 cache_control) + AgentLoop 95% auto-compact + compact_now 도구. core/memory.Bank 6 file + 2 tools + 시스템 프롬프트 prepend + post-verify 마일스톤 게이트. core/repomap (CGO 회피하여 stdlib go/parser + py/js/ts regex로 대체; PageRank + binary-search Fit + TTL cache tool). Stuck recovery 4종 풀 구현 (Cline loop-detection lift + Cline resetHead lift + Goose adversary_inspector lift). runtime/local Seatbelt (Codex seatbelt.rs lift, darwin only). e2e6 통과. server-side memory bank wiring fix 포함. e2e-all 6 페이즈 통과. |
 
 ## 차용 출처 (코드/패턴)
 
@@ -181,6 +190,16 @@
 - **검증**: `make e2e-all` 5 페이즈 모두 통과 (e2e5 = 비동기 + tail + checkpoint + restore sanity)
 - **make install**: `bin/gil` `bin/gild` → `/usr/local/bin/`
 - **다음 단계**: Phase 6 — `core/compact` (캐시 보존 압축, Hermes 패턴), `core/memory` 6 markdown 뱅크, `core/repomap` (tree-sitter + PageRank), Stuck recovery 4종 풀 구현, macOS Seatbelt sandbox
+
+## Phase 6 산출물 요약 (2026-04-26)
+
+- **Cache-preserving compression**: Hermes 패턴 — Head + Tail 보존, Middle을 LLM 요약으로 교체. OpenCode 템플릿 (Goal/Constraints/Progress with Done/InProgress/Blocked). Anti-thrashing (최근 2회 압축이 둘 다 <10% 절감이면 skip). Anthropic system-and-3 cache_control 마커. AgentLoop는 추정 토큰이 95% 임계 도달 시 자동 압축; agent는 compact_now 도구로 명시적 트리거 가능.
+- **Memory Bank**: 6개 markdown 파일 (`<sessionDir>/memory/`). projectbrief / productContext / activeContext / systemPatterns / techContext / progress. Init은 stub만 만들고 InitFromSpec은 stub인 파일만 spec 데이터로 채움 (사용자 편집 보존). memory_update + memory_load 도구. AgentLoop 시스템 프롬프트에 항상 prepend (작으면 6개 전부, 4k 토큰 초과 시 progress만). 검증 통과 후 milestone 게이트 1회 — agent에게 "메모리 업데이트할 거 있어?" 묻고 memory_update만 dispatch.
+- **Repomap**: tree-sitter 대신 stdlib (Go: go/parser+go/ast 정확, py/js/ts: regex 개요급). WalkProject + PageRank (def↔ref 그래프, 30 iter, damping 0.85) + Fit (binary-search, 4-chars/token). repomap 도구 (60s TTL cache).
+- **Stuck Recovery 4종 풀**: ModelEscalate (P5에서 완성) + AltToolOrder (Cline loop-detection.ts soft warning lift, single-shot system note 주입) + ResetSection (Cline CheckpointTracker.resetHead lift, ShadowGit.Reset로 second-newest 체크포인트 hard reset) + AdversaryConsult (Goose adversary_inspector consult_llm lift, 별도 LLM이 1줄 제안 → next iter에 system note로 주입).
+- **macOS Seatbelt**: Codex seatbelt.rs + seatbelt_base_policy.sbpl 발췌 (deny-default + minimal allow rules). bwrap.go와 동일한 Mode/Wrap API. darwin build tag + non-darwin stub.
+- **검증**: `make e2e-all` 6 페이즈 모두 통과 (e2e6 = repomap + memory_update + write_file + verify + milestone memory_update). 각 reference lift는 commit 메시지에 출처 명기.
+- **다음 단계**: Phase 7 — core/edit (SEARCH/REPLACE 4단), core/patch (apply_patch DSL), core/permission (allow/ask/deny + glob), TUI (Bubbletea), DOCKER/SSH workspace backends.
 
 ## 미해결 / 추후 결정
 
