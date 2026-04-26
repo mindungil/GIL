@@ -120,3 +120,22 @@ func (r *Repo) List(ctx context.Context, opts ListOptions) ([]Session, error) {
 	}
 	return out, rows.Err()
 }
+
+// UpdateStatus changes the session's status string and bumps updated_at.
+// Returns ErrNotFound if the session does not exist.
+func (r *Repo) UpdateStatus(ctx context.Context, id, status string) error {
+	res, err := r.db.ExecContext(ctx,
+		`UPDATE sessions SET status = ?, updated_at = ? WHERE id = ?`,
+		status, time.Now().UTC(), id)
+	if err != nil {
+		return fmt.Errorf("session.UpdateStatus: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("session.UpdateStatus rowsAffected: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}

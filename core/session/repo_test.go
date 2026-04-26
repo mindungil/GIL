@@ -74,3 +74,20 @@ func TestRepo_List_ReturnsAll(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, list, 3)
 }
+
+func TestRepo_UpdateStatus(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	defer db.Close()
+	repo := NewRepo(db)
+
+	s, err := repo.Create(ctx, CreateInput{WorkingDir: "/x"})
+	require.NoError(t, err)
+
+	require.NoError(t, repo.UpdateStatus(ctx, s.ID, "interviewing"))
+	got, err := repo.Get(ctx, s.ID)
+	require.NoError(t, err)
+	require.Equal(t, "interviewing", got.Status)
+
+	require.ErrorIs(t, repo.UpdateStatus(ctx, "nonexistent", "x"), ErrNotFound)
+}
