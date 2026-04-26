@@ -51,3 +51,24 @@ func TestLoadAll_MalformedLine_ReturnsError(t *testing.T) {
 	_, err := LoadAll(path)
 	require.Error(t, err)
 }
+
+func TestPersister_MasksSecretsOnWrite(t *testing.T) {
+	dir := t.TempDir()
+	p, err := NewPersister(dir)
+	require.NoError(t, err)
+	defer p.Close()
+
+	require.NoError(t, p.Write(Event{
+		ID:        1,
+		Type:      "anthropic_request",
+		Data:      []byte(`{"key":"sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWxYz1234567890"}`),
+		Timestamp: time.Now(),
+	}))
+	require.NoError(t, p.Sync())
+
+	loaded, err := LoadAll(filepath.Join(dir, "events.jsonl"))
+	require.NoError(t, err)
+	require.Len(t, loaded, 1)
+	require.NotContains(t, string(loaded[0].Data), "AbCdEfGhIjKlMnOpQrStUvWxYz1234567890")
+	require.Contains(t, string(loaded[0].Data), "<secret_hidden>")
+}
