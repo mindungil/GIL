@@ -29,5 +29,6 @@ func Root() *cobra.Command {
 		Short: "gil — autonomous coding harness",
 	}
 	root.AddCommand(daemonCmd())
+	root.AddCommand(newCmd())
 	return root
 }
