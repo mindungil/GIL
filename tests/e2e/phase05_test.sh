@@ -4,7 +4,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 BASE="$(mktemp -d)"
-SOCK="$BASE/gild.sock"
+SOCK="$BASE/state/gild.sock"
 WORK="$(mktemp -d)"
 PATH="$ROOT/bin:$PATH"
 export PATH
@@ -32,8 +32,8 @@ ID=$("$ROOT/bin/gil" new --working-dir "$WORK" --socket "$SOCK" 2>/dev/null | aw
 [ -n "$ID" ] || { echo "FAIL: no session ID"; exit 1; }
 echo "OK: session created ($ID)"
 
-mkdir -p "$BASE/sessions/$ID"
-cat > "$BASE/sessions/$ID/spec.yaml" <<EOF
+mkdir -p "$BASE/data/sessions/$ID"
+cat > "$BASE/data/sessions/$ID/spec.yaml" <<EOF
 specId: test-spec-p5
 sessionId: $ID
 goal:
@@ -61,7 +61,7 @@ risk:
   autonomy: FULL
 EOF
 
-(cd "$ROOT/core" && go run "$ROOT/tests/e2e/helpers/setfrozen.go" "$BASE/sessions.db" "$ID")
+(cd "$ROOT/core" && go run "$ROOT/tests/e2e/helpers/setfrozen.go" "$BASE/data/sessions.db" "$ID")
 
 # 3. Run with --detach
 DETACH_OUT=$("$ROOT/bin/gil" run "$ID" --socket "$SOCK" --provider mock --detach 2>&1)
@@ -91,7 +91,7 @@ grep -q "hello" "$WORK/hello.txt" || { echo "FAIL: wrong content"; exit 1; }
 echo "OK: detached run created hello.txt"
 
 # 5. Shadow git should exist with at least 1 commit
-SHADOW_DIR="$BASE/sessions/$ID/shadow"
+SHADOW_DIR="$BASE/data/sessions/$ID/shadow"
 [ -d "$SHADOW_DIR" ] || { echo "FAIL: shadow dir not created at $SHADOW_DIR"; exit 1; }
 # Find the inner .git (the hash subdir)
 GIT_DIR=$(find "$SHADOW_DIR" -maxdepth 2 -name ".git" -type d | head -1)

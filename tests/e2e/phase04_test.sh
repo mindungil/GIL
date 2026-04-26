@@ -4,7 +4,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 BASE="$(mktemp -d)"
-SOCK="$BASE/gild.sock"
+SOCK="$BASE/state/gild.sock"
 WORK="$(mktemp -d)"
 PATH="$ROOT/bin:$PATH"
 export PATH
@@ -34,8 +34,8 @@ ID=$("$ROOT/bin/gil" new --working-dir "$WORK" --socket "$SOCK" 2>/dev/null | aw
 echo "OK: session created ($ID)"
 
 # 3. Manually inject a frozen spec — skip interview for sanity test
-mkdir -p "$BASE/sessions/$ID"
-cat > "$BASE/sessions/$ID/spec.yaml" <<EOF
+mkdir -p "$BASE/data/sessions/$ID"
+cat > "$BASE/data/sessions/$ID/spec.yaml" <<EOF
 specId: test-spec
 sessionId: $ID
 goal:
@@ -75,7 +75,7 @@ EOF
 # For testing, we can skip the lock: the Run service will load the spec without verification.
 
 # Update DB: mark session as frozen so RunService accepts it
-(cd "$ROOT/core" && go run "$ROOT/tests/e2e/helpers/setfrozen.go" "$BASE/sessions.db" "$ID")
+(cd "$ROOT/core" && go run "$ROOT/tests/e2e/helpers/setfrozen.go" "$BASE/data/sessions.db" "$ID")
 
 # 4. Run!
 RUN_OUT=$("$ROOT/bin/gil" run "$ID" --socket "$SOCK" --provider mock 2>&1)

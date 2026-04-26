@@ -9,6 +9,7 @@ import (
 	"syscall"
 
 	"github.com/jedutools/gil/core/mcp/jsonrpc"
+	"github.com/jedutools/gil/core/paths"
 	"github.com/jedutools/gil/mcp/internal/server"
 	"github.com/jedutools/gil/sdk"
 )
@@ -42,10 +43,15 @@ func main() {
 	}
 }
 
+// defaultSocket resolves the gild UDS path through the same XDG-aware
+// layout the rest of gil uses (paths.FromEnv → State/gild.sock). Falls
+// back to /tmp/gil/gild.sock only when HOME cannot be resolved at all,
+// which preserves prior behaviour for minimal containers without a
+// home directory.
 func defaultSocket() string {
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
+	l, err := paths.FromEnv()
+	if err != nil {
 		return "/tmp/gil/gild.sock"
 	}
-	return home + "/.gil/gild.sock"
+	return l.Sock()
 }

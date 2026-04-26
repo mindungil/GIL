@@ -37,14 +37,15 @@ export PATH="$ROOT/bin:$PATH"
 ID=$("$ROOT/bin/gil" new --working-dir /tmp/p1 2>/dev/null | awk '{print $3}')
 [ -n "$ID" ] || { echo "FAIL: no session ID returned"; exit 1; }
 
-# Verify socket was created
-DEFAULT_SOCK="$HOME/.gil/gild.sock"
+# Verify socket was created. Under the XDG layout the daemon places its
+# socket at $XDG_STATE_HOME/gil/gild.sock (defaulting to ~/.local/state/gil).
+DEFAULT_SOCK="${XDG_STATE_HOME:-$HOME/.local/state}/gil/gild.sock"
 [ -S "$DEFAULT_SOCK" ] || { echo "FAIL: socket not created by auto-spawn at $DEFAULT_SOCK"; exit 1; }
 echo "OK: auto-spawn + new session ($ID)"
 
-# Clean up the default socket for the next test run
+# Clean up the default daemon (it auto-spawned with no --base, just XDG defaults).
 cleanup_default() {
-  pkill -f "gild --foreground --base $HOME/.gil" 2>/dev/null || true
+  pkill -f "gild --foreground" 2>/dev/null || true
 }
 trap cleanup_default EXIT
 

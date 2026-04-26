@@ -21,7 +21,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 BASE="$(mktemp -d)"
-SOCK="$BASE/gild.sock"
+SOCK="$BASE/state/gild.sock"
 OIDC_DIR="$(mktemp -d)"
 GILD_LOG="$BASE/gild.log"
 MOCK_LOG="$BASE/oidc_mock.log"

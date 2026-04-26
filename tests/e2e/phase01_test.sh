@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 BASE="$(mktemp -d)"
-SOCK="$BASE/gild.sock"
+SOCK="$BASE/state/gild.sock"
 
 cd "$ROOT"
 make build > /dev/null

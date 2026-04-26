@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 	"time"
 
@@ -22,6 +21,8 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
+	"github.com/jedutools/gil/core/credstore"
+	"github.com/jedutools/gil/core/paths"
 	"github.com/jedutools/gil/core/provider"
 	"github.com/jedutools/gil/core/session"
 	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
@@ -49,7 +50,14 @@ type server struct {
 // authMW, when non-nil, is registered as both a unary and a stream interceptor —
 // the same middleware enforces auth on every RPC regardless of transport, with
 // per-connection bypass for UDS handled inside the middleware itself.
-func newServer(dbPath, sockPath, sessionsBase string, authMW *auth.Middleware) (*server, error) {
+//
+// authFile is the path to the credstore auth.json that the provider factory
+// consults before falling back to environment variables. Pass an empty string
+// to disable the credstore lookup (useful in tests that only want the env
+// path). When non-empty, the file does not need to exist — a missing file
+// behaves as "no credentials configured" so existing env-only setups stay
+// transparently compatible.
+func newServer(dbPath, sockPath, sessionsBase, authFile string, authMW *auth.Middleware) (*server, error) {
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return nil, err
@@ -204,13 +212,28 @@ func newServer(dbPath, sockPath, sessionsBase string, authMW *auth.Middleware) (
 				}), "mock-model", nil
 			}
 		case "anthropic", "":
-			key := os.Getenv("ANTHROPIC_API_KEY")
+			// credstore takes precedence; env var is the legacy
+			// fallback so existing CI flows (and the e2e suite) keep
+			// working without changes.
+			key, _ := lookupCredKey(authFile, credstore.Anthropic)
 			if key == "" {
-				return nil, "", fmt.Errorf("ANTHROPIC_API_KEY not set")
+				key = os.Getenv("ANTHROPIC_API_KEY")
+			}
+			if key == "" {
+				// User-facing wording. The CLI converts this to a UserError
+				// with hint "gil auth login anthropic" at the gRPC boundary.
+				return nil, "", fmt.Errorf("no credentials for anthropic")
 			}
 			return provider.NewAnthropic(key), "claude-opus-4-7", nil
+		case "openai", "openrouter", "vllm":
+			// Stub: credstore lookup path exists so `gil auth login`
+			// for these providers writes to the right file, but the
+			// actual provider adapters land in Phase 12.
+			_, _ = lookupCredKey(authFile, credstore.ProviderName(name))
+			return nil, "", fmt.Errorf("provider %q not yet implemented (Phase 12)", name)
 		default:
-			return nil, "", fmt.Errorf("unknown provider %q", name)
+			// Listed providers reflect Phase 11 plan; not all are wired yet.
+			return nil, "", fmt.Errorf("unknown provider %q (available: anthropic, mock)", name)
 		}
 	}
 
@@ -229,6 +252,30 @@ func newServer(dbPath, sockPath, sessionsBase string, authMW *auth.Middleware) (
 	gilv1.RegisterRunServiceServer(g, runSvc)
 
 	return &server{grpc: g, lis: lis, db: db}, nil
+}
+
+// lookupCredKey returns the API key stored in authFile for name, or an
+// empty string when there is no credstore file, no entry for name, or the
+// entry is not an API-key credential. It deliberately swallows read errors
+// and returns ("", err) — the factory always falls back to the env var, so
+// a corrupt or unreadable auth.json should not crash the daemon. Callers
+// that want stricter handling can inspect the returned error.
+//
+// authFile == "" disables the lookup entirely; this lets tests construct a
+// server with no credstore and rely solely on env vars.
+func lookupCredKey(authFile string, name credstore.ProviderName) (string, error) {
+	if authFile == "" {
+		return "", nil
+	}
+	store := credstore.NewFileStore(authFile)
+	cred, err := store.Get(context.Background(), name)
+	if err != nil {
+		return "", err
+	}
+	if cred == nil {
+		return "", nil
+	}
+	return cred.APIKey, nil
 }
 
 // AttachTCP binds an additional TCP listener and serves the same gRPC server on it.
@@ -275,12 +322,18 @@ func (s *server) Stop() {
 }
 
 func main() {
-	home, _ := os.UserHomeDir()
-	defaultBase := filepath.Join(home, ".gil")
-	base := flag.String("base", defaultBase, "data directory")
+	// Path resolution priority (highest first):
+	//   --home / --base   single-tree override (treated like GIL_HOME).
+	//                     --base is the legacy spelling kept as an alias so
+	//                     the existing e2e suite and any third-party scripts
+	//                     keep working without edits.
+	//   GIL_HOME env      single-tree, picked up by paths.FromEnv.
+	//   default           XDG-derived layout (~/.config/gil, …).
+	home := flag.String("home", "", "single-tree override for all gil dirs (alias of GIL_HOME); empty means use XDG defaults")
+	base := flag.String("base", "", "deprecated alias for --home; kept for backwards compatibility")
 	foreground := flag.Bool("foreground", false, "run in foreground")
 	httpAddr := flag.String("http", "", "if non-empty, start HTTP/JSON gateway on this addr (e.g., :8080)")
-	user := flag.String("user", "", "user namespace; data dir becomes <base>/users/<user>")
+	user := flag.String("user", "", "user namespace; appends users/<name>/ to every layout dir")
 	metricsAddr := flag.String("metrics", "", "if non-empty, expose Prometheus metrics on this addr (e.g., :9090)")
 	grpcTCP := flag.String("grpc-tcp", "", "if non-empty, also serve gRPC on this TCP addr (e.g., :7070); auth recommended for non-loopback binds")
 	authIssuer := flag.String("auth-issuer", "", "OIDC issuer URL (e.g., https://accounts.google.com); when set, enables bearer-token auth")
@@ -294,20 +347,47 @@ func main() {
 		os.Exit(2)
 	}
 
-	if *user != "" {
-		*base = filepath.Join(*base, "users", *user)
+	// --home wins over --base; either, when set, takes precedence over
+	// GIL_HOME and the XDG defaults. Using os.Setenv is the simplest way
+	// to funnel all three precedence rungs through paths.FromEnv.
+	switch {
+	case *home != "":
+		os.Setenv("GIL_HOME", *home)
+	case *base != "":
+		// Soft deprecation notice; do not fail because all our own e2e
+		// scripts still pass --base.
+		fmt.Fprintln(os.Stderr, "gild: --base is deprecated; use --home (or set GIL_HOME)")
+		os.Setenv("GIL_HOME", *base)
 	}
 
-	if err := os.MkdirAll(*base, 0o700); err != nil {
+	layout, err := paths.FromEnv()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "gild:", err)
+		os.Exit(1)
+	}
+	layout = layout.WithUser(*user)
+
+	if err := layout.EnsureDirs(); err != nil {
 		fmt.Fprintln(os.Stderr, "gild:", err)
 		os.Exit(1)
 	}
 
+	// Best-effort migration of any pre-XDG ~/.gil tree on this user. The
+	// function is idempotent so calling it on every start is fine; we only
+	// surface failures (success and "nothing to do" are both silent so
+	// existing log output stays unchanged).
+	if migrated, err := paths.MigrateLegacyTilde(layout); err != nil {
+		slog.Warn("legacy ~/.gil migration failed", "err", err)
+	} else if migrated {
+		slog.Info("migrated legacy ~/.gil tree into XDG layout")
+	}
+
 	metrics.SetVersion("0.9.0-dev")
 
-	dbPath := filepath.Join(*base, "sessions.db")
-	sockPath := filepath.Join(*base, "gild.sock")
-	sessionsBase := filepath.Join(*base, "sessions")
+	dbPath := layout.SessionsDB()
+	sockPath := layout.Sock()
+	sessionsBase := layout.SessionsDir()
+	authFile := layout.AuthFile()
 
 	// Optional OIDC auth: only construct the middleware when an issuer is set,
 	// so the default "no flags" gild behaviour is byte-for-byte unchanged.
@@ -328,7 +408,7 @@ func main() {
 		slog.Info("gild auth enabled", "issuer", *authIssuer, "audience", *authAudience, "allow_uds", *authAllowUDS)
 	}
 
-	srv, err := newServer(dbPath, sockPath, sessionsBase, authMW)
+	srv, err := newServer(dbPath, sockPath, sessionsBase, authFile, authMW)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "gild:", err)
 		os.Exit(1)

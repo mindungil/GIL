@@ -4,7 +4,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 BASE="$(mktemp -d)"
-SOCK="$BASE/gild.sock"
+SOCK="$BASE/state/gild.sock"
 WORK="$(mktemp -d)"
 PATH="$ROOT/bin:$PATH"
 export PATH
@@ -45,8 +45,8 @@ ID=$("$ROOT/bin/gil" new --working-dir "$WORK" --socket "$SOCK" 2>/dev/null | aw
 [ -n "$ID" ] || { echo "FAIL: no session ID"; exit 1; }
 echo "OK: session created ($ID)"
 
-mkdir -p "$BASE/sessions/$ID"
-cat > "$BASE/sessions/$ID/spec.yaml" <<EOF
+mkdir -p "$BASE/data/sessions/$ID"
+cat > "$BASE/data/sessions/$ID/spec.yaml" <<EOF
 specId: test-spec-p6
 sessionId: $ID
 goal:
@@ -75,7 +75,7 @@ risk:
   autonomy: FULL
 EOF
 
-(cd "$ROOT/core" && go run "$ROOT/tests/e2e/helpers/setfrozen.go" "$BASE/sessions.db" "$ID")
+(cd "$ROOT/core" && go run "$ROOT/tests/e2e/helpers/setfrozen.go" "$BASE/data/sessions.db" "$ID")
 
 # 3. Run synchronously so we can inspect everything when it returns
 RUN_OUT=$("$ROOT/bin/gil" run "$ID" --socket "$SOCK" --provider mock 2>&1)
@@ -89,7 +89,7 @@ grep -q "hello" "$WORK/hello.txt" || { echo "FAIL: wrong content"; exit 1; }
 echo "OK: write_file produced hello.txt"
 
 # 5. Verify the memory bank captured both updates
-MEMDIR="$BASE/sessions/$ID/memory"
+MEMDIR="$BASE/data/sessions/$ID/memory"
 [ -d "$MEMDIR" ] || { echo "FAIL: memory dir not created at $MEMDIR"; exit 1; }
 [ -f "$MEMDIR/activeContext.md" ] || { echo "FAIL: activeContext.md missing"; exit 1; }
 [ -f "$MEMDIR/progress.md" ] || { echo "FAIL: progress.md missing"; exit 1; }
@@ -109,7 +109,7 @@ grep -q "created hello.txt" "$MEMDIR/progress.md" || {
 echo "OK: post-verify milestone gate recorded progress"
 
 # 6. Verify the event log shows repomap + memory_milestone events
-EVENTS_DIR="$BASE/sessions/$ID/events"
+EVENTS_DIR="$BASE/data/sessions/$ID/events"
 [ -d "$EVENTS_DIR" ] || { echo "FAIL: events dir missing"; exit 1; }
 EVENTS_FILE=$(ls "$EVENTS_DIR"/*.jsonl 2>/dev/null | head -1)
 [ -n "$EVENTS_FILE" ] || { echo "FAIL: no jsonl event file"; exit 1; }

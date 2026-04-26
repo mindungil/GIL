@@ -4,7 +4,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 BASE="$(mktemp -d)"
-SOCK="$BASE/gild.sock"
+SOCK="$BASE/state/gild.sock"
 WORK="$(mktemp -d)"
 HTTPPORT=18080
 PATH="$ROOT/bin:$PATH"
@@ -64,8 +64,8 @@ echo "$HTTP_OUT2" | grep -q "$ID" || {
 echo "OK: HTTP gateway GET /v1/sessions/{id} works"
 
 # 6. Inject frozen spec
-mkdir -p "$BASE/sessions/$ID"
-cat > "$BASE/sessions/$ID/spec.yaml" <<EOF
+mkdir -p "$BASE/data/sessions/$ID"
+cat > "$BASE/data/sessions/$ID/spec.yaml" <<EOF
 specId: test-spec-p8
 sessionId: $ID
 goal:
@@ -96,7 +96,7 @@ risk:
   autonomy: FULL
 EOF
 
-(cd "$ROOT/core" && go run "$ROOT/tests/e2e/helpers/setfrozen.go" "$BASE/sessions.db" "$ID")
+(cd "$ROOT/core" && go run "$ROOT/tests/e2e/helpers/setfrozen.go" "$BASE/data/sessions.db" "$ID")
 
 # 7. Run synchronously
 RUN_OUT=$("$ROOT/bin/gil" run "$ID" --socket "$SOCK" --provider mock 2>&1)
@@ -111,7 +111,7 @@ echo "OK: exec recipe wrote step1.txt"
 
 # 9. Verify exec_step events appeared in the event log (intermediate step
 #    visibility — the LLM didn't see them but observers should)
-EVENTS_DIR="$BASE/sessions/$ID/events"
+EVENTS_DIR="$BASE/data/sessions/$ID/events"
 EVENTS_FILE=$(ls "$EVENTS_DIR"/*.jsonl 2>/dev/null | head -1)
 [ -n "$EVENTS_FILE" ] || { echo "FAIL: no jsonl event file"; exit 1; }
 

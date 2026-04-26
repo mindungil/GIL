@@ -18,7 +18,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 BASE="$(mktemp -d)"
-SOCK="$BASE/gild.sock"
+SOCK="$BASE/state/gild.sock"
 WORK="$(mktemp -d)"
 FAKE_DIR="$(mktemp -d)"
 CAPTURE="$FAKE_DIR/argv.log"
@@ -66,8 +66,8 @@ ID=$("$ROOT/bin/gil" new --working-dir "$WORK" --socket "$SOCK" 2>/dev/null | aw
 echo "OK: session created ($ID)"
 
 # 4. Inject frozen spec — workspace.backend = MODAL
-mkdir -p "$BASE/sessions/$ID"
-cat > "$BASE/sessions/$ID/spec.yaml" <<EOF
+mkdir -p "$BASE/data/sessions/$ID"
+cat > "$BASE/data/sessions/$ID/spec.yaml" <<EOF
 specId: test-spec-p10-modal
 sessionId: $ID
 goal:
@@ -100,7 +100,7 @@ risk:
   autonomy: FULL
 EOF
 
-(cd "$ROOT/core" && go run "$ROOT/tests/e2e/helpers/setfrozen.go" "$BASE/sessions.db" "$ID")
+(cd "$ROOT/core" && go run "$ROOT/tests/e2e/helpers/setfrozen.go" "$BASE/data/sessions.db" "$ID")
 
 # 5. Run synchronously
 RUN_OUT=$("$ROOT/bin/gil" run "$ID" --socket "$SOCK" --provider mock 2>&1) || true

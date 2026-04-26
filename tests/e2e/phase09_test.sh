@@ -6,7 +6,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 BASE="$(mktemp -d)"
-SOCK="$BASE/gild.sock"
+SOCK="$BASE/state/gild.sock"
 WORK="$(mktemp -d)"
 PATH="$ROOT/bin:$PATH"
 export PATH
@@ -35,8 +35,8 @@ ID=$("$ROOT/bin/gil" new --working-dir "$WORK" --socket "$SOCK" 2>/dev/null | aw
 echo "OK: session created ($ID)"
 
 # 3. Inject frozen spec — high iteration cap, FULL autonomy, soak.txt verifier
-mkdir -p "$BASE/sessions/$ID"
-cat > "$BASE/sessions/$ID/spec.yaml" <<EOF
+mkdir -p "$BASE/data/sessions/$ID"
+cat > "$BASE/data/sessions/$ID/spec.yaml" <<EOF
 specId: test-spec-soak
 sessionId: $ID
 goal:
@@ -64,7 +64,7 @@ risk:
   autonomy: FULL
 EOF
 
-(cd "$ROOT/core" && go run "$ROOT/tests/e2e/helpers/setfrozen.go" "$BASE/sessions.db" "$ID")
+(cd "$ROOT/core" && go run "$ROOT/tests/e2e/helpers/setfrozen.go" "$BASE/data/sessions.db" "$ID")
 
 # 4. Run synchronously — capture wall time
 START=$(date +%s)
@@ -92,7 +92,7 @@ FILE_COUNT=$(ls "$WORK"/f*.txt 2>/dev/null | wc -l)
 echo "OK: $FILE_COUNT workspace files written"
 
 # 8. Verify memory bank evolved
-MEMDIR="$BASE/sessions/$ID/memory"
+MEMDIR="$BASE/data/sessions/$ID/memory"
 [ -d "$MEMDIR" ] || { echo "FAIL: memory dir missing"; exit 1; }
 grep -q "wrote 10 files" "$MEMDIR/progress.md" || {
   echo "FAIL: progress.md missing 'wrote 10 files'"
@@ -102,7 +102,7 @@ grep -q "wrote 10 files" "$MEMDIR/progress.md" || {
 echo "OK: memory bank captured progress"
 
 # 9. Verify many event types fired
-EVENTS_DIR="$BASE/sessions/$ID/events"
+EVENTS_DIR="$BASE/data/sessions/$ID/events"
 EVENTS_FILE=$(ls "$EVENTS_DIR"/*.jsonl 2>/dev/null | head -1)
 [ -n "$EVENTS_FILE" ] || { echo "FAIL: no jsonl event file"; exit 1; }
 
