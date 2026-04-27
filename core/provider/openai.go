@@ -62,11 +62,14 @@ func (o *OpenAI) Name() string { return "openai" }
 // errors.As to peel off the typed wrapper.
 
 // ProviderRateLimit indicates the upstream returned HTTP 429. The retry
-// wrapper treats this as retryable.
+// wrapper treats this as retryable. RetryAfter, if non-zero, carries the
+// server-suggested delay parsed from the Retry-After response header
+// (either delta-seconds or HTTP-date form, per RFC 7231 §7.1.3).
 type ProviderRateLimit struct {
 	Provider   string
 	StatusCode int
 	Body       string
+	RetryAfter time.Duration
 }
 
 func (e *ProviderRateLimit) Error() string {
@@ -74,11 +77,14 @@ func (e *ProviderRateLimit) Error() string {
 }
 
 // ProviderTransient indicates a 5xx or otherwise retryable upstream
-// failure. The retry wrapper retries with backoff.
+// failure. The retry wrapper retries with backoff. RetryAfter mirrors the
+// rate-limit semantics: some upstreams attach Retry-After to a 503 to
+// signal a maintenance window — the retry wrapper honours it the same way.
 type ProviderTransient struct {
 	Provider   string
 	StatusCode int
 	Body       string
+	RetryAfter time.Duration
 }
 
 func (e *ProviderTransient) Error() string {
@@ -245,7 +251,7 @@ func (o *OpenAI) Complete(ctx context.Context, req Request) (Response, error) {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return Response{}, classifyHTTPError(o.Name(), resp.StatusCode, respBody)
+		return Response{}, classifyHTTPError(o.Name(), resp.StatusCode, resp.Header, respBody)
 	}
 
 	var parsed chatResponse
@@ -416,15 +422,63 @@ func mapFinishReason(r string) string {
 // retry wrapper recognises. The body is included (truncated) so log output
 // surfaces the upstream's error message — auth failures in particular are
 // often "invalid_api_key" or "invalid model X" which the user needs to see.
-func classifyHTTPError(provider string, status int, body []byte) error {
+//
+// For 429/5xx the Retry-After header is parsed (both delta-seconds and the
+// HTTP-date form per RFC 7231 §7.1.3) and stitched onto the typed error so
+// the retry wrapper can honour the upstream's pacing hint instead of
+// blindly using exponential backoff.
+func classifyHTTPError(provider string, status int, header http.Header, body []byte) error {
 	switch {
 	case status == http.StatusTooManyRequests:
-		return &ProviderRateLimit{Provider: provider, StatusCode: status, Body: string(body)}
+		return &ProviderRateLimit{
+			Provider:   provider,
+			StatusCode: status,
+			Body:       string(body),
+			RetryAfter: parseRetryAfter(header.Get("Retry-After")),
+		}
 	case status >= 500:
-		return &ProviderTransient{Provider: provider, StatusCode: status, Body: string(body)}
+		return &ProviderTransient{
+			Provider:   provider,
+			StatusCode: status,
+			Body:       string(body),
+			RetryAfter: parseRetryAfter(header.Get("Retry-After")),
+		}
 	default:
 		return &ProviderPermanent{Provider: provider, StatusCode: status, Body: string(body)}
 	}
+}
+
+// parseRetryAfter understands both forms of the Retry-After header:
+//   - delta-seconds, e.g. "120"
+//   - HTTP-date,    e.g. "Wed, 21 Oct 2026 07:28:00 GMT"
+//
+// Returns 0 (i.e. "no hint") when the header is missing or malformed; the
+// caller should fall back to its default backoff in that case. Negative or
+// past dates also collapse to 0 so a misconfigured upstream cannot trick
+// the client into a busy loop.
+func parseRetryAfter(v string) time.Duration {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0
+	}
+	// delta-seconds: a non-negative integer.
+	var secs int64
+	if _, err := fmt.Sscanf(v, "%d", &secs); err == nil && fmt.Sprintf("%d", secs) == v {
+		if secs <= 0 {
+			return 0
+		}
+		return time.Duration(secs) * time.Second
+	}
+	// HTTP-date (RFC 7231 references RFC 7232's Date format, which is what
+	// http.ParseTime accepts — IMF-fixdate, RFC 850, asctime).
+	if t, err := http.ParseTime(v); err == nil {
+		d := time.Until(t)
+		if d <= 0 {
+			return 0
+		}
+		return d
+	}
+	return 0
 }
 
 // truncate returns s shortened to at most n bytes with an ellipsis when
