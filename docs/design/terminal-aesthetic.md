@@ -198,3 +198,42 @@ In-place ANSI redraw every 2s. 새 event 추가 시 위에 1 line slide-up.
 | `[██████░░░░] 60%` | text 위주 — `▰▰▰▰▰▰▱▱▱▱` (Unicode block)이 더 sharp |
 | 회전 무지개 spinner | distracting |
 | 유머/재치 메시지 ("oops!", "let me think...") | 며칠짜리 작업의 진지함 깸 |
+
+## 11. Modals
+
+Modals follow the **same rounded light frame** as the TUI outer chrome (`╭ ╮ ╰ ╯ ─ │`). Padding 1×2 (rows × cols). Title prefix `╭─ <Title> ` flush left.
+
+| 종류 | 경계 | 용도 |
+|---|---|---|
+| Permission ask | light rounded | 6-tier allow/deny choice (Phase 12 contract) |
+| Checkpoints | light rounded | timeline list + restore |
+| Stuck warn | heavy double `╔═╗ ║ ╚═╝` | only when 3-strategy recovery exhausted |
+
+**Footer hint** inside every modal: dim, `·` separated, e.g. `↑/↓ navigate · enter restore · esc close`.
+
+A selected row inside a modal uses the `›` arrow glyph (accent-info) flush left, not background highlight. Background fills inside modals are forbidden.
+
+## 12. Activity filter taxonomy
+
+The Activity pane defaults to **milestones** — events that mark progress, not noise. Toggling with `t` flips to **all events** (firehose).
+
+| Filter | Event types |
+|---|---|
+| milestones (default) | `iteration_start`, `verify_run`, `verify_result`, `checkpoint_committed`, `stuck_detected`, `stuck_recovered`, `stuck_unrecovered`, `compact_done`, `run_done`, `run_max_iterations`, `run_error`, `permission_ask`, `permission_denied` |
+| all | every emitted event |
+
+Each line is rendered:
+
+```
+▏ HH:MM  iter N  <verb> <one-line summary>
+```
+
+`verb` is derived from event type — never the raw type. e.g. `tool_call(bash …)` → `bash "<truncated cmd>"`, `verify_result` with all-pass → `verify ✓ N checks`, `stuck_detected` → `stuck <pattern>`.
+
+The bottom-most line shows the spinner (`⠋⠙⠹…`) followed by `thinking…` whenever the most recent event is a `provider_request` without a matching `provider_response`, OR a `tool_call` without a matching `tool_result`.
+
+## 13. Implementation notes (TUI surface plumbing)
+
+The slash-command overlay panel (`/` prompt + last-output box) reuses the rounded light frame. Background highlight on the input prompt is **forbidden** — instead use accent-info on the leading `›` arrow + surface text.
+
+Width-< 80 degraded mode also collapses the slash overlay panel into one line (no border).
