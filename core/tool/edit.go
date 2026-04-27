@@ -32,7 +32,7 @@ const editSchema = `{
 func (e *Edit) Name() string { return "edit" }
 
 func (e *Edit) Description() string {
-	return "Apply one or more SEARCH/REPLACE blocks to files in the workspace. Use this for surgical edits — much safer than write_file which overwrites the whole file. Format: '<path>\\n<<<<<<< SEARCH\\n<old code>\\n=======\\n<new code>\\n>>>>>>> REPLACE\\n'. Multiple blocks for the same or different files are allowed; consecutive blocks for the same file may omit the path."
+	return "Apply one or more SEARCH/REPLACE blocks to files in the workspace. Use this for surgical edits — much safer than write_file which overwrites the whole file. Format: '<path>\\n<<<<<<< SEARCH\\n<old code>\\n=======\\n<new code>\\n>>>>>>> REPLACE\\n'. The filename goes on its own line BEFORE the SEARCH marker; for codex compatibility a 'path: <filename>' prefix is also accepted (the 'path:' part is stripped). Multiple blocks for the same or different files are allowed; consecutive blocks for the same file may omit the path."
 }
 
 func (e *Edit) Schema() json.RawMessage { return json.RawMessage(editSchema) }
