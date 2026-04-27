@@ -203,3 +203,63 @@ run:
 - `core/runner/system_prompt_test.go` — breakdown logging, lazy memory, options merge, 800-token ceiling 가드.
 - 기존 `TestAgentLoop_MemoryBankAppearsAfterInstructions` 업데이트 — iter 1엔 bank 없음, iter 2+엔 instructions → bank 순서 보존.
 - `make test` green.
+
+## Follow-up — Phase 19 Track A (verifier reserve token + always-verify-on-exit)
+
+원래 dogfood 발견 버그: budget 소진이 마지막 LLM 턴 도중 발생 →
+verify 단계 도달 전에 loop이 종료 → 사용자는 "코드가 실제로 작동하는지"
+신호를 받지 못함 (Run 2의 manual rerun으로만 확인 가능).
+
+### 고친 부분
+
+1. **`Budget.reserve_tokens` 신설** (proto field 7).
+   - 기본값: `min(8000, max_total_tokens / 10)` — 큰 예산엔 8k 고정,
+     작은 예산엔 10% 비례. 작은 sub-loop / 테스트 예산에서도 deterministic.
+   - 효과: loop의 "stop now" guard가 `max - reserve` 에서 발동.
+     `max_tokens=400_000` 이면 `effective=392_000` 에서 멈춤; 남은 8k는
+     final verify 실행 + 클로징 "I'm done" 턴을 위해 보존.
+
+2. **Loop exit path 통합 — 무조건 final verify 실행.**
+   기존: `done` (end_turn + verify pass) 만 inline verify 실행.
+   `budget_exhausted`/`max_iterations`/`stuck` 은 verify 없이 즉시 종료.
+   변경: 모든 exit 경로가 post-loop verify 한 번을 거치고,
+   `Result.VerifyAll`을 항상 채워 반환. 사용자는 budget 소진 상황에서도
+   "지금 워크스페이스가 green인가" 즉답 가능.
+
+3. **새 status 값 두 개.**
+   - `budget_exhausted_verify_passed` — budget hit, but post-loop verify
+     came back green (qwen이 dogfood Run 2 에서 실제로 닿은 케이스).
+     호출자는 이걸 `done`처럼 취급해도 됨.
+   - `budget_exhausted_verify_failed` — budget hit AND verify failed.
+     호출자는 verify 실패 detail을 사용자에게 보여줘야 하는 케이스.
+   기존 `budget_exhausted` 는 verifier check가 아예 없을 때만 발동
+   (legacy fallback — 옛 fixture/대시보드와의 prefix-match 호환 유지).
+
+### 새 상태 별 샘플 (test fixture 출력)
+
+| 시나리오 (cap=100, reserve=8) | Status | Iterations | Tokens | VerifyAll |
+|---|---|---:|---:|---|
+| iter1=50 → end_turn → verify pass | `done` | 2 | 54 | `[ok=true]` |
+| iter1=95 → reserve guard, verify pass | `budget_exhausted_verify_passed` | 1 | 95 | `[ok=true]` |
+| iter1=95 → reserve guard, verify fail | `budget_exhausted_verify_failed` | 1 | 95 | `[x=false]` |
+| no token cap, max_iter=2, verify fail | `max_iterations` | 2 | 400 | `[x=false]` |
+
+### 테스트
+
+- `core/runner/runner_budget_test.go` —
+  - `TestAgentLoop_BudgetReserve_VerifyPasses_StatusDone` (case 1)
+  - `TestAgentLoop_BudgetExhausted_VerifyFails_NewStatus` (case 2)
+  - `TestAgentLoop_BudgetExhausted_VerifyPasses_NewStatus` (case 3)
+  - `TestAgentLoop_NoBudget_NoReserveBehavior` (case 4 — backwards compat)
+  - `TestAgentLoop_BudgetReserve_DefaultScaling` — 기본 8k vs `max/10` 정책.
+- 기존 budget 테스트 업데이트 — 작은 캡 (100 tokens) 시나리오는
+  `ReserveTokens: 1` 명시해서 default 8k가 dominate 못하게 pin.
+- `make build` + `make test` + `make e2e-all` 모두 green.
+
+### Backwards compat 확인
+
+- `MaxTotalTokens` 미설정: reserve 무관, 기존 `max_iterations` exit 그대로.
+- `MaxTotalTokens` 설정 + `ReserveTokens` 미설정: 자동 `min(8000, max/10)` 적용.
+- 기존 `BudgetReason` 필드 (`"tokens"` | `"cost"`)는 그대로 — 새 status들도
+  같은 `BudgetReason` prefix를 채움. 옛 dashboard가 prefix-match 한다면
+  그대로 작동.
