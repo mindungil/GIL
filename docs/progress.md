@@ -4,7 +4,7 @@
 
 ## 현재 페이즈
 
-**Phase 12: In-session UX** (완료 — 2026-04-26). 다음 → Phase 13 (배포 + stance 문서).
+**Phase 13: Distribution + stance** (완료 — 2026-04-27). v0.1.0-alpha release tag prep 완료. 첫 release tag 생성은 user-driven.
 
 **Phase 0: 설계** (완료)
 
@@ -140,6 +140,7 @@
 | 2026-04-26 | Phase 7 (Edit/Patch/Permission/TUI) 완료 — 16 tasks. core/edit (Aider editblock_coder.py 4-tier MatchEngine + DSL parser + find_similar_lines hint, edit tool). core/patch (Codex apply-patch parser + applier with seek_sequence 3-tier, apply_patch tool). core/permission (OpenCode evaluate.ts + wildcard.ts: last-wins glob with " *" 트레일링 옵셔널 quirk; AgentLoop gate; spec.risk.autonomy 기반 rule generator FULL/ASK_DESTRUCTIVE/ASK_PER_ACTION/PLAN_ONLY). tui (Bubbletea 3-pane + live event tail + permission_ask 모달 + AnswerPermission RPC, AskCallback 60s timeout). Stuck SubagentBranch 실작동 (read-only sub-loop, AgentLoop.RunSubagent 어댑터). runtime/docker (per-command exec wrapper + Container lifecycle). e2e7 (edit + apply_patch + ASK_DESTRUCTIVE rm 차단 sanity) 통과. e2e-all 7 페이즈 통과. 각 reference lift는 commit 메시지에 출처 명기. |
 | 2026-04-26 | Phase 8 (Exec/MCP/SSH/Gateway) 완료 — 9 tasks. core/exec.Recipe + Runner (Hermes code_execution_tool.py lift): 다단계 도구 압축, 중간 결과는 LLM context에서 숨기고 templated summary만 노출. exec tool. mcp/gilmcp 서버 (hand-rolled JSON-RPC 2.0 over stdio; 3 tools). core/mcp 클라이언트 (Goose subprocess 패턴 lift). runtime/ssh (per-command ssh exec wrapper). HTTP/JSON gateway via grpc-gateway (gild --http :PORT). e2e8 (exec + HTTP curl + gilmcp 핸드셰이크) 통과. dogfood 절차 문서화. e2e-all 8 페이즈 통과. |
 | 2026-04-26 | Phase 9 (Remote sync / Cloud / Soak / Polish) 완료 — 13 tasks. runtime/ssh.Syncer (rsync Push/Pull) + RunService Push 전/Pull 후 → SSH 백엔드 file ops 제한 해소. runtime/cloud.Provider 인터페이스 + runtime/modal + runtime/daytona stubs (env var 게이팅; 실제 deployment는 Phase 10). proto WorkspaceBackend MODAL=6/DAYTONA=7. run-soak mock + e2e9 (30턴 soak; 122 events, 10+ files, memory bank evolved, no panic). gild --user 데이터 분리, --metrics Prometheus 엔드포인트 (6 metrics: iterations/compact/stuck/tool_calls/sessions_running/build_info). README.md + docs/install.md 폴리시. e2e-all 9 페이즈 통과. |
+| 2026-04-27 | Phase 13 (Distribution + stance) 완료 — install.sh + gil update + docs/distribution.md + SECURITY/PRIVACY/CoC/CONTRIBUTING + core/version (build-time ldflags + runtime/debug.BuildInfo dev fallback) + gil/gild/giltui/gilmcp --version + CHANGELOG.md (Keep a Changelog, v0.1.0-alpha). Makefile + .goreleaser.yaml ldflags 둘 다 wiring. 첫 release tag 생성은 user-driven (`git tag v0.1.0-alpha && git push --tags`). e2e-all 14 페이즈 통과. |
 
 ## 차용 출처 (코드/패턴)
 
@@ -292,6 +293,20 @@
 - **--output json global flag** (T13): cobra persistent flag — events/status/mcp list/auth list/cost/stats가 JSON 모드 지원 (외부 파이프라인 + CI 통합). 명령별 `--json` flag는 백워드 컴팻 유지.
 - **검증**: `make e2e-all` 14 phase 모두 통과 (1-9 + 10-modal/daytona/oidc + 11-freshinstall + 12-in-session-ux). e2e12: AGENTS.md discovery (event grep) + mcp add/list/remove + cost (synthetic events) + stats + export→import 라운드트립 + project config inheritance.
 - **다음 단계**: Phase 13 — 배포 채널 (install.sh + gil update) + SECURITY/PRIVACY/CoC/CONTRIBUTING + CHANGELOG + first release tag prep.
+
+## Phase 13 산출물 요약 (2026-04-27)
+
+- **install.sh**: POSIX bash 기반 curl-pipe installer. GitHub releases/latest redirect 으로 latest tag 결정 (API rate limit 회피). GoReleaser archive name template 매칭. /usr/local/bin/.gil-installer-method 마커로 어떤 채널로 설치됐는지 추적. Env override (GIL_INSTALL_REPO/BIN_DIR/VERSION).
+- **gil update**: installer-method-aware. script → install.sh 재호출, brew → brew upgrade, manual → 친절한 에러. --check 으로 최신 tag 확인. 16 hermetic 테스트 (네트워크/shellout seam mock).
+- **docs/distribution.md**: 3 채널 비교 (curl-installer / homebrew tap / go install) + 추천 매트릭스 + 마커 파일 컨벤션.
+- **SECURITY.md**: threat model (gil이 보호하는 것 / 보호하지 않는 것), 보고 채널 (GitHub Security Advisory + email), 7-day response / 30-day fix target, best practices (autonomy 다이얼, sandbox, 0600 keys, OIDC).
+- **PRIVACY.md**: local-first stance — telemetry 0, 모든 데이터는 $XDG_*/gil/ 안. LLM provider 에 가는 데이터는 명시 + 각 provider privacy policy 링크. update check만 GitHub API 호출 (anonymous).
+- **CODE_OF_CONDUCT.md**: 짧은 정책 + canonical Contributor Covenant 2.1 링크.
+- **CONTRIBUTING.md**: 개발 환경 설정, 변경 워크플로 (이슈 → 브랜치 → 플랜 → 레퍼런스 lift discipline → 테스트 → PR 체크리스트), 모듈 레이아웃 표.
+- **core/version + gil --version**: build-time ldflags (Version/Commit/BuildDate) — `-X 'github.com/jedutools/gil/core/version.Version=...'` 등 4개 바이너리 동시 stamp. dev fallback (`runtime/debug.ReadBuildInfo` → Main.Version + vcs.revision + vcs.time). Makefile (`VERSION ?= git describe --tags --always --dirty`) + .goreleaser.yaml (`{{ .Version }}` / `{{ .Commit }}` / `{{ .Date }}`) 둘 다 wiring. cobra `RootCommand.Version` + `--version` flag 4개 바이너리 (gil/gild/giltui/gilmcp) 모두 동작. doctor 헤더 + Prometheus build_info gauge도 동일 source-of-truth.
+- **CHANGELOG.md**: Keep a Changelog 형식, v0.1.0-alpha 항목 — Phase 1-13 전체 산출물 카테고리화 (Core engine / Harness UX / In-session UX / Distribution).
+- **검증**: `make e2e-all` 14 phase 모두 통과. v0.1.0-alpha tag 생성 준비 완료 (사용자가 `git tag v0.1.0-alpha && git push --tags` 으로 트리거).
+- **다음 단계 (외부)**: 첫 release tag 생성, Homebrew tap repo 생성, VS Code Marketplace 게시, 실제 dogfood (ANTHROPIC_API_KEY 사용자 결정).
 
 ## 미해결 / 추후 결정
 

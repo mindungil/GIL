@@ -2,7 +2,7 @@
 
 자율 코딩 하네스. 길고 철저한 인터뷰로 모든 요구사항을 추출한 뒤, 며칠이 걸리더라도 사용자에게 다시 묻지 않고 끝까지 작업을 수행하는 CLI 에이전트.
 
-**상태**: Phase 12 완료. e2e 14 단계 전부 green. AGENTS.md 디스커버리 + MCP registry + 슬래시 명령 + project-local config + permission 영속화 + cost/export. fresh install + in-session UX 모두 충족.
+**상태**: Phase 13 완료. e2e 14 단계 전부 green. v0.1.0-alpha release tag 준비 완료. fresh install + in-session UX + distribution 모두 충족. `gil --version` / `gil update` / curl-installer 작동.
 
 ## 빠른 시작
 
@@ -155,10 +155,16 @@ In Phase 9 the "Ask" path uses TUI dialog if connected; non-interactive runs fal
 
 - [docs/design.md](docs/design.md) — 전체 설계 narrative
 - [docs/install.md](docs/install.md) — 자세한 설치 가이드
+- [docs/distribution.md](docs/distribution.md) — 배포 채널 비교 (curl-installer / homebrew / go install)
 - [docs/progress.md](docs/progress.md) — Phase별 산출물 + 결정 이력
 - [docs/research/2026-04-25-reference-harnesses-deep-dive.md](docs/research/2026-04-25-reference-harnesses-deep-dive.md) — 7개 참조 도구 라인 레벨 분석
 - [docs/dogfood/](docs/dogfood/) — 자율 실행 사례
 - [docs/plans/](docs/plans/) — Phase별 구현 계획 (history)
+- [CHANGELOG.md](CHANGELOG.md) — release notes (Keep a Changelog)
+- [SECURITY.md](SECURITY.md) — security policy + 보고 채널
+- [PRIVACY.md](PRIVACY.md) — privacy stance (no telemetry)
+- [CONTRIBUTING.md](CONTRIBUTING.md) — contribution workflow + 모듈 레이아웃
+- [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) — Contributor Covenant 2.1
 
 ## 참조 (lift 출처)
 
