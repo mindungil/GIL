@@ -7,7 +7,19 @@ once it reaches v1.0.
 
 ## [Unreleased]
 
-(Nothing yet — landing for the v0.1.0-alpha tag.)
+### Added
+
+- `docs/releases/v0.1.0-alpha.md` — landing-page release notes for the
+  v0.1.0-alpha tag (elevator pitch + highlights + install + quickstart
+  + provider matrix + Phase 17 follow-ups + acknowledgments).
+- `docs/dogfood/2026-04-27-second-run-end-to-end.md` — second dogfood
+  run; full daemon loop end-to-end (gil new → frozen spec → gil run →
+  verify → checkpoint), exercising the same code paths the live qwen
+  run would. Surfaced a real bug in the milestone summarizer's
+  failure-mode handling.
+- `vscode/PACKAGING.md` — verified `.vsix` build smoke (118 KB, 0 TS
+  errors) plus three Phase 17 follow-ups for marketplace readiness
+  (missing `repository`, missing `LICENSE`, protos not bundled).
 
 ## [0.1.0-alpha] — 2026-04-27
 
