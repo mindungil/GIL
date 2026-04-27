@@ -104,6 +104,7 @@ func Root() *cobra.Command {
 	root.AddCommand(costCmd())
 	root.AddCommand(statsCmd())
 	root.AddCommand(mcpCmd())
+	root.AddCommand(updateCmd())
 	root.AddCommand(newCompletionCmd(root))
 	return root
 }
