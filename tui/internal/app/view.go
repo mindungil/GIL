@@ -38,6 +38,10 @@ func (m *Model) View() string {
 		modal := renderCheckpointModal(min(m.width-4, 70), m.checkpoints)
 		return lipgloss.JoinVertical(lipgloss.Left, base, "", modal)
 	}
+	if m.pendingClarify != nil {
+		modal := renderClarifyModal(m.pendingClarify, &m.clarifyState, min(m.width-4, 70))
+		return lipgloss.JoinVertical(lipgloss.Left, base, "", modal)
+	}
 	if m.pendingAsk != nil {
 		modal := renderPermissionModal(m.pendingAsk, min(m.width-4, 70))
 		return lipgloss.JoinVertical(lipgloss.Left, base, "", modal)
@@ -278,6 +282,13 @@ func (m *Model) renderFooter() string {
 	}
 	if m.pendingAsk != nil {
 		keys = []string{"a/s/A allow", "d/D deny", "esc cancel"}
+	}
+	if m.pendingClarify != nil {
+		if m.clarifyState.mode == clarifyModeType {
+			keys = []string{"type answer", "enter send", "esc back"}
+		} else {
+			keys = []string{"1..N pick", "t type", "esc cancel"}
+		}
 	}
 	body := strings.Join(keys, "  "+g.Dot+"  ")
 	if m.err != "" {

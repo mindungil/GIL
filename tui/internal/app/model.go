@@ -51,6 +51,12 @@ type Model struct {
 
 	pendingAsk *pendingAskMsg // when non-nil, permission modal is shown
 
+	// pendingClarify holds the latest clarify_requested. When non-nil,
+	// the clarify modal is shown instead of (or above) other surfaces.
+	// clarifyState owns the typing buffer so model resets clear it.
+	pendingClarify *pendingClarifyMsg
+	clarifyState   clarifyModalState
+
 	// slash holds the slash-command registry + transient input/output
 	// state. Constructed by New(); nil-safe in unit tests that build a
 	// Model literal without dialing gild.
