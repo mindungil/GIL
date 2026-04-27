@@ -15,6 +15,10 @@ type KeyMap struct {
 	// DismissSlash dismisses the previous slash-command output panel
 	// when no input prompt is open.
 	DismissSlash key.Binding
+
+	// Phase 14 additions.
+	Checkpoints  key.Binding // 'c' opens the checkpoint timeline modal
+	ToggleFilter key.Binding // 't' toggles activity filter (milestones ↔ all)
 }
 
 // DefaultKeys returns the default key bindings.
@@ -27,5 +31,7 @@ func DefaultKeys() KeyMap {
 		Enter:        key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "select")),
 		Slash:        key.NewBinding(key.WithKeys("/", ":"), key.WithHelp("/", "command")),
 		DismissSlash: key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "dismiss")),
+		Checkpoints:  key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "checkpoints")),
+		ToggleFilter: key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "toggle activity filter")),
 	}
 }

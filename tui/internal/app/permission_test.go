@@ -70,25 +70,27 @@ func TestPermissionKeyToDecision_UnknownKey_ReturnsUnspecified(t *testing.T) {
 }
 
 // TestOverlayModal_RendersAllSixOptions ensures the visible modal text
-// shows every option a user can press. If a designer trims one of the
-// labels they must update the test in lockstep — the test exists so the
-// modal can never silently lose an option without us noticing.
+// shows every option a user can press. Phase 14 restyle moved the
+// renderer to view.go's renderPermissionModal and switched labels to
+// lowercase per the aesthetic spec §11.
 func TestOverlayModal_RendersAllSixOptions(t *testing.T) {
+	SetNoColor(true)
+	defer SetNoColor(false)
 	ask := &pendingAskMsg{
 		SessionID: "s1", RequestID: "r1",
 		Tool: "bash", Key: "rm -rf /tmp/x",
 	}
-	out := overlayModal("base", ask, 120)
+	out := renderPermissionModal(ask, 120)
 	for _, snippet := range []string{
 		"agent wants to run",
 		"bash",
 		"rm -rf /tmp/x",
-		"[a] Allow once",
-		"[s] Allow session",
-		"[A] Always allow",
-		"[d] Deny once",
-		"[D] Always deny",
-		"[Esc] Cancel",
+		"[a] allow once",
+		"[s] allow session",
+		"[A] allow always",
+		"[d] deny once",
+		"[D] deny always",
+		"[esc] cancel",
 	} {
 		require.Truef(t, strings.Contains(out, snippet),
 			"modal output is missing %q\nfull output:\n%s", snippet, out)

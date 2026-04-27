@@ -1,190 +1,366 @@
 package app
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
+	"os/user"
+	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/mindungil/gil/core/version"
 )
 
-var (
-	modalBorder = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("11")).
-			Padding(1, 2).
-			Background(lipgloss.Color("0")).
-			Foreground(lipgloss.Color("15"))
-)
-
-var (
-	titleStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12"))
-	selectedRow = lipgloss.NewStyle().Foreground(lipgloss.Color("0")).Background(lipgloss.Color("12"))
-	paneBorder  = lipgloss.NewStyle().Border(lipgloss.NormalBorder(), false, true, false, false).
-			BorderForeground(lipgloss.Color("8")).Padding(0, 1)
-	statusStyle = lipgloss.NewStyle().Background(lipgloss.Color("8")).Foreground(lipgloss.Color("15")).Padding(0, 1)
-)
-
-// View implements tea.Model.
+// View implements tea.Model. The 4-pane mission-control layout is per
+// spec §6 (Layout — 4-pane TUI). Modals overlay below the body.
 func (m *Model) View() string {
-	base := m.viewBase()
-	// Slash prompt + last-output panel sit between the body and the
-	// permission modal so users still see them while a command is in
-	// flight; permission asks remain on top because they require an
-	// immediate y/n response.
-	base = overlaySlash(base, m.slash, m.width)
-	if m.pendingAsk == nil {
-		return base
+	if m.width == 0 {
+		// First render before WindowSizeMsg.
+		return styleDim("loading" + Glyphs().Ellipsis)
 	}
-	return overlayModal(base, m.pendingAsk, m.width)
+
+	// Degraded mode: width < 80 → hide sessions pane, main only.
+	narrow := m.width < 80
+
+	header := renderHeader(m.width)
+	body := m.renderBody(narrow)
+	footer := m.renderFooter()
+	base := lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
+
+	// Slash overlay (input prompt + last-output panel) sits between body
+	// and modal so the user can still see them while a command is in
+	// flight; permission/checkpoint modals stay on top.
+	base = overlaySlash(base, m.slash, m.width)
+
+	if m.checkpoints.Open {
+		modal := renderCheckpointModal(min(m.width-4, 70), m.checkpoints)
+		return lipgloss.JoinVertical(lipgloss.Left, base, "", modal)
+	}
+	if m.pendingAsk != nil {
+		modal := renderPermissionModal(m.pendingAsk, min(m.width-4, 70))
+		return lipgloss.JoinVertical(lipgloss.Left, base, "", modal)
+	}
+	return base
 }
 
-// viewBase renders the normal TUI without any modal overlay.
-func (m *Model) viewBase() string {
-	if m.width == 0 {
-		// First render before WindowSizeMsg
-		return "loading…"
+// renderHeader composes the single-line top bar per spec §6:
+//   ╭─ G I L   ─  v0.1.0-alpha  ─────────────  user  ●  host ─╮
+//
+// We don't actually wrap the header in box-drawing characters because
+// the body already brings its own borders; instead we render a plain
+// line that visually groups the same information.
+func renderHeader(width int) string {
+	g := Glyphs()
+	leftLabel := styleHeader("G I L") + "   " + styleDim(version.String())
+	uname := "user"
+	if u, err := user.Current(); err == nil && u.Username != "" {
+		uname = u.Username
 	}
-	leftWidth := m.width / 3
-	if leftWidth < 30 {
-		leftWidth = 30
+	host, _ := os.Hostname()
+	if host == "" {
+		host = "local"
+	}
+	right := styleSurface(uname) + "  " + styleInfo(g.Running) + "  " + styleDim(host)
+	return padBetween(leftLabel, right, width)
+}
+
+// padBetween renders left and right separated by exactly enough spaces
+// that their concatenation has visual width `total`. Strips ANSI from
+// the visual length calculation so the math works on styled strings.
+func padBetween(left, right string, total int) string {
+	lw := lipgloss.Width(left)
+	rw := lipgloss.Width(right)
+	gap := total - lw - rw
+	if gap < 1 {
+		gap = 1
+	}
+	return left + strings.Repeat(" ", gap) + right
+}
+
+// renderBody composes the 4-pane (or 1-pane in narrow mode) body.
+func (m *Model) renderBody(narrow bool) string {
+	// Header and footer each consume 1 row; the body fills the rest.
+	bodyHeight := m.height - 2
+	if bodyHeight < 8 {
+		bodyHeight = 8
+	}
+	if narrow {
+		mainWidth := m.width
+		return m.renderMainColumn(mainWidth, bodyHeight)
+	}
+	leftWidth := m.width / 4
+	if leftWidth < 22 {
+		leftWidth = 22
 	}
 	rightWidth := m.width - leftWidth - 1
 
-	paneHeight := m.height - 2 // reserve status bar + title
+	left := m.renderSessionsPane(leftWidth, bodyHeight)
+	right := m.renderMainColumn(rightWidth, bodyHeight)
+	return lipgloss.JoinHorizontal(lipgloss.Top, left, right)
+}
 
-	left := m.renderSessionList(leftWidth, paneHeight)
-	right := m.renderSessionDetail(rightWidth, paneHeight)
-	body := lipgloss.JoinHorizontal(lipgloss.Top,
-		paneBorder.Width(leftWidth).Height(paneHeight).Render(left),
-		right,
-	)
+// renderMainColumn stacks the three right-side sub-panes (Spec/Progress,
+// Activity, Memory) inside a single column.
+func (m *Model) renderMainColumn(width, height int) string {
+	// Allocate height: progress=10, activity=fills, memory=8.
+	progressH := 10
+	memoryH := 8
+	activityH := height - progressH - memoryH
+	if activityH < 4 {
+		activityH = 4
+	}
 
-	title := titleStyle.Render(" gil ") + lipgloss.NewStyle().Faint(true).Render(" — autonomous coding harness")
-	status := m.renderStatus()
-	return lipgloss.JoinVertical(lipgloss.Left, title, body, status)
+	pd := m.progress
+	if pd.Goal == "" && len(m.sessions) > 0 && m.selectedIdx < len(m.sessions) {
+		s := m.sessions[m.selectedIdx]
+		pd.Goal = s.GoalHint
+		pd.Iter = s.CurrentIteration
+		if pd.MaxIter == 0 {
+			pd.MaxIter = 100
+		}
+		pd.TokensIn = s.CurrentTokens
+		if pd.Autonomy == "" {
+			pd.Autonomy = "ASK_DESTRUCTIVE"
+		}
+	}
+	progress := paneBox("Spec & Progress", width, progressH,
+		renderProgressPane(width-4, pd))
+
+	rows := activityFromEvents(m.rawEvents, m.activityFilter, max(activityH-2, 1))
+	activityTitle := fmt.Sprintf("Activity (%s)", m.activityFilter.String())
+	activity := paneBox(activityTitle, width, activityH,
+		renderActivityPane(width-4, activityH-2, rows, m.spinFrame))
+
+	memory := paneBox(memoryPaneTitle(m.memory), width, memoryH,
+		renderMemoryPane(width-4, m.memory))
+
+	return lipgloss.JoinVertical(lipgloss.Left, progress, activity, memory)
+}
+
+// renderSessionsPane is the left 25% pane.
+func (m *Model) renderSessionsPane(width, height int) string {
+	g := Glyphs()
+	var sb strings.Builder
+	if len(m.sessions) == 0 {
+		sb.WriteString(styleDim("(no sessions — run 'gil new' first)"))
+	}
+	for i, s := range m.sessions {
+		shortID := s.ID
+		if len(shortID) > 8 {
+			shortID = shortID[:8]
+		}
+		statusWord := s.Status
+		if len(statusWord) > 7 {
+			statusWord = statusWord[:7]
+		}
+		row1 := fmt.Sprintf("%s  %s", statusGlyph(g, s.Status), styleSurface(shortID))
+		row2 := fmt.Sprintf("    %s  %s",
+			styleDim(statusWord),
+			styleDim(fmt.Sprintf("iter %d", s.CurrentIteration)))
+		if i == m.selectedIdx {
+			row1 = styleSelectedBg(stripPrefixSpace(row1, width-4))
+			row2 = styleSelectedBg(stripPrefixSpace(row2, width-4))
+		}
+		sb.WriteString(row1)
+		sb.WriteString("\n")
+		sb.WriteString(row2)
+		sb.WriteString("\n\n")
+	}
+	return paneBox("Sessions", width, height, sb.String())
+}
+
+// stripPrefixSpace pads (or truncates) a styled string to the given
+// visual width so background-color highlight covers the full row.
+func stripPrefixSpace(s string, width int) string {
+	w := lipgloss.Width(s)
+	if w >= width {
+		return s
+	}
+	return s + strings.Repeat(" ", width-w)
+}
+
+// paneBox wraps content in the canonical rounded light frame with the
+// given title baked into the top border. The frame has 0×1 padding (no
+// vertical pad — the content already provides spacing).
+func paneBox(title string, width, height int, content string) string {
+	frame := paneFrame(title)
+	// Title strip glued onto top border: "╭─ Title ─...─╮"
+	// We render the frame normally (lipgloss doesn't support inline
+	// titles), then overlay the title onto the top border line via a
+	// post-hoc replace.
+	rendered := frame.Width(width - 2).Height(height - 2).Render(content)
+	if title == "" {
+		return rendered
+	}
+	return injectTitle(rendered, title)
+}
+
+// injectTitle overwrites the top border of a pre-rendered pane with
+// "╭─ <title> ─...─╮" so the section title sits inline. Operates on the
+// first line only; falls through if the line doesn't look like a
+// rounded-border top.
+func injectTitle(box, title string) string {
+	idx := strings.Index(box, "\n")
+	if idx < 0 {
+		return box
+	}
+	first := box[:idx]
+	rest := box[idx:]
+	// Find the unicode column count of the original line.
+	origW := lipgloss.Width(first)
+	// Build replacement: "╭─ <title> " then dashes then "╮".
+	g := Glyphs()
+	left := "╭" + g.HSep + " " + styleHeader(title) + " "
+	if asciiMode {
+		left = "+" + "- " + styleHeader(title) + " "
+	}
+	leftW := lipgloss.Width(left)
+	if leftW >= origW-1 {
+		return box // not enough room — leave untouched.
+	}
+	dashes := strings.Repeat(g.HSep, origW-leftW-1)
+	if asciiMode {
+		dashes = strings.Repeat("-", origW-leftW-1)
+	}
+	corner := "╮"
+	if asciiMode {
+		corner = "+"
+	}
+	newLine := left + styleDim(dashes) + styleDim(corner)
+	return newLine + rest
+}
+
+// renderFooter is the dim keymap line per spec §6.
+func (m *Model) renderFooter() string {
+	g := Glyphs()
+	keys := []string{
+		"q quit",
+		"r refresh",
+		"/ commands",
+		"c checkpoints",
+		"t toggle activity",
+	}
+	if m.checkpoints.Open {
+		keys = []string{"↑/↓ select", "enter restore", "esc close"}
+	}
+	if m.pendingAsk != nil {
+		keys = []string{"a/s/A allow", "d/D deny", "esc cancel"}
+	}
+	body := strings.Join(keys, "  "+g.Dot+"  ")
+	if m.err != "" {
+		body = styleAlert(g.Failed+" "+m.err) + "  " + g.Dot + "  " + body
+	}
+	return styleDim(body)
+}
+
+// renderPermissionModal is the restyled 6-tier permission ask per
+// spec §11. Light rounded frame, no bg fill, accent on the headline.
+func renderPermissionModal(ask *pendingAskMsg, width int) string {
+	header := styleCritical("Permission")
+	intro := styleSurface("The agent wants to run")
+	cmd := styleEmphasis(ask.Tool) + " " + styleSurface(truncate(ask.Key, max(width-12, 10)))
+	row1 := strings.Join([]string{
+		"[a] allow once",
+		"[s] allow session",
+		"[A] allow always",
+	}, "    ")
+	row2 := strings.Join([]string{
+		"[d] deny once",
+		"                ",
+		"[D] deny always",
+	}, "    ")
+	footer := styleDim("[esc] cancel (= deny once)")
+	body := strings.Join([]string{
+		header,
+		"",
+		intro,
+		"",
+		"   " + cmd,
+		"",
+		row1,
+		row2,
+		"",
+		footer,
+	}, "\n")
+	frame := paneFrame("").Padding(1, 2)
+	return frame.Render(body)
 }
 
 // overlaySlash appends the slash-command input prompt and/or the last
 // command's output below the base view. nil-safe so unit tests that
 // build a Model literal without slash state still render.
+//
+// Per spec §13: rounded light frame, no bg fill on the prompt; accent
+// only on the leading `›` arrow.
 func overlaySlash(base string, st *slashState, w int) string {
 	if st == nil {
 		return base
 	}
 	out := base
+	g := Glyphs()
 	if st.output != "" {
-		// Faint border to distinguish from the permission modal (yellow).
-		panel := lipgloss.NewStyle().
-			Border(lipgloss.NormalBorder()).
-			BorderForeground(lipgloss.Color("8")).
-			Padding(0, 1).
-			Render(st.output)
+		panel := paneFrame("").Render(st.output)
 		out = lipgloss.JoinVertical(lipgloss.Left, out, panel)
 	}
 	if st.inputting {
-		prompt := lipgloss.NewStyle().
-			Background(lipgloss.Color("4")).
-			Foreground(lipgloss.Color("15")).
-			Padding(0, 1).
-			Width(w).
-			Render("/" + st.buffer + "_")
+		prompt := styleEmphasis(g.Arrow) + " " + styleSurface("/"+st.buffer+"_")
 		out = lipgloss.JoinVertical(lipgloss.Left, out, prompt)
 	}
 	return out
 }
 
-// overlayModal appends a permission-request dialog below the base view.
-// (A true center-overlay would require terminal cell arithmetic; the
-// appended-box approach is sufficient — refining the visual placement
-// is a future polish pass.)
-//
-// The six visible options map to permissionKeyToDecision in
-// tui/internal/app/permission.go. The phrasing follows codex's
-// 3-tier ladder (once/session/always) extended symmetrically to the
-// deny side, the way cline's CommandPermissionController organises its
-// allow/deny lists.
-func overlayModal(base string, ask *pendingAskMsg, w int) string {
-	box := modalBorder.Render(fmt.Sprintf(
-		"The agent wants to run: %s %s\n\n"+
-			"[a] Allow once         [s] Allow session      [A] Always allow\n"+
-			"[d] Deny once                                 [D] Always deny\n"+
-			"[Esc] Cancel (deny once)",
-		ask.Tool, truncate(ask.Key, max(w-30, 10)),
-	))
-	return lipgloss.JoinVertical(lipgloss.Left, base, "", box)
-}
-
-func (m *Model) renderSessionList(w, h int) string {
-	var sb strings.Builder
-	sb.WriteString(titleStyle.Render("Sessions") + "\n\n")
-	if len(m.sessions) == 0 {
-		sb.WriteString("(no sessions — run 'gil new' first)")
-		return sb.String()
-	}
-	for i, s := range m.sessions {
-		line := fmt.Sprintf("%-12s %s", s.Status, truncate(s.GoalHint, w-16))
-		if i == m.selectedIdx {
-			line = selectedRow.Render(line)
-		}
-		sb.WriteString(line + "\n")
-	}
-	return sb.String()
-}
-
-func (m *Model) renderSessionDetail(w, h int) string {
-	if len(m.sessions) == 0 || m.selectedIdx >= len(m.sessions) {
-		return "\n  No session selected.\n  Press 'r' to refresh."
-	}
-	s := m.sessions[m.selectedIdx]
-	var sb strings.Builder
-	sb.WriteString(titleStyle.Render("Session "+s.ID) + "\n\n")
-	fmt.Fprintf(&sb, "  Status:       %s\n", s.Status)
-	fmt.Fprintf(&sb, "  Working dir:  %s\n", s.WorkingDir)
-	fmt.Fprintf(&sb, "  Goal:         %s\n", s.GoalHint)
-	if s.CurrentIteration > 0 {
-		fmt.Fprintf(&sb, "  Iteration:    %d\n", s.CurrentIteration)
-	}
-	if s.CurrentTokens > 0 {
-		fmt.Fprintf(&sb, "  Tokens:       %d\n", s.CurrentTokens)
-	}
-	sb.WriteString("\n  Events (live tail):\n")
-	if len(m.events) == 0 {
-		if s.Status == "RUNNING" {
-			sb.WriteString("  (no events yet — waiting for next…)\n")
-		} else {
-			sb.WriteString("  (session not running; live tail unavailable)\n")
-		}
-	} else {
-		// Show last 20 events that fit in the remaining pane height.
-		show := 20
-		if h-15 < show {
-			show = max(0, h-15)
-		}
-		start := len(m.events) - show
-		if start < 0 {
-			start = 0
-		}
-		for _, line := range m.events[start:] {
-			sb.WriteString("  " + line + "\n")
-		}
-	}
-	return sb.String()
-}
-
-func (m *Model) renderStatus() string {
-	keys := "k/↓: down  j/↑: up  r: refresh  /: command  q: quit"
-	if m.err != "" {
-		keys = "ERROR: " + m.err + "    " + keys
-	}
-	return statusStyle.Width(m.width).Render(keys)
-}
-
+// truncate fits s into max visual columns, replacing the tail with the
+// active ellipsis glyph (Unicode `…` or ASCII `...`). Returns s
+// unchanged when it already fits. For very small max (<= 3) we hard-
+// truncate without an ellipsis since the visible savings disappear.
 func truncate(s string, max int) string {
-	if max <= 0 || len(s) <= max {
+	if max <= 0 || lipgloss.Width(s) <= max {
 		return s
 	}
 	if max <= 3 {
+		// Hard truncate; matches the pre-Phase-14 contract used by
+		// existing callers / tests that pass tiny widths.
+		if max > len(s) {
+			max = len(s)
+		}
 		return s[:max]
 	}
-	return s[:max-1] + "…"
+	g := Glyphs()
+	ellipsisW := lipgloss.Width(g.Ellipsis)
+	if max <= ellipsisW {
+		return s[:max]
+	}
+	cut := max - ellipsisW
+	if cut > len(s) {
+		cut = len(s)
+	}
+	return s[:cut] + g.Ellipsis
+}
+
+// max / min helpers (Go 1.21+ has builtins; we keep the explicit forms
+// for clarity in long view-code expressions).
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+// itoa is a tiny strconv shortcut used by the checkpoint notice text.
+func itoa(n int) string { return strconv.Itoa(n) }
+
+// jsonUnmarshalQuiet ignores parse errors — useful for "best-effort"
+// inspection of event payloads where a malformed message must not
+// crash the TUI.
+func jsonUnmarshalQuiet(data []byte, dst any) error {
+	return json.Unmarshal(data, dst)
 }
