@@ -21,6 +21,19 @@ message Session {
   // from in-process run progress; not persisted across restarts.
   int32 current_iteration = 10;
   int64 current_tokens = 11;
+  // Budget caps copied from the frozen spec so client surfaces (TUI /
+  // gil status / gil watch) can render token + cost meters without
+  // each fetching the full FrozenSpec. Zero values mean "no cap on
+  // this dimension" — clients must render the bare value in that
+  // case so legacy specs render unchanged. Populated only when the
+  // session has a frozen spec (CREATED sessions report 0/0).
+  int64 budget_max_tokens = 12;
+  double budget_max_cost_usd = 13;
+  // Sticky flag set by the server when a budget_exceeded event was
+  // observed for this session's most recent run. Lets the visual
+  // surfaces keep the alert glyph after the run has stopped.
+  bool budget_exceeded = 14;
+  string budget_reason = 15; // "tokens" | "cost" | "" — set with budget_exceeded
 }
 
 enum SessionStatus {

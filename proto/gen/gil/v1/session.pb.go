@@ -102,8 +102,21 @@ type Session struct {
 	// from in-process run progress; not persisted across restarts.
 	CurrentIteration int32 `protobuf:"varint,10,opt,name=current_iteration,json=currentIteration,proto3" json:"current_iteration,omitempty"`
 	CurrentTokens    int64 `protobuf:"varint,11,opt,name=current_tokens,json=currentTokens,proto3" json:"current_tokens,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	// Budget caps copied from the frozen spec so client surfaces (TUI /
+	// gil status / gil watch) can render token + cost meters without
+	// each fetching the full FrozenSpec. Zero values mean "no cap on
+	// this dimension" — clients must render the bare value in that
+	// case so legacy specs render unchanged. Populated only when the
+	// session has a frozen spec (CREATED sessions report 0/0).
+	BudgetMaxTokens  int64   `protobuf:"varint,12,opt,name=budget_max_tokens,json=budgetMaxTokens,proto3" json:"budget_max_tokens,omitempty"`
+	BudgetMaxCostUsd float64 `protobuf:"fixed64,13,opt,name=budget_max_cost_usd,json=budgetMaxCostUsd,proto3" json:"budget_max_cost_usd,omitempty"`
+	// Sticky flag set by the server when a budget_exceeded event was
+	// observed for this session's most recent run. Lets the visual
+	// surfaces keep the alert glyph after the run has stopped.
+	BudgetExceeded bool   `protobuf:"varint,14,opt,name=budget_exceeded,json=budgetExceeded,proto3" json:"budget_exceeded,omitempty"`
+	BudgetReason   string `protobuf:"bytes,15,opt,name=budget_reason,json=budgetReason,proto3" json:"budget_reason,omitempty"` // "tokens" | "cost" | "" — set with budget_exceeded
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *Session) Reset() {
@@ -211,6 +224,34 @@ func (x *Session) GetCurrentTokens() int64 {
 		return x.CurrentTokens
 	}
 	return 0
+}
+
+func (x *Session) GetBudgetMaxTokens() int64 {
+	if x != nil {
+		return x.BudgetMaxTokens
+	}
+	return 0
+}
+
+func (x *Session) GetBudgetMaxCostUsd() float64 {
+	if x != nil {
+		return x.BudgetMaxCostUsd
+	}
+	return 0
+}
+
+func (x *Session) GetBudgetExceeded() bool {
+	if x != nil {
+		return x.BudgetExceeded
+	}
+	return false
+}
+
+func (x *Session) GetBudgetReason() string {
+	if x != nil {
+		return x.BudgetReason
+	}
+	return ""
 }
 
 type CreateRequest struct {
@@ -500,7 +541,7 @@ var File_gil_v1_session_proto protoreflect.FileDescriptor
 
 const file_gil_v1_session_proto_rawDesc = "" +
 	"\n" +
-	"\x14gil/v1/session.proto\x12\x06gil.v1\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x1cgoogle/api/annotations.proto\"\xb2\x03\n" +
+	"\x14gil/v1/session.proto\x12\x06gil.v1\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x1cgoogle/api/annotations.proto\"\xdb\x04\n" +
 	"\aSession\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12-\n" +
 	"\x06status\x18\x02 \x01(\x0e2\x15.gil.v1.SessionStatusR\x06status\x129\n" +
@@ -516,7 +557,11 @@ const file_gil_v1_session_proto_rawDesc = "" +
 	"\x0etotal_cost_usd\x18\t \x01(\x01R\ftotalCostUsd\x12+\n" +
 	"\x11current_iteration\x18\n" +
 	" \x01(\x05R\x10currentIteration\x12%\n" +
-	"\x0ecurrent_tokens\x18\v \x01(\x03R\rcurrentTokens\"M\n" +
+	"\x0ecurrent_tokens\x18\v \x01(\x03R\rcurrentTokens\x12*\n" +
+	"\x11budget_max_tokens\x18\f \x01(\x03R\x0fbudgetMaxTokens\x12-\n" +
+	"\x13budget_max_cost_usd\x18\r \x01(\x01R\x10budgetMaxCostUsd\x12'\n" +
+	"\x0fbudget_exceeded\x18\x0e \x01(\bR\x0ebudgetExceeded\x12#\n" +
+	"\rbudget_reason\x18\x0f \x01(\tR\fbudgetReason\"M\n" +
 	"\rCreateRequest\x12\x1f\n" +
 	"\vworking_dir\x18\x01 \x01(\tR\n" +
 	"workingDir\x12\x1b\n" +
