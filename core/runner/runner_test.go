@@ -2293,3 +2293,39 @@ func TestAgentLoop_NoProgress_FiresOnVariedFutileWork(t *testing.T) {
 	require.Greater(t, noProgressDetections, 0,
 		"expected at least one stuck_detected with pattern=NoProgress, events: %v", evs)
 }
+
+// TestSplitBashChain — Phase 22.A bash-chain permission bypass fix.
+// Verifies the chain-decomposer extracts each sub-command's verb so that
+// e.g. "cp x y && mv y z" is gated on BOTH cp and mv (not just cp).
+func TestSplitBashChain(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want []string
+	}{
+		{"empty", "", []string(nil)},
+		{"single", "ls -la", []string{"ls -la"}},
+		{"and", "cp a b && mv c d", []string{"cp a b", "mv c d"}},
+		{"or", "go build || echo failed", []string{"go build", "echo failed"}},
+		{"semicolon", "echo a; echo b", []string{"echo a", "echo b"}},
+		{"pipe", "ls | grep go", []string{"ls", "grep go"}},
+		{"mixed", "cd x && grep -r foo . | head", []string{"cd x", "grep -r foo .", "head"}},
+		{"quoted-and", "echo 'a && b'", []string{"echo 'a && b'"}},
+		{"quoted-pipe", `printf "%s|%s\n" a b`, []string{`printf "%s|%s\n" a b`}},
+		{"escape", `echo \&\& not-a-chain`, []string{`echo \&\& not-a-chain`}},
+		{"empty-segment", "echo a && && echo b", []string{"echo a", "echo b"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := splitBashChain(tc.in)
+			if len(got) != len(tc.want) {
+				t.Fatalf("len mismatch: got %v want %v", got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Errorf("part[%d]: got %q want %q", i, got[i], tc.want[i])
+				}
+			}
+		})
+	}
+}

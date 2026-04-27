@@ -897,8 +897,28 @@ loop:
 
 			if a.Permission != nil {
 				key := permissionKeyFor(tc.Name, tc.Input)
-				decision := a.Permission.Evaluate(tc.Name, key)
+				// bash chain decomposition: a command like "cp x y && mv y z"
+				// has first verb "cp" (allowed) but a chained "mv" (destructive).
+				// Evaluate each chained sub-command's verb separately so the
+				// destructive deny list isn't bypassed via && / ; / || / |.
+				keys := []string{key}
+				if tc.Name == "bash" {
+					if subs := splitBashChain(key); len(subs) > 1 {
+						keys = subs
+					}
+				}
+				decision := permission.DecisionAllow
+				deniedKey := key
+				for _, k := range keys {
+					d := a.Permission.Evaluate(tc.Name, k)
+					if d != permission.DecisionAllow {
+						decision = d
+						deniedKey = k
+						break
+					}
+				}
 				if decision != permission.DecisionAllow {
+					key = deniedKey
 					// When decision is Ask and AskCallback is wired, call it.
 					// If it returns true we treat the call as Allow (fall through);
 					// if false (or no callback), treat as Deny.
@@ -1595,6 +1615,76 @@ func snapshotMessages(msgs []provider.Message, n int) []provider.Message {
 	out := make([]provider.Message, len(msgs)-start)
 	copy(out, msgs[start:])
 	return out
+}
+
+// splitBashChain decomposes a bash command line on shell control operators
+// (&&, ||, ;, |) so each sub-command can be permission-checked independently.
+// Best-effort: respects single/double quotes and backslash escapes so
+// operators inside string literals aren't mistaken for chain breaks.
+// Returns the trimmed sub-command strings; an empty input returns an empty
+// slice. A command with no chain operators returns a single-element slice
+// equal to the trimmed input.
+//
+// This is the gil-side fix for the bash-chain permission bypass discovered
+// in self-dogfood Run 9 (see docs/dogfood/2026-04-27-self-dogfood-run9.md):
+// without splitting, a command like "cp x y && mv y z" is gated only on
+// "cp" (the first word), letting "mv" (in the destructive deny list) slip
+// through silently.
+func splitBashChain(cmd string) []string {
+	var parts []string
+	var cur []byte
+	var quote byte // 0, '\'', or '"'
+	push := func() {
+		s := string(cur)
+		// trim leading whitespace; tail trim happens via TrimSpace
+		s = strings.TrimSpace(s)
+		if s != "" {
+			parts = append(parts, s)
+		}
+		cur = cur[:0]
+	}
+	for i := 0; i < len(cmd); i++ {
+		c := cmd[i]
+		// backslash escape: take next byte verbatim (outside quotes too)
+		if c == '\\' && i+1 < len(cmd) {
+			cur = append(cur, c, cmd[i+1])
+			i++
+			continue
+		}
+		if quote != 0 {
+			cur = append(cur, c)
+			if c == quote {
+				quote = 0
+			}
+			continue
+		}
+		switch c {
+		case '\'', '"':
+			quote = c
+			cur = append(cur, c)
+		case '&':
+			if i+1 < len(cmd) && cmd[i+1] == '&' {
+				push()
+				i++
+				continue
+			}
+			cur = append(cur, c)
+		case '|':
+			if i+1 < len(cmd) && cmd[i+1] == '|' {
+				push()
+				i++
+				continue
+			}
+			// single | is also a chain (pipe) — split too
+			push()
+		case ';':
+			push()
+		default:
+			cur = append(cur, c)
+		}
+	}
+	push()
+	return parts
 }
 
 // permissionKeyFor extracts the tool-specific detail string used as the
