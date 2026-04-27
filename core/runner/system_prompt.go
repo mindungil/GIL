@@ -27,10 +27,24 @@ import (
 )
 
 // SystemPromptOptions exposes the knobs the spec's run.system_prompt
-// table maps to. Both default false (historical behaviour preserved).
+// table maps to. All default false (historical behaviour preserved).
+//
+// Compact (Phase 20) gates the verbose "Available tools:" block with
+// per-tool format hints. False (default) emits the verbose block — weak
+// local models (vllm, qwen) need explicit format reminders for edit /
+// apply_patch nuances. True drops it — strong models (Claude, GPT-4)
+// tolerate the bare tool-name list since the input_schema attached on
+// each tool definition is enough.
+//
+// Phase 19.B's diet was always-compact. Run 3 dogfood showed that broke
+// qwen3.6-27b: it correctly identified target files but couldn't get
+// edit's "<filename>\n<<<<<<< SEARCH" format right and tried 'path:'
+// labels inside the SEARCH block. pickVerbosity (below) re-introduces
+// verbose mode for vllm/local while keeping Anthropic compact.
 type SystemPromptOptions struct {
 	Minimal  bool // drop AGENTS.md / CLAUDE.md project instructions section
 	NoMemory bool // never prepend memory bank section
+	Compact  bool // drop the verbose "Available tools:" format-hint block
 }
 
 // SystemPromptInputs is what assembleSystemPrompt consumes. Bundled into
@@ -82,7 +96,17 @@ func assembleSystemPrompt(in SystemPromptInputs) (string, Breakdown) {
 
 	base := addSection("base_instructions", renderBase(in.Spec))
 	verifier := addSection("verifier_checks", renderVerifierChecks(in.Spec))
-	toolList := addSection("tool_names", renderToolNames(in.Tools))
+	toolList := ""
+	if in.Options.Compact {
+		// Compact mode: just the one-line "Tools: a, b, c" menu.
+		toolList = addSection("tool_names", renderToolNames(in.Tools))
+	} else {
+		// Verbose mode: tool-name list PLUS format hints for the
+		// trickiest tools (edit, apply_patch). Weak local models
+		// (vllm/local) need this — schema descriptions alone are not
+		// enough to keep them on-format.
+		toolList = addSection("tool_names_verbose", renderToolNamesVerbose(in.Tools))
+	}
 	instructions := ""
 	if !in.Options.Minimal {
 		instructions = addSection("agents_md", renderInstructions(in.InstructionsRendered))
@@ -163,6 +187,99 @@ func renderToolNames(tools []tool.Tool) string {
 	return "Tools: " + strings.Join(names, ", ") + " (call by name; full schemas attached separately)\n\n"
 }
 
+// renderToolNamesVerbose is the verbose counterpart to renderToolNames,
+// emitted when SystemPromptOptions.Compact is false (default for vllm /
+// local models). Includes format hints inline for the two tools whose
+// DSL nuances trip weak models — edit (SEARCH/REPLACE filename
+// placement) and apply_patch (codex header layout). Other tools fall
+// back to a one-line description; the input_schema attached on each
+// tool definition still does the heavy lifting.
+//
+// Phase 20 motivation: dogfood Run 3 showed qwen3.6-27b couldn't keep
+// edit's "<filename>\n<<<<<<< SEARCH" format vs apply_patch's "*** Begin
+// Patch" header straight when the diet had stripped this section. The
+// schema description on the tool def IS attached but weak models don't
+// always read it; an explicit menu in the system prompt gives them a
+// second copy of the format right where they're already looking.
+func renderToolNamesVerbose(tools []tool.Tool) string {
+	if len(tools) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString("Available tools:\n")
+	for _, t := range tools {
+		hint := toolFormatHint(t.Name())
+		if hint != "" {
+			sb.WriteString("- ")
+			sb.WriteString(t.Name())
+			sb.WriteString(": ")
+			sb.WriteString(hint)
+			sb.WriteString("\n")
+		} else {
+			sb.WriteString("- ")
+			sb.WriteString(t.Name())
+			sb.WriteString("\n")
+		}
+	}
+	sb.WriteString("(input_schema attached on each tool definition is authoritative — these hints are reminders.)\n\n")
+	return sb.String()
+}
+
+// toolFormatHint returns the one-paragraph format hint for the named
+// tool, or "" when the tool's input_schema is sufficient. The hints are
+// terse on purpose — the goal is "remind, not re-document" — so they
+// run ~5-10 lines for the trickiest tools and one short sentence for
+// the rest.
+func toolFormatHint(name string) string {
+	switch name {
+	case "bash":
+		return "shell command execution. Working directory is the workspace root."
+	case "read_file":
+		return "reads a file's content. 'path' is workspace-relative."
+	case "write_file":
+		return "writes (overwrites) a file. Prefer 'edit' for surgical changes."
+	case "edit":
+		return "SEARCH/REPLACE block edit. Format:\n" +
+			"    <filename>\n" +
+			"    <<<<<<< SEARCH\n" +
+			"    <existing lines, exact match>\n" +
+			"    =======\n" +
+			"    <new lines>\n" +
+			"    >>>>>>> REPLACE\n" +
+			"  The filename goes on its OWN line BEFORE the SEARCH marker. Do not put 'path: <file>' inside the block — write just the filename. Multiple blocks may be sent in one call; consecutive blocks for the same file may omit the path."
+	case "apply_patch":
+		return "Codex-style unified diff. Format:\n" +
+			"    *** Begin Patch\n" +
+			"    *** Update File: <path>\n" +
+			"    @@ <optional description>\n" +
+			"     <context line>\n" +
+			"    -<line to remove>\n" +
+			"    +<line to add>\n" +
+			"    *** End Patch\n" +
+			"  Other section headers: '*** Add File: <path>' (body is '+'-prefixed lines), '*** Delete File: <path>' (no body). Each body line in an Update hunk MUST start with one of: ' ' (one space, context), '+' (add), '-' (remove)."
+	case "repomap":
+		return "high-level map of the workspace. Use early to find relevant files."
+	case "plan":
+		return "TODO checklist. Persists across iterations + survives compaction."
+	case "memory_load", "memory_save", "memory_update":
+		return "persistent memory bank. Free-text recall across runs."
+	case "compact_now":
+		return "request compaction at the next iteration boundary."
+	case "websearch":
+		return "search the public web."
+	case "webfetch":
+		return "fetch a URL's content."
+	case "subagent":
+		return "spawn a read-only sub-loop with a focused subgoal."
+	case "lsp_definition", "lsp_references", "lsp_hover":
+		return "LSP query against the workspace."
+	case "clarify":
+		return "ask the user a clarifying question (use sparingly — prefer reasonable assumptions)."
+	default:
+		return ""
+	}
+}
+
 // renderInstructions takes the AGENTS.md / CLAUDE.md / cursor-rules
 // block produced by core/instructions.Render and wraps it in a header.
 // Empty input returns empty (caller controls whether to skip entirely
@@ -172,6 +289,57 @@ func renderInstructions(rendered string) string {
 		return ""
 	}
 	return "## Project Instructions\n\nDurable conventions discovered from AGENTS.md / CLAUDE.md / .cursor/rules. Treat as user-supplied persona signals.\n\n" + rendered + "\n\n"
+}
+
+// pickVerbosity returns the right SystemPromptOptions for a provider,
+// keyed by the FACTORY name (anthropic / openai / openrouter / vllm /
+// local / mock) NOT the wire-level Provider.Name() (the OpenAI adapter
+// returns "openai" for all OpenAI-compatible endpoints). RunService is
+// responsible for plumbing the factory name through to AgentLoop.
+//
+// Strong models (anthropic, openai, openrouter) tolerate the compact
+// system prompt — the per-tool input_schema descriptions are enough to
+// keep them on-format. Weak local models (vllm, qwen, deepseek-coder)
+// need the explicit "Available tools:" block with format hints — Run 3
+// dogfood showed qwen3.6-27b mangled edit's filename placement and
+// apply_patch's header without it.
+//
+// override (when non-nil) wins over the per-provider default — the
+// user's spec.run.system_prompt.compact / minimal flag is respected
+// even on a strong-model provider that would otherwise default the
+// other way. We treat the override as a complete picture: any field
+// the caller set, including zero values, takes precedence.
+func pickVerbosity(providerName string, override *SystemPromptOptions) SystemPromptOptions {
+	if override != nil {
+		return *override
+	}
+	switch providerName {
+	case "anthropic":
+		return SystemPromptOptions{Compact: true}
+	case "openai":
+		return SystemPromptOptions{Compact: true}
+	case "openrouter":
+		// OpenRouter routes to a mix — Anthropic + OpenAI handle compact
+		// fine; some long-tail providers don't. Default Compact (short)
+		// since the common case is one of the strong frontier models;
+		// users routing to a weak local-style model can flip the spec
+		// flag.
+		return SystemPromptOptions{Compact: true}
+	case "vllm", "local":
+		// Verbose for weak local models — the diet's empty tool block
+		// triggered the format-misuse pattern in Run 3.
+		return SystemPromptOptions{Compact: false}
+	case "mock":
+		// Tests don't care about the verbose block; keep them compact
+		// so token-budget assertions don't drift when this default
+		// flips.
+		return SystemPromptOptions{Compact: true}
+	default:
+		// Unknown provider → assume weak (verbose). Better to over-
+		// inform an unknown frontier than under-inform an unknown
+		// local.
+		return SystemPromptOptions{Compact: false}
+	}
 }
 
 // estimateTokens uses the same 4-chars-per-token heuristic as

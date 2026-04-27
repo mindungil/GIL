@@ -37,6 +37,11 @@ func TestAssembleSystemPrompt_Breakdown_PerSection(t *testing.T) {
 		Bank:                 bank,
 		InstructionsRendered: "INSTRUCTIONS BLOCK\n",
 		Iteration:            2,
+		// Pin Compact so this test exercises the compact branch's
+		// "tool_names" section. The verbose branch is exercised by
+		// TestAssembleSystemPrompt_VerboseMode_IncludesFormatHints
+		// below.
+		Options: SystemPromptOptions{Compact: true},
 	})
 
 	// Every section we expect should appear. We don't pin exact token
@@ -278,3 +283,4 @@ func sectionNames(bd Breakdown) string {
 	}
 	return strings.Join(names, ",")
 }
+

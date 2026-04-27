@@ -233,6 +233,17 @@ type AgentLoop struct {
 	// (memory bank prepended after iter 1, AGENTS.md included).
 	SystemPromptOpts SystemPromptOptions
 
+	// ProviderName is the FACTORY key the default Provider was built
+	// from (e.g. "anthropic", "vllm", "openai", "openrouter", "mock").
+	// Distinct from Provider.Name() because the OpenAI adapter returns
+	// "openai" for all OpenAI-compatible endpoints (openai/openrouter/
+	// vllm). Used by resolveSystemPromptOptions → pickVerbosity to pick
+	// per-provider system-prompt verbosity defaults (verbose for vllm/
+	// local, compact for frontier providers). Empty falls through to
+	// pickVerbosity's "unknown" branch which defaults to verbose —
+	// safe choice for callers that didn't plumb the name yet.
+	ProviderName string
+
 	// internal: tracks which budget thresholds we've already warned about
 	// so each crossing emits one budget_warning rather than one per
 	// iteration after 75%.
@@ -1336,12 +1347,40 @@ func buildSystemPrompt(spec *gilv1.FrozenSpec, tools []tool.Tool, bank *memory.B
 }
 
 // resolveSystemPromptOptions merges the AgentLoop's runtime override
-// (a.SystemPromptOpts) with the spec's run.system_prompt table. Field
-// semantics: any true on either side wins. We don't need a tri-state
-// here because both knobs are diet flags — turning them on can never
-// hurt correctness, and a "force-off" override would be surprising.
+// (a.SystemPromptOpts) with the spec's run.system_prompt table and the
+// per-provider verbosity defaults from pickVerbosity.
+//
+// Resolution order (later wins):
+//  1. pickVerbosity(a.ProviderName) — the per-provider baseline
+//     (compact for anthropic/openai/openrouter, verbose for vllm/local,
+//     verbose unknown).
+//  2. a.SystemPromptOpts — the AgentLoop field (test/programmatic
+//     override). Any true flag wins; a true Compact also wins.
+//  3. a.Spec.Run.SystemPrompt — the frozen-spec table (user explicit).
+//     Same any-true-wins rule; explicit user spec is the final word.
+//
+// We don't need a tri-state for Minimal/NoMemory because both are diet
+// flags — turning them on can never hurt correctness. Compact has the
+// same one-way ratchet semantics: a true (drop the verbose block) is
+// always honoured; a false (keep the block) only matters when no
+// upstream layer has flipped Compact true.
 func (a *AgentLoop) resolveSystemPromptOptions() SystemPromptOptions {
-	out := a.SystemPromptOpts
+	// Start from per-provider baseline.
+	out := pickVerbosity(a.ProviderName, nil)
+
+	// Apply the AgentLoop field. Any true flag wins; we never silently
+	// downgrade a true to false here.
+	if a.SystemPromptOpts.Minimal {
+		out.Minimal = true
+	}
+	if a.SystemPromptOpts.NoMemory {
+		out.NoMemory = true
+	}
+	if a.SystemPromptOpts.Compact {
+		out.Compact = true
+	}
+
+	// Apply the spec — user explicit, final say.
 	if a.Spec != nil && a.Spec.Run != nil && a.Spec.Run.SystemPrompt != nil {
 		sp := a.Spec.Run.SystemPrompt
 		if sp.Minimal {

@@ -1142,6 +1142,12 @@ func (s *RunService) executeRun(
 	loop := runner.NewAgentLoop(spec, prov, model, tools, ver)
 	loop.Events = stream
 	loop.Memory = bank
+	// Plumb the factory provider name so the runner can pick the right
+	// system-prompt verbosity (verbose for vllm/local, compact for
+	// anthropic/openai/openrouter). The Provider object's Name() returns
+	// "openai" for all OpenAI-compatible endpoints — useless for this
+	// decision; ProviderName carries the original factory key.
+	loop.ProviderName = providerName
 
 	// Phase 19 Track C: wire the architect/coder split. buildRoleProviders
 	// constructs per-role Provider+Model maps from spec.Models.{planner,
