@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -20,6 +22,7 @@ import (
 	"github.com/mindungil/gil/core/lsp"
 	"github.com/mindungil/gil/core/mcpregistry"
 	"github.com/mindungil/gil/core/memory"
+	"github.com/mindungil/gil/core/notify"
 	"github.com/mindungil/gil/core/paths"
 	"github.com/mindungil/gil/core/permission"
 	"github.com/mindungil/gil/core/plan"
@@ -71,6 +74,15 @@ type pendingAsk struct {
 	evaluator *permission.EvaluatorWithStore // nil ⇒ no session-scoped layer (FULL autonomy)
 }
 
+// pendingClarify records the channel a paused run is waiting on for a
+// `clarify` tool answer. Mirrors pendingAsk but the value is a string
+// (free-form answer) rather than a bool, and the timeout is much longer
+// (60min vs 60s) because human attention to a clarify is an order of
+// magnitude slower than a permission tap.
+type pendingClarify struct {
+	ch chan string
+}
+
 // RunService handles RunService gRPC. Loads frozen spec, builds tools/verifier,
 // runs AgentLoop synchronously or in background (detach mode). Tail subscribes
 // to the live event stream.
@@ -85,24 +97,38 @@ type RunService struct {
 	runStreams  map[string]*event.Stream            // per-session live event streams
 	runProgress map[string]*runProgressSnap         // per-session live progress counters
 	pendingAsks map[string]map[string]*pendingAsk   // sessionID → requestID → ask context
+	// pendingClarifications maps sessionID → askID → channel the paused
+	// run is blocking on. AnswerClarification writes the user's answer
+	// into the channel (and closes); the clarify tool's Ask callback
+	// reads it and unblocks. Independent from pendingAsks because the
+	// 60-min timeout, the wire RPC, and the surface UX are all different.
+	pendingClarifications map[string]map[string]*pendingClarify
 	// runLoops holds a pointer to the AgentLoop for each in-flight run so
 	// surface-side RPCs (RequestCompact, PostHint) can stage actions for
 	// the next iteration without preempting the current tool call. The
 	// entry is removed in executeRun's defer once Run() returns. Nil when
 	// no run is in flight for that session.
 	runLoops    map[string]*runner.AgentLoop
+
+	// notifierFor produces the outbound notification fan-out for a given
+	// run. Overrideable in tests so the e2e suite can inject an
+	// httptest-backed notifier without spinning up notify-send. nil
+	// → defaultNotifierForSession (loads .gil/config.toml [notify] from
+	// the project + global config) is used.
+	notifierFor func(sessionID, projectPath string) notify.Notifier
 }
 
 // NewRunService constructs the service.
 func NewRunService(repo *session.Repo, sessionsBase string, factory ProviderFactory) *RunService {
 	return &RunService{
-		repo:            repo,
-		sessionsBase:    sessionsBase,
-		providerFactory: factory,
-		runStreams:      make(map[string]*event.Stream),
-		runProgress:     make(map[string]*runProgressSnap),
-		pendingAsks:     make(map[string]map[string]*pendingAsk),
-		runLoops:        make(map[string]*runner.AgentLoop),
+		repo:                  repo,
+		sessionsBase:          sessionsBase,
+		providerFactory:       factory,
+		runStreams:            make(map[string]*event.Stream),
+		runProgress:           make(map[string]*runProgressSnap),
+		pendingAsks:           make(map[string]map[string]*pendingAsk),
+		pendingClarifications: make(map[string]map[string]*pendingClarify),
+		runLoops:              make(map[string]*runner.AgentLoop),
 	}
 }
 
@@ -418,6 +444,203 @@ func (s *RunService) AnswerPermission(ctx context.Context, req *gilv1.AnswerPerm
 	}
 }
 
+// resolveNotifier produces the outbound notification fan-out for a run.
+// Resolution order:
+//
+//  1. If a test-supplied notifierFor exists, use its result (lets e2e
+//     inject httptest URLs without touching the user's config).
+//  2. Otherwise load notify.LoadConfig(globalConfig, projectConfig) and
+//     materialise the channels per the [notify] section. Stdout-only is
+//     the always-on default so the daemon log shows clarify questions
+//     even when no other channel is wired.
+//
+// nil is a valid return — the makeClarifyCallback handles it by simply
+// skipping the fan-out (the clarify_requested event is still emitted
+// over the per-session stream so the TUI / CLI can surface the modal).
+func (s *RunService) resolveNotifier(sessionID, projectPath string) notify.Notifier {
+	if s.notifierFor != nil {
+		return s.notifierFor(sessionID, projectPath)
+	}
+	var globalCfgPath string
+	if layout, lerr := paths.FromEnv(); lerr == nil {
+		globalCfgPath = layout.ConfigFile()
+	}
+	var projectCfgPath string
+	if projectPath != "" {
+		if root, derr := workspace.Discover(projectPath); derr == nil {
+			projectCfgPath = workspace.LocalConfigFile(root)
+		}
+	}
+	cfg, err := notify.LoadConfig(globalCfgPath, projectCfgPath)
+	if err != nil {
+		// A malformed config shouldn't kill the run — fall back to the
+		// stdout-only default so the user still sees clarify pauses.
+		cfg = notify.Config{Stdout: true}
+	}
+	// stdout writes to os.Stdout (the daemon's log surface). Tests
+	// override notifierFor before this code path runs.
+	return cfg.Build(daemonLogWriter())
+}
+
+// daemonLogWriter is the io.Writer the StdoutNotifier writes to when
+// running inside gild. We pin it to os.Stdout via a tiny indirection
+// so tests can swap it without touching the global at process scope.
+var daemonLogWriter = func() io.Writer { return os.Stdout }
+
+// clarifyTimeoutDefault is the maximum wall-clock the clarify tool's
+// callback waits for an answer before returning TimedOut=true. We pick
+// 60 minutes because the user may genuinely be away from the keyboard
+// (the safety valve fires for unforeseen blockers, not trivia) — much
+// longer than the 60s permission ask. The tool result mentions the
+// timeout so the agent's error-handling path triggers a "best-effort
+// decision and continue" rather than re-asking.
+const clarifyTimeoutDefault = 60 * time.Minute
+
+// makeClarifyCallback returns the AskClarifyCallback the clarify tool
+// invokes. Pattern mirrors makeAskCallback for permissions:
+//   1) generate an ask_id (ULID)
+//   2) register a pendingClarify entry on the session map
+//   3) emit a clarify_requested event so observers (TUI, CLI) can
+//      surface the question
+//   4) fire the outbound Notifier (desktop / webhook / stdout) with
+//      the urgency-derived hint
+//   5) block on the channel until AnswerClarification fires, ctx is
+//      cancelled, or 60min elapses
+//
+// The notifier never blocks the run — its dispatch happens inside a
+// goroutine so a flaky webhook doesn't extend the ask's effective
+// pause. notifierFor may be nil; in that case the fallback is a stdout-
+// only notifier that writes to the daemon log via os.Stdout.
+func (s *RunService) makeClarifyCallback(stream *event.Stream, projectPath string, notifier notify.Notifier) tool.AskClarifyCallback {
+	return func(ctx context.Context, sessionID string, ask tool.ClarifyAsk) (tool.ClarifyAnswer, error) {
+		askID := ulid.Make().String()
+		ch := make(chan string, 1)
+
+		s.mu.Lock()
+		if s.pendingClarifications[sessionID] == nil {
+			s.pendingClarifications[sessionID] = make(map[string]*pendingClarify)
+		}
+		s.pendingClarifications[sessionID][askID] = &pendingClarify{ch: ch}
+		s.mu.Unlock()
+
+		// Emit clarify_requested event so TUI / CLI observers can
+		// surface a modal or print the question for the user.
+		data, _ := json.Marshal(map[string]any{
+			"ask_id":      askID,
+			"question":    ask.Question,
+			"context":     ask.Context,
+			"suggestions": ask.Suggestions,
+			"urgency":     ask.Urgency,
+		})
+		_, _ = stream.Append(event.Event{
+			Timestamp: time.Now().UTC(),
+			Source:    event.SourceAgent,
+			Kind:      event.KindAction,
+			Type:      "clarify_requested",
+			Data:      data,
+		})
+
+		// Fire-and-forget notification fan-out. We deliberately do NOT
+		// wait for the notifier — its 5-second webhook timeout would
+		// otherwise compound into the user-visible pause, and a slow
+		// Slack hook can make the tool feel hung. A 10-second budget
+		// is plenty for desktop + webhook.
+		if notifier != nil {
+			urgFiltered := notify.FilterByUrgency(notifier, urgencyFloorFor(ask.Urgency))
+			go func() {
+				nctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				_ = urgFiltered.Notify(nctx, notify.Notification{
+					Title:     "gil clarify",
+					Body:      ask.Question,
+					Urgency:   ask.Urgency,
+					SessionID: sessionID,
+					AskID:     askID,
+				})
+			}()
+		}
+
+		defer func() {
+			s.mu.Lock()
+			delete(s.pendingClarifications[sessionID], askID)
+			s.mu.Unlock()
+		}()
+
+		select {
+		case ans, ok := <-ch:
+			if !ok {
+				return tool.ClarifyAnswer{Cancelled: true}, nil
+			}
+			return tool.ClarifyAnswer{Answer: ans}, nil
+		case <-ctx.Done():
+			return tool.ClarifyAnswer{Cancelled: true}, nil
+		case <-time.After(clarifyTimeoutDefault):
+			return tool.ClarifyAnswer{TimedOut: true}, nil
+		}
+	}
+}
+
+// urgencyFloorFor maps the agent's urgency hint to the minimum urgency
+// the notifier surface should fire on. Per spec:
+//   - high → fire ALL channels (desktop bell + webhook + stdout)
+//   - normal → webhook + stdout (skip desktop bell)
+//   - low → stdout only (notifier filters out anything below "low")
+//
+// We translate that into a per-call urgency floor on the wrapped
+// notifier rather than picking different fan-outs per ask, because
+// the user's config.toml is the source of truth for which channels
+// exist; the ask's urgency only controls which of those FIRE.
+func urgencyFloorFor(u string) string {
+	switch u {
+	case "high":
+		return "low" // no filter — every channel fires
+	case "low":
+		return "high" // only stdout-equivalent channels fire (most filter out)
+	default:
+		return "normal"
+	}
+}
+
+// AnswerClarification delivers the user's free-form answer to a pending
+// clarify_requested ask. Returns delivered=false when the ask_id is no
+// longer pending (timed out, already answered, or never existed) — the
+// same race-tolerant shape as AnswerPermission.
+func (s *RunService) AnswerClarification(ctx context.Context, req *gilv1.AnswerClarificationRequest) (*gilv1.AnswerClarificationResponse, error) {
+	s.mu.Lock()
+	per, ok := s.pendingClarifications[req.SessionId]
+	var entry *pendingClarify
+	if ok {
+		entry = per[req.AskId]
+	}
+	s.mu.Unlock()
+	if entry == nil {
+		return &gilv1.AnswerClarificationResponse{Delivered: false}, nil
+	}
+	select {
+	case entry.ch <- req.Answer:
+		return &gilv1.AnswerClarificationResponse{Delivered: true}, nil
+	default:
+		// Channel buffer=1; already filled means the runner already
+		// picked up an answer (a race vs a duplicate Answer call).
+		return &gilv1.AnswerClarificationResponse{Delivered: false}, nil
+	}
+}
+
+// PendingClarifications returns the askIDs currently awaiting a user
+// answer for the session. Used by `gil clarify --list` and surface
+// surfaces that want to render outstanding asks without subscribing to
+// the event stream. Read-only; ordering is non-deterministic.
+func (s *RunService) PendingClarifications(sessionID string) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	per := s.pendingClarifications[sessionID]
+	out := make([]string, 0, len(per))
+	for id := range per {
+		out = append(out, id)
+	}
+	return out
+}
+
 // resolveDecision maps the wire fields to (allow, PersistDecision). The
 // PersistDecision drives what AnswerPermission persists; the bool drives
 // what the AskCallback returns to the runner.
@@ -565,12 +788,22 @@ func (s *RunService) executeRun(
 	s.runProgress[sessionID] = &runProgressSnap{}
 	s.mu.Unlock()
 
-	// Cleanup on exit: remove stream, progress, and loop entries, decrement running gauge.
+	// Cleanup on exit: remove stream, progress, loop, and any
+	// pending-clarification channels. Closing each pending channel
+	// unblocks the clarify tool with Cancelled=true so the run can
+	// finish its termination path cleanly even if the user never
+	// answered.
 	defer func() {
 		s.mu.Lock()
 		delete(s.runStreams, sessionID)
 		delete(s.runProgress, sessionID)
 		delete(s.runLoops, sessionID)
+		if per := s.pendingClarifications[sessionID]; per != nil {
+			for _, p := range per {
+				close(p.ch)
+			}
+			delete(s.pendingClarifications, sessionID)
+		}
 		s.mu.Unlock()
 		metrics.SessionsRunning.Dec()
 	}()
@@ -855,6 +1088,19 @@ func (s *RunService) executeRun(
 		_ = lspMgr.Shutdown(shutdownCtx)
 	}()
 
+	// Clarify tool (Phase 18 Track D). The agent-callable safety valve
+	// for "I genuinely need user input mid-run" (ambiguous spec, missing
+	// credential, external service down). The Ask callback blocks the
+	// runner on a per-session pending channel until AnswerClarification
+	// fires, the run is cancelled, or 60min elapses. Notifier is built
+	// from project + global config.toml [notify] tables, with a stdout
+	// fallback so the user always sees at least one channel.
+	clarifyNotifier := s.resolveNotifier(sessionID, workspaceDir)
+	tools = append(tools, &tool.Clarify{
+		SessionID: sessionID,
+		Ask:       s.makeClarifyCallback(stream, workspaceDir, clarifyNotifier),
+	})
+
 	// exec tool: Recipe runner. Inner tools = everything else built so far.
 	// Filtering happens inside ExecTool.Run defensively.
 	execTool := &exec.ExecTool{Tools: tools}
@@ -898,7 +1144,12 @@ func (s *RunService) executeRun(
 	// the loop itself as the CompactRequester. Appended last so it appears in
 	// the tool list but doesn't shadow other tools.
 	tools = append(tools, &tool.CompactNow{Requester: loop})
-	// Rebuild the loop's internal tool set to include compact_now.
+	// Wire subagent tool (Phase 18 Track E): the tool needs the loop
+	// reference so it can spawn read-only sub-loops via
+	// AgentLoop.RunSubagentWithConfig. Same post-loop-construction
+	// pattern as compact_now.
+	tools = append(tools, &tool.Subagent{Runner: loop.AsSubagentRunner()})
+	// Rebuild the loop's internal tool set to include compact_now + subagent.
 	loop.Tools = tools
 
 	// Wire stuck detector so the long-run soak and production runs can detect

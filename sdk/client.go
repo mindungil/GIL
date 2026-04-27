@@ -255,6 +255,27 @@ func (c *Client) AnswerPermission(ctx context.Context, sessionID, requestID stri
 	return resp.Delivered, nil
 }
 
+// AnswerClarification sends the user's free-form answer to a pending
+// clarify_requested ask. delivered=false means the ask_id is no longer
+// pending (already answered, timed out, or never existed) — the same
+// race-tolerant shape as AnswerPermission.
+//
+// The answer is fed back to the agent as the clarify tool's tool_result
+// content; an empty string is allowed (the agent treats it the same as
+// "no extra info" — equivalent to a soft-fail without the timeout
+// error string).
+func (c *Client) AnswerClarification(ctx context.Context, sessionID, askID, answer string) (bool, error) {
+	resp, err := c.runs.AnswerClarification(ctx, &gilv1.AnswerClarificationRequest{
+		SessionId: sessionID,
+		AskId:     askID,
+		Answer:    answer,
+	})
+	if err != nil {
+		return false, err
+	}
+	return resp.Delivered, nil
+}
+
 // AnswerPermissionDecision sends the user's full answer (allow/deny x
 // once/session/always) to a pending permission_ask. The server uses the
 // enum to drive both the runner unblock AND the persistence side-effect
