@@ -51,10 +51,7 @@ func writeStatusVisual(w io.Writer, list []*sdk.Session, ascii bool) error {
 		writeStatusCard(w, g, p, s)
 	}
 
-	if total > len(list) {
-		extra := total - len(list)
-		fmt.Fprintf(w, "   %s\n", p.Dim(fmt.Sprintf("›  + %d more", extra)))
-	}
+	uistyle.OverflowHint(w, p, total, len(list))
 
 	fmt.Fprintln(w)
 	return nil

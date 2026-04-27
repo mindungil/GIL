@@ -196,10 +196,7 @@ func renderSummary(out io.Writer, e summaryEnv) {
 		}
 	}
 
-	if e.TotalSessions > len(e.Sessions) {
-		extra := e.TotalSessions - len(e.Sessions)
-		fmt.Fprintf(out, "   %s\n", p.Dim(fmt.Sprintf("›  + %d more", extra)))
-	}
+	uistyle.OverflowHint(out, p, e.TotalSessions, len(e.Sessions))
 
 	fmt.Fprintln(out)
 	fmt.Fprintln(out)
