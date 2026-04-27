@@ -848,6 +848,117 @@ func (x *DiffRequest) GetSessionId() string {
 	return ""
 }
 
+// AnswerClarificationRequest carries the user's free-form answer to a
+// pending clarify_requested ask. Empty answer is allowed (the agent treats
+// it the same as "no extra info" — same as the timeout path's hint, but
+// without the timeout error string).
+type AnswerClarificationRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SessionId     string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	AskId         string                 `protobuf:"bytes,2,opt,name=ask_id,json=askId,proto3" json:"ask_id,omitempty"` // matches the ask_id on the clarify_requested event
+	Answer        string                 `protobuf:"bytes,3,opt,name=answer,proto3" json:"answer,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AnswerClarificationRequest) Reset() {
+	*x = AnswerClarificationRequest{}
+	mi := &file_gil_v1_run_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AnswerClarificationRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AnswerClarificationRequest) ProtoMessage() {}
+
+func (x *AnswerClarificationRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_gil_v1_run_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AnswerClarificationRequest.ProtoReflect.Descriptor instead.
+func (*AnswerClarificationRequest) Descriptor() ([]byte, []int) {
+	return file_gil_v1_run_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *AnswerClarificationRequest) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
+func (x *AnswerClarificationRequest) GetAskId() string {
+	if x != nil {
+		return x.AskId
+	}
+	return ""
+}
+
+func (x *AnswerClarificationRequest) GetAnswer() string {
+	if x != nil {
+		return x.Answer
+	}
+	return ""
+}
+
+// AnswerClarificationResponse is symmetric to AnswerPermissionResponse:
+// delivered=false on a stale / unknown ask_id is a normal race outcome,
+// not an error.
+type AnswerClarificationResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Delivered     bool                   `protobuf:"varint,1,opt,name=delivered,proto3" json:"delivered,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AnswerClarificationResponse) Reset() {
+	*x = AnswerClarificationResponse{}
+	mi := &file_gil_v1_run_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AnswerClarificationResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AnswerClarificationResponse) ProtoMessage() {}
+
+func (x *AnswerClarificationResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_gil_v1_run_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AnswerClarificationResponse.ProtoReflect.Descriptor instead.
+func (*AnswerClarificationResponse) Descriptor() ([]byte, []int) {
+	return file_gil_v1_run_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *AnswerClarificationResponse) GetDelivered() bool {
+	if x != nil {
+		return x.Delivered
+	}
+	return false
+}
+
 // DiffResponse carries the unified diff body plus summary counts. The
 // body is truncated to ~16 KB; when truncated, `truncated=true` and
 // `truncated_bytes` reports the number of bytes the server dropped from
@@ -869,7 +980,7 @@ type DiffResponse struct {
 
 func (x *DiffResponse) Reset() {
 	*x = DiffResponse{}
-	mi := &file_gil_v1_run_proto_msgTypes[13]
+	mi := &file_gil_v1_run_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -881,7 +992,7 @@ func (x *DiffResponse) String() string {
 func (*DiffResponse) ProtoMessage() {}
 
 func (x *DiffResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_gil_v1_run_proto_msgTypes[13]
+	mi := &file_gil_v1_run_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -894,7 +1005,7 @@ func (x *DiffResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DiffResponse.ProtoReflect.Descriptor instead.
 func (*DiffResponse) Descriptor() ([]byte, []int) {
-	return file_gil_v1_run_proto_rawDescGZIP(), []int{13}
+	return file_gil_v1_run_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *DiffResponse) GetUnifiedDiff() string {
@@ -1018,7 +1129,14 @@ const file_gil_v1_run_proto_rawDesc = "" +
 	"\x06reason\x18\x02 \x01(\tR\x06reason\",\n" +
 	"\vDiffRequest\x12\x1d\n" +
 	"\n" +
-	"session_id\x18\x01 \x01(\tR\tsessionId\"\x9e\x02\n" +
+	"session_id\x18\x01 \x01(\tR\tsessionId\"j\n" +
+	"\x1aAnswerClarificationRequest\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x15\n" +
+	"\x06ask_id\x18\x02 \x01(\tR\x05askId\x12\x16\n" +
+	"\x06answer\x18\x03 \x01(\tR\x06answer\";\n" +
+	"\x1bAnswerClarificationResponse\x12\x1c\n" +
+	"\tdelivered\x18\x01 \x01(\bR\tdelivered\"\x9e\x02\n" +
 	"\fDiffResponse\x12!\n" +
 	"\funified_diff\x18\x01 \x01(\tR\vunifiedDiff\x12#\n" +
 	"\rfiles_changed\x18\x02 \x01(\x05R\ffilesChanged\x12\x1f\n" +
@@ -1036,7 +1154,7 @@ const file_gil_v1_run_proto_rawDesc = "" +
 	" PERMISSION_DECISION_ALLOW_ALWAYS\x10\x03\x12!\n" +
 	"\x1dPERMISSION_DECISION_DENY_ONCE\x10\x04\x12$\n" +
 	" PERMISSION_DECISION_DENY_SESSION\x10\x05\x12#\n" +
-	"\x1fPERMISSION_DECISION_DENY_ALWAYS\x10\x062\x91\x06\n" +
+	"\x1fPERMISSION_DECISION_DENY_ALWAYS\x10\x062\xad\a\n" +
 	"\n" +
 	"RunService\x12d\n" +
 	"\x05Start\x12\x17.gil.v1.StartRunRequest\x1a\x18.gil.v1.StartRunResponse\"(\x82\xd3\xe4\x93\x02\":\x01*\"\x1d/v1/sessions/{session_id}/run\x12V\n" +
@@ -1045,7 +1163,8 @@ const file_gil_v1_run_proto_rawDesc = "" +
 	"\x10AnswerPermission\x12\x1f.gil.v1.AnswerPermissionRequest\x1a .gil.v1.AnswerPermissionResponse\"6\x82\xd3\xe4\x93\x020:\x01*\"+/v1/sessions/{session_id}/answer_permission\x12\x85\x01\n" +
 	"\x0eRequestCompact\x12\x1d.gil.v1.RequestCompactRequest\x1a\x1e.gil.v1.RequestCompactResponse\"4\x82\xd3\xe4\x93\x02.:\x01*\")/v1/sessions/{session_id}/request_compact\x12h\n" +
 	"\bPostHint\x12\x17.gil.v1.PostHintRequest\x1a\x18.gil.v1.PostHintResponse\")\x82\xd3\xe4\x93\x02#:\x01*\"\x1e/v1/sessions/{session_id}/hint\x12Y\n" +
-	"\x04Diff\x12\x13.gil.v1.DiffRequest\x1a\x14.gil.v1.DiffResponse\"&\x82\xd3\xe4\x93\x02 \x12\x1e/v1/sessions/{session_id}/diffB1Z/github.com/mindungil/gil/proto/gen/gil/v1;gilv1b\x06proto3"
+	"\x04Diff\x12\x13.gil.v1.DiffRequest\x1a\x14.gil.v1.DiffResponse\"&\x82\xd3\xe4\x93\x02 \x12\x1e/v1/sessions/{session_id}/diff\x12\x99\x01\n" +
+	"\x13AnswerClarification\x12\".gil.v1.AnswerClarificationRequest\x1a#.gil.v1.AnswerClarificationResponse\"9\x82\xd3\xe4\x93\x023:\x01*\"./v1/sessions/{session_id}/answer_clarificationB1Z/github.com/mindungil/gil/proto/gen/gil/v1;gilv1b\x06proto3"
 
 var (
 	file_gil_v1_run_proto_rawDescOnce sync.Once
@@ -1060,30 +1179,32 @@ func file_gil_v1_run_proto_rawDescGZIP() []byte {
 }
 
 var file_gil_v1_run_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_gil_v1_run_proto_msgTypes = make([]protoimpl.MessageInfo, 15)
+var file_gil_v1_run_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
 var file_gil_v1_run_proto_goTypes = []any{
-	(PermissionDecision)(0),          // 0: gil.v1.PermissionDecision
-	(*StartRunRequest)(nil),          // 1: gil.v1.StartRunRequest
-	(*StartRunResponse)(nil),         // 2: gil.v1.StartRunResponse
-	(*VerifyResult)(nil),             // 3: gil.v1.VerifyResult
-	(*TailRequest)(nil),              // 4: gil.v1.TailRequest
-	(*RestoreRequest)(nil),           // 5: gil.v1.RestoreRequest
-	(*RestoreResponse)(nil),          // 6: gil.v1.RestoreResponse
-	(*AnswerPermissionRequest)(nil),  // 7: gil.v1.AnswerPermissionRequest
-	(*AnswerPermissionResponse)(nil), // 8: gil.v1.AnswerPermissionResponse
-	(*RequestCompactRequest)(nil),    // 9: gil.v1.RequestCompactRequest
-	(*RequestCompactResponse)(nil),   // 10: gil.v1.RequestCompactResponse
-	(*PostHintRequest)(nil),          // 11: gil.v1.PostHintRequest
-	(*PostHintResponse)(nil),         // 12: gil.v1.PostHintResponse
-	(*DiffRequest)(nil),              // 13: gil.v1.DiffRequest
-	(*DiffResponse)(nil),             // 14: gil.v1.DiffResponse
-	nil,                              // 15: gil.v1.PostHintRequest.HintEntry
-	(*Event)(nil),                    // 16: gil.v1.Event
+	(PermissionDecision)(0),             // 0: gil.v1.PermissionDecision
+	(*StartRunRequest)(nil),             // 1: gil.v1.StartRunRequest
+	(*StartRunResponse)(nil),            // 2: gil.v1.StartRunResponse
+	(*VerifyResult)(nil),                // 3: gil.v1.VerifyResult
+	(*TailRequest)(nil),                 // 4: gil.v1.TailRequest
+	(*RestoreRequest)(nil),              // 5: gil.v1.RestoreRequest
+	(*RestoreResponse)(nil),             // 6: gil.v1.RestoreResponse
+	(*AnswerPermissionRequest)(nil),     // 7: gil.v1.AnswerPermissionRequest
+	(*AnswerPermissionResponse)(nil),    // 8: gil.v1.AnswerPermissionResponse
+	(*RequestCompactRequest)(nil),       // 9: gil.v1.RequestCompactRequest
+	(*RequestCompactResponse)(nil),      // 10: gil.v1.RequestCompactResponse
+	(*PostHintRequest)(nil),             // 11: gil.v1.PostHintRequest
+	(*PostHintResponse)(nil),            // 12: gil.v1.PostHintResponse
+	(*DiffRequest)(nil),                 // 13: gil.v1.DiffRequest
+	(*AnswerClarificationRequest)(nil),  // 14: gil.v1.AnswerClarificationRequest
+	(*AnswerClarificationResponse)(nil), // 15: gil.v1.AnswerClarificationResponse
+	(*DiffResponse)(nil),                // 16: gil.v1.DiffResponse
+	nil,                                 // 17: gil.v1.PostHintRequest.HintEntry
+	(*Event)(nil),                       // 18: gil.v1.Event
 }
 var file_gil_v1_run_proto_depIdxs = []int32{
 	3,  // 0: gil.v1.StartRunResponse.verify_results:type_name -> gil.v1.VerifyResult
 	0,  // 1: gil.v1.AnswerPermissionRequest.decision:type_name -> gil.v1.PermissionDecision
-	15, // 2: gil.v1.PostHintRequest.hint:type_name -> gil.v1.PostHintRequest.HintEntry
+	17, // 2: gil.v1.PostHintRequest.hint:type_name -> gil.v1.PostHintRequest.HintEntry
 	1,  // 3: gil.v1.RunService.Start:input_type -> gil.v1.StartRunRequest
 	4,  // 4: gil.v1.RunService.Tail:input_type -> gil.v1.TailRequest
 	5,  // 5: gil.v1.RunService.Restore:input_type -> gil.v1.RestoreRequest
@@ -1091,15 +1212,17 @@ var file_gil_v1_run_proto_depIdxs = []int32{
 	9,  // 7: gil.v1.RunService.RequestCompact:input_type -> gil.v1.RequestCompactRequest
 	11, // 8: gil.v1.RunService.PostHint:input_type -> gil.v1.PostHintRequest
 	13, // 9: gil.v1.RunService.Diff:input_type -> gil.v1.DiffRequest
-	2,  // 10: gil.v1.RunService.Start:output_type -> gil.v1.StartRunResponse
-	16, // 11: gil.v1.RunService.Tail:output_type -> gil.v1.Event
-	6,  // 12: gil.v1.RunService.Restore:output_type -> gil.v1.RestoreResponse
-	8,  // 13: gil.v1.RunService.AnswerPermission:output_type -> gil.v1.AnswerPermissionResponse
-	10, // 14: gil.v1.RunService.RequestCompact:output_type -> gil.v1.RequestCompactResponse
-	12, // 15: gil.v1.RunService.PostHint:output_type -> gil.v1.PostHintResponse
-	14, // 16: gil.v1.RunService.Diff:output_type -> gil.v1.DiffResponse
-	10, // [10:17] is the sub-list for method output_type
-	3,  // [3:10] is the sub-list for method input_type
+	14, // 10: gil.v1.RunService.AnswerClarification:input_type -> gil.v1.AnswerClarificationRequest
+	2,  // 11: gil.v1.RunService.Start:output_type -> gil.v1.StartRunResponse
+	18, // 12: gil.v1.RunService.Tail:output_type -> gil.v1.Event
+	6,  // 13: gil.v1.RunService.Restore:output_type -> gil.v1.RestoreResponse
+	8,  // 14: gil.v1.RunService.AnswerPermission:output_type -> gil.v1.AnswerPermissionResponse
+	10, // 15: gil.v1.RunService.RequestCompact:output_type -> gil.v1.RequestCompactResponse
+	12, // 16: gil.v1.RunService.PostHint:output_type -> gil.v1.PostHintResponse
+	16, // 17: gil.v1.RunService.Diff:output_type -> gil.v1.DiffResponse
+	15, // 18: gil.v1.RunService.AnswerClarification:output_type -> gil.v1.AnswerClarificationResponse
+	11, // [11:19] is the sub-list for method output_type
+	3,  // [3:11] is the sub-list for method input_type
 	3,  // [3:3] is the sub-list for extension type_name
 	3,  // [3:3] is the sub-list for extension extendee
 	0,  // [0:3] is the sub-list for field type_name
@@ -1117,7 +1240,7 @@ func file_gil_v1_run_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_gil_v1_run_proto_rawDesc), len(file_gil_v1_run_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   15,
+			NumMessages:   17,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

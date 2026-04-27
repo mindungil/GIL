@@ -19,13 +19,14 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	RunService_Start_FullMethodName            = "/gil.v1.RunService/Start"
-	RunService_Tail_FullMethodName             = "/gil.v1.RunService/Tail"
-	RunService_Restore_FullMethodName          = "/gil.v1.RunService/Restore"
-	RunService_AnswerPermission_FullMethodName = "/gil.v1.RunService/AnswerPermission"
-	RunService_RequestCompact_FullMethodName   = "/gil.v1.RunService/RequestCompact"
-	RunService_PostHint_FullMethodName         = "/gil.v1.RunService/PostHint"
-	RunService_Diff_FullMethodName             = "/gil.v1.RunService/Diff"
+	RunService_Start_FullMethodName               = "/gil.v1.RunService/Start"
+	RunService_Tail_FullMethodName                = "/gil.v1.RunService/Tail"
+	RunService_Restore_FullMethodName             = "/gil.v1.RunService/Restore"
+	RunService_AnswerPermission_FullMethodName    = "/gil.v1.RunService/AnswerPermission"
+	RunService_RequestCompact_FullMethodName      = "/gil.v1.RunService/RequestCompact"
+	RunService_PostHint_FullMethodName            = "/gil.v1.RunService/PostHint"
+	RunService_Diff_FullMethodName                = "/gil.v1.RunService/Diff"
+	RunService_AnswerClarification_FullMethodName = "/gil.v1.RunService/AnswerClarification"
 )
 
 // RunServiceClient is the client API for RunService service.
@@ -62,6 +63,13 @@ type RunServiceClient interface {
 	// and the current workspace state. For inspection only — does not modify
 	// the workspace or the shadow git.
 	Diff(ctx context.Context, in *DiffRequest, opts ...grpc.CallOption) (*DiffResponse, error)
+	// AnswerClarification delivers the user's free-form answer to a pending
+	// clarify_requested event raised by the agent's `clarify` tool. The agent
+	// loop is paused mid-iteration on a channel; the answer string is fed back
+	// as the tool's result content so the model can continue reasoning.
+	// delivered=false means the ask_id wasn't pending (already answered, timed
+	// out, or never existed).
+	AnswerClarification(ctx context.Context, in *AnswerClarificationRequest, opts ...grpc.CallOption) (*AnswerClarificationResponse, error)
 }
 
 type runServiceClient struct {
@@ -151,6 +159,16 @@ func (c *runServiceClient) Diff(ctx context.Context, in *DiffRequest, opts ...gr
 	return out, nil
 }
 
+func (c *runServiceClient) AnswerClarification(ctx context.Context, in *AnswerClarificationRequest, opts ...grpc.CallOption) (*AnswerClarificationResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AnswerClarificationResponse)
+	err := c.cc.Invoke(ctx, RunService_AnswerClarification_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // RunServiceServer is the server API for RunService service.
 // All implementations should embed UnimplementedRunServiceServer
 // for forward compatibility.
@@ -185,6 +203,13 @@ type RunServiceServer interface {
 	// and the current workspace state. For inspection only — does not modify
 	// the workspace or the shadow git.
 	Diff(context.Context, *DiffRequest) (*DiffResponse, error)
+	// AnswerClarification delivers the user's free-form answer to a pending
+	// clarify_requested event raised by the agent's `clarify` tool. The agent
+	// loop is paused mid-iteration on a channel; the answer string is fed back
+	// as the tool's result content so the model can continue reasoning.
+	// delivered=false means the ask_id wasn't pending (already answered, timed
+	// out, or never existed).
+	AnswerClarification(context.Context, *AnswerClarificationRequest) (*AnswerClarificationResponse, error)
 }
 
 // UnimplementedRunServiceServer should be embedded to have
@@ -214,6 +239,9 @@ func (UnimplementedRunServiceServer) PostHint(context.Context, *PostHintRequest)
 }
 func (UnimplementedRunServiceServer) Diff(context.Context, *DiffRequest) (*DiffResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Diff not implemented")
+}
+func (UnimplementedRunServiceServer) AnswerClarification(context.Context, *AnswerClarificationRequest) (*AnswerClarificationResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method AnswerClarification not implemented")
 }
 func (UnimplementedRunServiceServer) testEmbeddedByValue() {}
 
@@ -354,6 +382,24 @@ func _RunService_Diff_Handler(srv interface{}, ctx context.Context, dec func(int
 	return interceptor(ctx, in, info, handler)
 }
 
+func _RunService_AnswerClarification_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AnswerClarificationRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunServiceServer).AnswerClarification(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RunService_AnswerClarification_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunServiceServer).AnswerClarification(ctx, req.(*AnswerClarificationRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // RunService_ServiceDesc is the grpc.ServiceDesc for RunService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -384,6 +430,10 @@ var RunService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Diff",
 			Handler:    _RunService_Diff_Handler,
+		},
+		{
+			MethodName: "AnswerClarification",
+			Handler:    _RunService_AnswerClarification_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

@@ -77,6 +77,19 @@ service RunService {
       get: "/v1/sessions/{session_id}/diff"
     };
   }
+
+  // AnswerClarification delivers the user's free-form answer to a pending
+  // clarify_requested event raised by the agent's `clarify` tool. The agent
+  // loop is paused mid-iteration on a channel; the answer string is fed back
+  // as the tool's result content so the model can continue reasoning.
+  // delivered=false means the ask_id wasn't pending (already answered, timed
+  // out, or never existed).
+  rpc AnswerClarification(AnswerClarificationRequest) returns (AnswerClarificationResponse) {
+    option (google.api.http) = {
+      post: "/v1/sessions/{session_id}/answer_clarification"
+      body: "*"
+    };
+  }
 }
 
 message StartRunRequest {
@@ -185,6 +198,23 @@ message PostHintResponse {
 // can extend the comparison to arbitrary commit pairs.
 message DiffRequest {
   string session_id = 1;
+}
+
+// AnswerClarificationRequest carries the user's free-form answer to a
+// pending clarify_requested ask. Empty answer is allowed (the agent treats
+// it the same as "no extra info" — same as the timeout path's hint, but
+// without the timeout error string).
+message AnswerClarificationRequest {
+  string session_id = 1;
+  string ask_id     = 2;  // matches the ask_id on the clarify_requested event
+  string answer     = 3;
+}
+
+// AnswerClarificationResponse is symmetric to AnswerPermissionResponse:
+// delivered=false on a stale / unknown ask_id is a normal race outcome,
+// not an error.
+message AnswerClarificationResponse {
+  bool delivered = 1;
 }
 
 // DiffResponse carries the unified diff body plus summary counts. The
