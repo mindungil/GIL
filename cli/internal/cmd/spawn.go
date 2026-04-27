@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"time"
 
 	"github.com/mindungil/gil/core/cliutil"
@@ -28,13 +29,37 @@ func ensureDaemon(socket, base string) error {
 		return nil
 	}
 
-	gild, err := exec.LookPath("gild")
+	gild, err := lookupGild()
 	if err != nil {
 		return cliutil.Wrap(err,
 			"daemon helper 'gild' is not installed",
 			`install the gil release bundle, or build with "make build install"`)
 	}
 	return ensureDaemonAt(socket, base, gild)
+}
+
+// lookupGild resolves the gild binary path. Tries PATH first, then falls
+// back to <cwd>/bin/gild and <gil-binary-dir>/gild for dev-mode (built but
+// not installed). Mirrors the same fallback used by `gil doctor`.
+func lookupGild() (string, error) {
+	if p, err := exec.LookPath("gild"); err == nil {
+		return p, nil
+	}
+	// dev fallback 1: <cwd>/bin/gild (when running from repo root)
+	if cwd, err := os.Getwd(); err == nil {
+		candidate := filepath.Join(cwd, "bin", "gild")
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
+			return candidate, nil
+		}
+	}
+	// dev fallback 2: sibling of the running gil binary (e.g. ./bin/gild next to ./bin/gil)
+	if exe, err := os.Executable(); err == nil {
+		candidate := filepath.Join(filepath.Dir(exe), "gild")
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("gild not found on PATH, in ./bin, or beside the gil binary")
 }
 
 // ensureDaemonAt is like ensureDaemon but takes an explicit path to gild.
