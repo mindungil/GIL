@@ -84,6 +84,80 @@ func TestRenderSummary_ThreeSessions_StuckAnnotated(t *testing.T) {
 	require.Regexp(t, `01bbb.*45 `, out)
 }
 
+func TestRenderSummary_BudgetCellRendersUsageVsTotal(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	var buf bytes.Buffer
+	renderSummary(&buf, summaryEnv{
+		Version: "v0.1.0",
+		User:    "u", Host: "h",
+		Now:     time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC),
+		Glyphs:  uistyle.NewGlyphs(false),
+		Palette: uistyle.NewPalette(true),
+		Sessions: []summaryRow{
+			{ID: "01AAA", Status: "RUNNING", Iter: 23, MaxIter: 100,
+				CostUSD: 0.61, CostBudget: 5.00, Goal: "Add dark mode"},
+		},
+	})
+	out := buf.String()
+	require.Contains(t, out, "$0.61 / $5.00", "budget cell shows used/total")
+}
+
+func TestRenderSummary_BudgetWarningGlyphAt75(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	var buf bytes.Buffer
+	renderSummary(&buf, summaryEnv{
+		Version: "v0.1.0", User: "u", Host: "h",
+		Now:     time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC),
+		Glyphs:  uistyle.NewGlyphs(false),
+		Palette: uistyle.NewPalette(true),
+		Sessions: []summaryRow{
+			{ID: "01BBB", Status: "RUNNING", Iter: 75, MaxIter: 100,
+				CostUSD: 3.85, CostBudget: 5.00, Goal: "Long task"},
+		},
+	})
+	out := buf.String()
+	require.Contains(t, out, "$3.85 / $5.00")
+	// Warn glyph (⚠) prefixes the cell when frac >= 0.75
+	require.Contains(t, out, "⚠")
+}
+
+func TestRenderSummary_BudgetExhaustedShowsAlert(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	var buf bytes.Buffer
+	renderSummary(&buf, summaryEnv{
+		Version: "v0.1.0", User: "u", Host: "h",
+		Now:     time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC),
+		Glyphs:  uistyle.NewGlyphs(false),
+		Palette: uistyle.NewPalette(true),
+		Sessions: []summaryRow{
+			{ID: "01CCC", Status: "STOPPED", Iter: 17, MaxIter: 50,
+				CostUSD: 5.02, CostBudget: 5.00,
+				BudgetExceeded: true, Goal: "Hit cap"},
+		},
+	})
+	out := buf.String()
+	require.Contains(t, out, "$5.02 / $5.00")
+	require.Contains(t, out, "✗", "alert glyph when budget exhausted")
+}
+
+func TestRenderSummary_NoBudget_KeepsBareValue(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	var buf bytes.Buffer
+	renderSummary(&buf, summaryEnv{
+		Version: "v0.1.0", User: "u", Host: "h",
+		Now:     time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC),
+		Glyphs:  uistyle.NewGlyphs(false),
+		Palette: uistyle.NewPalette(true),
+		Sessions: []summaryRow{
+			{ID: "01DDD", Status: "RUNNING", Iter: 5, MaxIter: 100,
+				CostUSD: 0.42, Goal: "No budget"},
+		},
+	})
+	out := buf.String()
+	require.Contains(t, out, "$0.42")
+	require.NotContains(t, out, " / $", "no budget → no slash form")
+}
+
 func TestRenderSummary_AsciiFallback(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 	var buf bytes.Buffer

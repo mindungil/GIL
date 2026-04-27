@@ -242,9 +242,13 @@ func (r *watchRenderer) render(sess *sdk.Session, evts []watchEvent, frame int) 
 	fmt.Fprintf(r.out, "   %s     %s  %s\n",
 		p.Bold("Verify"), p.Dim(strings.TrimRight(verify, " ")), p.Dim("0 / 0"))
 
-	// Cost — derive a trend across frames if we've seen >=2 samples.
-	cost := 0.0
-	costStr := fmt.Sprintf("$%0.2f", cost)
+	// Cost — when the session has a cost budget, render the meter
+	// (used / total + warn/alert glyph). Otherwise fall back to the
+	// bare value + dim trend placeholder so the existing layout for
+	// no-budget sessions is unchanged.
+	cost := sess.TotalCostUSD
+	row := summaryRowFromSession(sess)
+	costStr := renderCostCell(g, p, row)
 	trendStr := p.Dim(g.LightHRule)
 	if r.lastCostT.IsZero() {
 		r.costStart = cost
@@ -252,7 +256,7 @@ func (r *watchRenderer) render(sess *sdk.Session, evts []watchEvent, frame int) 
 	}
 	r.lastCost, r.lastCostT = cost, time.Now()
 	fmt.Fprintf(r.out, "   %s       %s   %s\n",
-		p.Bold("Cost"), p.Surface(costStr), trendStr)
+		p.Bold("Cost"), costStr, trendStr)
 
 	// Stuck row — dash unless the session status flagged it.
 	stuckStr := p.Dim(g.LightHRule)

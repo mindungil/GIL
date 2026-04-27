@@ -84,23 +84,38 @@ type summaryEnv struct {
 // summaryRow is the renderable view of one session. The row carries
 // pre-computed display values so the renderer doesn't reach back into
 // the SDK type — keeps the tests trivial.
+//
+// CostBudget / TokensBudget are zero when the spec didn't set a cap on
+// that dimension; the cost cell renders as the bare value in that case.
+// BudgetExceeded is the sticky bit from the runner's budget_exceeded
+// event so a finished-budget session keeps the alert glyph after it
+// has stopped.
 type summaryRow struct {
-	ID         string
-	Status     string // "RUNNING" / "DONE" / "STUCK" / ...
-	Iter       int32
-	MaxIter    int32
-	CostUSD    float64
-	Goal       string
-	StuckNote  string  // "RepeatedAction (2/3)" or empty
+	ID             string
+	Status         string // "RUNNING" / "DONE" / "STUCK" / ...
+	Iter           int32
+	MaxIter        int32
+	Tokens         int64
+	TokensBudget   int64
+	CostUSD        float64
+	CostBudget     float64
+	BudgetExceeded bool
+	Goal           string
+	StuckNote      string  // "RepeatedAction (2/3)" or empty
 }
 
 func summaryRowFromSession(s *sdk.Session) summaryRow {
 	return summaryRow{
-		ID:      s.ID,
-		Status:  s.Status,
-		Iter:    s.CurrentIteration,
-		MaxIter: 100, // server doesn't expose max yet; matches spec mockup
-		Goal:    s.GoalHint,
+		ID:             s.ID,
+		Status:         s.Status,
+		Iter:           s.CurrentIteration,
+		MaxIter:        100, // server doesn't expose max yet; matches spec mockup
+		Tokens:         s.CurrentTokens,
+		TokensBudget:   s.BudgetMaxTokens,
+		CostUSD:        s.TotalCostUSD,
+		CostBudget:     s.BudgetMaxCostUSD,
+		BudgetExceeded: s.BudgetExceeded,
+		Goal:           s.GoalHint,
 	}
 }
 
@@ -142,11 +157,11 @@ func renderSummary(out io.Writer, e summaryEnv) {
 		bar := uistyle.BarFixed(g, int(r.Iter), int(r.MaxIter))
 		// "23/100" or "45" depending on whether status is RUNNING (need denominator)
 		iterStr := iterDisplay(r)
-		costStr := fmt.Sprintf("$%0.2f", r.CostUSD)
+		costStr := renderCostCell(g, p, r)
 		// 14-char goal column — truncate with ellipsis if longer so the
 		// row stays single-line under the spec's 80-col target.
 		goal := truncRune(r.Goal, 48)
-		fmt.Fprintf(out, "   %s  %s   %s   %-7s  %-7s %s\n",
+		fmt.Fprintf(out, "   %s  %s   %s   %-7s  %-18s %s\n",
 			coloured, p.Dim(shortID(r.ID)), bar, iterStr, costStr, goal)
 		if r.StuckNote != "" {
 			indent := strings.Repeat(" ", 49) // hand-aligned with cost column
@@ -173,6 +188,31 @@ func renderSummary(out io.Writer, e summaryEnv) {
 		p.Info(g.Arrow), p.Primary("gil interview"),
 		p.Info(g.Arrow), p.Primary("gil --help"))
 	fmt.Fprintln(out)
+}
+
+// renderCostCell returns the cost column for one summary/status row.
+// When the session has a cost budget set the cell shows "used / total"
+// with a warn or alert glyph at the threshold bands; otherwise it
+// degrades to the bare "$X.YY" so legacy sessions render unchanged.
+//
+// Aesthetic per terminal-aesthetic.md §1: amber (Caution) at >= 75%,
+// coral (Alert) at >= 100% or when the budget_exceeded sticky bit is
+// set. Never both at once on the same row.
+func renderCostCell(g uistyle.Glyphs, p uistyle.Palette, r summaryRow) string {
+	bare := fmt.Sprintf("$%0.2f", r.CostUSD)
+	if r.CostBudget <= 0 {
+		return bare
+	}
+	frac := r.CostUSD / r.CostBudget
+	body := fmt.Sprintf("$%0.2f / $%0.2f", r.CostUSD, r.CostBudget)
+	switch {
+	case r.BudgetExceeded || frac >= 1.0:
+		return p.Alert(g.Failed + " " + body)
+	case frac >= 0.75:
+		return p.Caution(g.Warn + " " + body)
+	default:
+		return body
+	}
 }
 
 // sessionStatusGlyph maps a session status string to (glyph, palette-role-name).

@@ -52,14 +52,11 @@ func writeStatusCard(w io.Writer, g uistyle.Glyphs, p uistyle.Palette, s *sdk.Se
 	marker, role := sessionStatusGlyph(g,s.Status)
 	col := colourMarker(p, marker, role)
 	bar := uistyle.BarFixed(g, int(s.CurrentIteration), 100)
-	iter := iterDisplay(summaryRow{
-		Status:  s.Status,
-		Iter:    s.CurrentIteration,
-		MaxIter: 100,
-	})
-	cost := "$0.00" // server-side cost rollup lands in the SDK in a later phase
+	row := summaryRowFromSession(s)
+	iter := iterDisplay(row)
+	cost := renderCostCell(g, p, row)
 	goal := truncRune(s.GoalHint, 48)
-	fmt.Fprintf(w, "   %s  %s   %s   %-7s  %-7s %s\n",
+	fmt.Fprintf(w, "   %s  %s   %s   %-7s  %-18s %s\n",
 		col, p.Dim(shortID(s.ID)), bar, iter, cost, goal)
 
 	// Meta band — joins non-empty fragments with " · ". This keeps the
