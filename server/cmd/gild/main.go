@@ -285,6 +285,57 @@ func newServer(dbPath, sockPath, sessionsBase, authFile string, authMW *auth.Mid
 						StopReason: "end_turn",
 					},
 				}), "mock-model", nil
+			case "run-subagent":
+				// Phase 18 Track E e2e: agent calls the subagent tool
+				// with a research goal; the sub-loop returns a 1-paragraph
+				// finding; the parent picks it up via tool_result and
+				// ends its turn. The mock provider serves both parent +
+				// sub-loop turns from the same scripted queue, in order:
+				//   1. parent: call subagent({goal: ...})
+				//   2. sub-loop: return finding text + end_turn
+				//   3. parent: end_turn (uses the finding)
+				goal := os.Getenv("GIL_MOCK_SUBAGENT_GOAL")
+				if goal == "" {
+					goal = "find which file defines the main agent loop"
+				}
+				input, _ := json.Marshal(map[string]any{
+					"goal":           goal,
+					"max_iterations": 3,
+				})
+				return provider.NewMockToolProvider([]provider.MockTurn{
+					// Parent turn 1: invoke subagent tool.
+					{
+						Text: "Delegating research to a subagent.",
+						ToolCalls: []provider.ToolCall{{
+							ID: "sa1", Name: "subagent", Input: input,
+						}},
+						StopReason: "tool_use",
+					},
+					// Sub-loop turn 1: return the finding and end the
+					// sub-loop. The sub-loop's default tool set
+					// (read_file/repomap/memory_load/web_fetch/lsp) is
+					// filtered against the parent's available tools, so
+					// the sub-loop has whatever overlaps; the only
+					// sensible turn for this scripted scenario is
+					// "report the finding".
+					{
+						Text:       "core/runner/runner.go has main loop in func (a *AgentLoop) Run().",
+						StopReason: "end_turn",
+					},
+					// Parent turn 2: incorporate the finding and end.
+					{
+						Text:       "Got the finding from subagent. All done.",
+						StopReason: "end_turn",
+					},
+					// Parent turn 3: memory milestone gate (post-verify).
+					// The runner gives the agent one shot to call
+					// memory_update; we just respond with "no update" so
+					// the gate completes cleanly.
+					{
+						Text:       "no update",
+						StopReason: "end_turn",
+					},
+				}), "mock-model", nil
 			case "run-plan":
 				// Phase 18 Track A e2e: scripted plan-tool flow. The
 				// agent (1) sets a 3-item plan, (2) does some work and
