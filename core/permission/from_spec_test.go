@@ -35,17 +35,51 @@ func TestFromAutonomy_AskPerAction_AllowsReadOnly(t *testing.T) {
 	require.Equal(t, DecisionAllow, e.Evaluate("memory_load", "progress"))
 	require.Equal(t, DecisionAllow, e.Evaluate("repomap", ""))
 	require.Equal(t, DecisionAllow, e.Evaluate("compact_now", ""))
+	// lsp is read-only at the operation layer (rename returns edits but
+	// doesn't apply them, so the actual write is gated separately).
+	require.Equal(t, DecisionAllow, e.Evaluate("lsp", ""))
 	// Everything else → Ask (which becomes Deny in non-interactive Phase 7)
 	require.Equal(t, DecisionAsk, e.Evaluate("bash", "ls"))
 	require.Equal(t, DecisionAsk, e.Evaluate("write_file", "x"))
 	require.Equal(t, DecisionAsk, e.Evaluate("memory_update", "progress"))
 }
 
-func TestFromAutonomy_PlanOnly_DeniesAll(t *testing.T) {
+func TestFromAutonomy_PlanOnly_DeniesWrites_AllowsReadAndPlan(t *testing.T) {
+	// PLAN_ONLY blocks writes (bash/edit/write_file/apply_patch/exec)
+	// but allows the read-only investigation tools and the plan tool
+	// itself so the agent can deliver "read the codebase + write a
+	// plan + exit". lsp + web_fetch are also allowed (both read-only).
+	// web_search stays denied (paid backend, not authorized).
 	e := FromAutonomy(gilv1.AutonomyDial_PLAN_ONLY)
 	require.Equal(t, DecisionDeny, e.Evaluate("bash", "ls"))
-	require.Equal(t, DecisionDeny, e.Evaluate("read_file", "x"))
 	require.Equal(t, DecisionDeny, e.Evaluate("write_file", "x"))
+	require.Equal(t, DecisionDeny, e.Evaluate("edit", ""))
+	require.Equal(t, DecisionDeny, e.Evaluate("apply_patch", ""))
+	// Read-only / planning tools allowed.
+	require.Equal(t, DecisionAllow, e.Evaluate("plan", ""))
+	require.Equal(t, DecisionAllow, e.Evaluate("read_file", "main.go"))
+	require.Equal(t, DecisionAllow, e.Evaluate("memory_load", "progress"))
+	require.Equal(t, DecisionAllow, e.Evaluate("repomap", ""))
+	require.Equal(t, DecisionAllow, e.Evaluate("lsp", ""))
+	// web_fetch is research-grade read-only and useful for planning;
+	// web_search is denied (paid backend, not authorized for plan-only).
+	require.Equal(t, DecisionAllow, e.Evaluate("web_fetch", "https://x"))
+	require.Equal(t, DecisionDeny, e.Evaluate("web_search", "anything"))
+}
+
+func TestFromAutonomy_DestructiveOnly_AllowsWebTools(t *testing.T) {
+	// At ASK_DESTRUCTIVE_ONLY web_* are read-only verbs, allowed.
+	e := FromAutonomy(gilv1.AutonomyDial_ASK_DESTRUCTIVE_ONLY)
+	require.Equal(t, DecisionAllow, e.Evaluate("web_fetch", "https://x"))
+	require.Equal(t, DecisionAllow, e.Evaluate("web_search", "go testing"))
+}
+
+func TestFromAutonomy_AskPerAction_AsksWebTools(t *testing.T) {
+	// At ASK_PER_ACTION the user wants to confirm every outgoing
+	// network request, so web_* fall through to default Ask.
+	e := FromAutonomy(gilv1.AutonomyDial_ASK_PER_ACTION)
+	require.Equal(t, DecisionAsk, e.Evaluate("web_fetch", "https://x"))
+	require.Equal(t, DecisionAsk, e.Evaluate("web_search", "x"))
 }
 
 func TestFromAutonomy_DestructiveBashPatterns(t *testing.T) {

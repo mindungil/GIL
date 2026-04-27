@@ -17,6 +17,7 @@ import (
 	"github.com/mindungil/gil/core/instructions"
 	"github.com/mindungil/gil/core/memory"
 	"github.com/mindungil/gil/core/permission"
+	"github.com/mindungil/gil/core/plan"
 	"github.com/mindungil/gil/core/provider"
 	"github.com/mindungil/gil/core/stuck"
 	"github.com/mindungil/gil/core/tool"
@@ -85,6 +86,15 @@ type AgentLoop struct {
 	// Memory bank, optional. If non-nil, the system prompt prepends bank
 	// contents (full when small, progress-only when large).
 	Memory *memory.Bank
+
+	// Plan, when non-nil, is the per-session run plan (TODO checklist).
+	// SessionID below disambiguates which session's plan to load. The
+	// runner reads the plan once per iteration to prepend a brief
+	// summary into the system prompt. All mutations flow through the
+	// plan tool, never the loop directly. Both nil-checked: leaving
+	// Plan unset disables the feature entirely (no prompt prepend).
+	Plan      *plan.Store
+	SessionID string
 
 	// Compactor + budget. If nil, no compaction.
 	Compactor        *compact.Compactor
@@ -282,8 +292,20 @@ func (a *AgentLoop) Run(ctx context.Context) (*Result, error) {
 		// extraSystemNote is set (injected by a stuck-recovery strategy),
 		// append it as an URGENT NOTE and then clear it (single-shot).
 		iterSystem := system
+		// Plan prepend (Phase 18): when the agent has populated a plan
+		// for this session, include a short summary at the top of the
+		// system prompt so the model carries it across iterations and
+		// after compaction. We render fresh from disk each iteration —
+		// the plan is the source of truth, not whatever rendering the
+		// previous iteration emitted. Empty plan → no prepend (keeps
+		// the cache prefix stable for sessions that never use plan).
+		if a.Plan != nil && a.SessionID != "" {
+			if pl, perr := a.Plan.Load(a.SessionID); perr == nil && !pl.IsEmpty() {
+				iterSystem = renderPlanForPrompt(pl) + "\n\n" + iterSystem
+			}
+		}
 		if a.extraSystemNote != "" {
-			iterSystem = system + "\n\n## URGENT NOTE\n" + a.extraSystemNote
+			iterSystem = iterSystem + "\n\n## URGENT NOTE\n" + a.extraSystemNote
 			a.extraSystemNote = "" // single-shot: clear after one use
 		}
 
@@ -1067,10 +1089,91 @@ func permissionKeyFor(toolName string, input json.RawMessage) string {
 		return ""
 	case "apply_patch":
 		return ""
-	case "repomap", "compact_now":
+	case "repomap", "compact_now", "plan":
+		return ""
+	case "lsp":
+		// Use the operation name so users can scope persistent rules
+		// (e.g., always allow lsp/hover but ask on lsp/rename). The
+		// agent passes operation as the discriminator field on every
+		// call, so this stays meaningful even across renames.
+		if v, ok := m["operation"].(string); ok {
+			return v
+		}
+		return ""
+	case "web_fetch":
+		// Use the URL as the rule key so users can pin allow/deny
+		// patterns by host or full URL (e.g., "https://internal.corp/*").
+		if v, ok := m["url"].(string); ok {
+			return v
+		}
+		return ""
+	case "web_search":
+		// Use the query so users can deny obviously-sensitive lookups
+		// at the rule layer if they wish.
+		if v, ok := m["query"].(string); ok {
+			return v
+		}
 		return ""
 	}
 	return ""
+}
+
+// renderPlanForPrompt builds the brief plan summary that gets prepended
+// to the per-iteration system prompt. Format follows the spec:
+//
+//	=== PLAN (3 items: 1 done, 1 in progress, 1 pending) ===
+//	✓ analyze repomap
+//	● refactor theme provider
+//	○ add toggle
+//	=========================================================
+//
+// Aesthetic glyphs (✓ ● ○) per terminal-aesthetic.md §3 (Iconography).
+// We use the Unicode glyphs unconditionally here — this string lives in
+// the system prompt sent to the model, not on the human's terminal, so
+// the locale-based ASCII fallback that the TUI/CLI apply doesn't apply.
+//
+// One level of sub-items is rendered with two-space indent. Note text
+// (when set) is appended as " — <note>" to keep one-item-per-line.
+func renderPlanForPrompt(p *plan.Plan) string {
+	if p == nil || len(p.Items) == 0 {
+		return ""
+	}
+	pen, ip, comp := p.Counts()
+	total := pen + ip + comp
+	header := fmt.Sprintf("=== PLAN (%d items: %d done, %d in progress, %d pending) ===",
+		total, comp, ip, pen)
+
+	var lines []string
+	lines = append(lines, header)
+	for _, it := range p.Items {
+		lines = append(lines, planLine(it, ""))
+		for _, sub := range it.Sub {
+			lines = append(lines, planLine(sub, "  "))
+		}
+	}
+	footer := strings.Repeat("=", len(header))
+	lines = append(lines, footer)
+	return strings.Join(lines, "\n")
+}
+
+// planLine renders one item under renderPlanForPrompt with the given
+// indent prefix. Glyphs are spec-aligned: ✓ done, ● in progress, ○
+// pending.
+func planLine(it plan.Item, indent string) string {
+	var glyph string
+	switch it.Status {
+	case plan.Completed:
+		glyph = "✓"
+	case plan.InProgress:
+		glyph = "●"
+	default:
+		glyph = "○"
+	}
+	body := fmt.Sprintf("%s%s %s", indent, glyph, it.Text)
+	if it.Note != "" {
+		body += " — " + it.Note
+	}
+	return body
 }
 
 // estimateMessagesTokens uses the same 4-chars-per-token heuristic as compact.estimateTokens.

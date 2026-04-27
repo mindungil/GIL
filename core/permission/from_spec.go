@@ -12,10 +12,16 @@ import (
 //
 //	FULL / UNSPECIFIED   → nil (no gating; all allowed)
 //	ASK_DESTRUCTIVE_ONLY → deny destructive bash patterns; allow rest
-//	ASK_PER_ACTION       → allow only read-only ops + memory_load + repomap;
-//	                       everything else falls through to default Ask (which
-//	                       becomes Deny in Phase 7 non-interactive mode)
-//	PLAN_ONLY            → deny all tools (effectively halts execution)
+//	ASK_PER_ACTION       → allow only read-only ops + memory_load + repomap
+//	                       + lsp; everything else (including web_*) falls
+//	                       through to default Ask (which becomes Deny in
+//	                       Phase 7 non-interactive mode) — at this dial
+//	                       the user wants to confirm every outgoing
+//	                       network request explicitly.
+//	PLAN_ONLY            → deny all tools EXCEPT lsp + web_fetch (both
+//	                       read-only; web_search stays denied because it
+//	                       can cost money on paid backends and the user
+//	                       has not authorized spend for a plan-only run)
 func FromAutonomy(autonomy gilv1.AutonomyDial) *Evaluator {
 	switch autonomy {
 	case gilv1.AutonomyDial_FULL, gilv1.AutonomyDial_AUTONOMY_UNSPECIFIED:
@@ -37,11 +43,36 @@ func FromAutonomy(autonomy gilv1.AutonomyDial) *Evaluator {
 			{Tool: "memory_load", Key: "*", Action: DecisionAllow},
 			{Tool: "repomap", Key: "*", Action: DecisionAllow},
 			{Tool: "compact_now", Key: "*", Action: DecisionAllow},
+			// lsp is read-only at the operation layer — rename returns a
+			// WorkspaceEdit but doesn't apply it; the agent must call
+			// edit/apply_patch separately, which IS gated. Allow freely
+			// so the agent can use code intelligence to plan safer changes.
+			{Tool: "lsp", Key: "*", Action: DecisionAllow},
 		}}
 
 	case gilv1.AutonomyDial_PLAN_ONLY:
+		// PLAN_ONLY blocks all writes (bash/edit/write_file/apply_patch
+		// /exec). The read-only investigation tools and the plan tool
+		// itself are explicitly allowed so the agent can deliver on
+		// "read the codebase + write a plan + exit" — which is the
+		// whole point of the dial. web_fetch is research-grade
+		// read-only and useful for planning; web_search is denied
+		// because it can cost the operator money on paid backends and
+		// the user has not yet approved spend for this run.
+		//
+		// Rule ordering: deny-everything catch-all first, allow rules
+		// LAST (last-matching wins per Evaluator semantics).
 		return &Evaluator{Rules: []Rule{
 			{Tool: "*", Key: "*", Action: DecisionDeny},
+			{Tool: "plan", Key: "*", Action: DecisionAllow},
+			{Tool: "read_file", Key: "*", Action: DecisionAllow},
+			{Tool: "memory_load", Key: "*", Action: DecisionAllow},
+			{Tool: "memory_update", Key: "*", Action: DecisionAllow},
+			{Tool: "repomap", Key: "*", Action: DecisionAllow},
+			{Tool: "compact_now", Key: "*", Action: DecisionAllow},
+			{Tool: "web_fetch", Key: "*", Action: DecisionAllow},
+			// lsp (Track C) is read-only at the operation layer.
+			{Tool: "lsp", Key: "*", Action: DecisionAllow},
 		}}
 	}
 	// Unknown autonomy values default to FULL (backwards-compat for newly

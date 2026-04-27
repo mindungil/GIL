@@ -17,6 +17,7 @@ import (
 	"github.com/mindungil/gil/core/checkpoint"
 	"github.com/mindungil/gil/core/event"
 	"github.com/mindungil/gil/core/exec"
+	"github.com/mindungil/gil/core/lsp"
 	"github.com/mindungil/gil/core/mcpregistry"
 	"github.com/mindungil/gil/core/memory"
 	"github.com/mindungil/gil/core/paths"
@@ -788,8 +789,37 @@ func (s *RunService) executeRun(
 		&tool.MemoryUpdate{Bank: bank},
 		&tool.MemoryLoad{Bank: bank},
 		&tool.Edit{WorkingDir: workspaceDir},
-		&tool.ApplyPatch{WorkspaceDir: workspaceDir}, // NEW
+		&tool.ApplyPatch{WorkspaceDir: workspaceDir},
+		// web_fetch / web_search are always-on. The fetch tool is
+		// read-only and unconditionally available; the search tool
+		// reports "no backend configured" gracefully when neither
+		// BRAVE_SEARCH_API_KEY nor TAVILY_API_KEY is set, so the agent
+		// can decide whether to fall back to web_fetch on a known URL.
+		&tool.WebFetch{},
+		&tool.WebSearch{},
 	)
+
+	// LSP manager + tool (Phase 18 Track C). One manager per run, scoped
+	// to the workspace root; servers (gopls / pyright /
+	// typescript-language-server / rust-analyzer) are spawned lazily on
+	// first use, so runs that never touch the lsp tool pay nothing. The
+	// deferred Shutdown reaps every spawned subprocess when the run
+	// ends, even on panic / cancel.
+	//
+	// When workspaceDir is empty (rare — local backend without a
+	// configured path) we still construct the manager so the lsp tool
+	// can return its actionable "no language server configured" hint
+	// instead of a misleading "tool unavailable" error.
+	lspMgr := lsp.NewManager(workspaceDir)
+	tools = append(tools, &tool.LSP{Manager: lspMgr, WorkingDir: workspaceDir})
+	defer func() {
+		// Best-effort: a 5-second budget is plenty for the polite
+		// shutdown handshake; if any server hangs, the manager force-
+		// kills internally so we never leak children.
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = lspMgr.Shutdown(shutdownCtx)
+	}()
 
 	// exec tool: Recipe runner. Inner tools = everything else built so far.
 	// Filtering happens inside ExecTool.Run defensively.
