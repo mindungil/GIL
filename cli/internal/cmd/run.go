@@ -81,7 +81,7 @@ func runCmd() *cobra.Command {
 		},
 	}
 	c.Flags().StringVar(&socket, "socket", defaultSocket(), "gild UDS socket path")
-	c.Flags().StringVar(&providerName, "provider", "anthropic", "LLM provider (anthropic|mock)")
+	c.Flags().StringVar(&providerName, "provider", "anthropic", "LLM provider (anthropic|openai|openrouter|vllm|mock)")
 	c.Flags().StringVar(&model, "model", "", "LLM model id (empty → provider default)")
 	c.Flags().BoolVar(&detach, "detach", false, "start run in background and return immediately")
 	c.Flags().BoolVar(&interactive, "interactive", false, "start run in background and accept slash commands from stdin")

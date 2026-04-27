@@ -39,12 +39,28 @@ func wrapRPCError(err error) error {
 		return cliutil.Wrap(err,
 			"no credentials for anthropic",
 			`set ANTHROPIC_API_KEY, or run "gil auth login anthropic"`)
+	case strings.Contains(msg, "no credentials for openai"):
+		return cliutil.Wrap(err,
+			"no credentials for openai",
+			`set OPENAI_API_KEY, or run "gil auth login openai"`)
+	case strings.Contains(msg, "no credentials for openrouter"):
+		return cliutil.Wrap(err,
+			"no credentials for openrouter",
+			`set OPENROUTER_API_KEY, or run "gil auth login openrouter"`)
+	case strings.Contains(msg, "no credentials for vllm: base URL required"):
+		return cliutil.Wrap(err,
+			"vllm requires a base URL",
+			`run "gil auth login vllm --base-url http://host:port/v1"`)
+	case strings.Contains(msg, "no credentials for vllm"):
+		return cliutil.Wrap(err,
+			"no credentials for vllm",
+			`run "gil auth login vllm --base-url http://host:port/v1"`)
 
 	// Unknown provider name passed to --provider.
 	case strings.Contains(msg, "unknown provider"):
 		return cliutil.Wrap(err,
 			extractAfter(msg, "provider: ") /* keep server's quoted name */,
-			`pick one of: anthropic, mock — or run "gil auth login <provider>"`)
+			`pick one of: anthropic, openai, openrouter, vllm, mock — or run "gil auth login <provider>"`)
 
 	// Spec must be frozen before "gil run". Keep the server's full sentence
 	// (including "current status: X") rather than slicing it — the user

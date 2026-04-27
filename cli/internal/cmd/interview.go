@@ -87,7 +87,12 @@ func interviewCmd() *cobra.Command {
 				return wrapRPCError(err)
 			}
 			if err := drainEvents(out, startStream); err != nil {
-				return err
+				// Server-side errors raised mid-stream (e.g. provider
+				// credential failures resolved by the factory only when
+				// the first turn runs) come back through Recv, so they
+				// get the same user-facing translation as direct RPC
+				// errors above.
+				return wrapRPCError(err)
 			}
 
 			// Reply loop
@@ -109,13 +114,13 @@ func interviewCmd() *cobra.Command {
 					return wrapRPCError(err)
 				}
 				if err := drainEvents(out, replyStream); err != nil {
-					return err
+					return wrapRPCError(err)
 				}
 			}
 		},
 	}
 	c.Flags().StringVar(&socket, "socket", defaultSocket(), "gild UDS socket path")
-	c.Flags().StringVar(&providerName, "provider", "anthropic", "LLM provider (anthropic|mock)")
+	c.Flags().StringVar(&providerName, "provider", "anthropic", "LLM provider (anthropic|openai|openrouter|vllm|mock)")
 	c.Flags().StringVar(&model, "model", "", "LLM model id (empty → provider default)")
 	return c
 }

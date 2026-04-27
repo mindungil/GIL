@@ -226,15 +226,64 @@ func newServer(dbPath, sockPath, sessionsBase, authFile string, authMW *auth.Mid
 				return nil, "", fmt.Errorf("no credentials for anthropic")
 			}
 			return provider.NewAnthropic(key), "claude-opus-4-7", nil
-		case "openai", "openrouter", "vllm":
-			// Stub: credstore lookup path exists so `gil auth login`
-			// for these providers writes to the right file, but the
-			// actual provider adapters land in Phase 12.
-			_, _ = lookupCredKey(authFile, credstore.ProviderName(name))
-			return nil, "", fmt.Errorf("provider %q not yet implemented (Phase 12)", name)
+		case "openai":
+			cred, _ := lookupCred(authFile, credstore.OpenAI)
+			key := ""
+			base := "https://api.openai.com/v1"
+			if cred != nil {
+				key = cred.APIKey
+				if cred.BaseURL != "" {
+					base = cred.BaseURL
+				}
+			}
+			if key == "" {
+				key = os.Getenv("OPENAI_API_KEY")
+			}
+			if key == "" {
+				return nil, "", fmt.Errorf("no credentials for openai")
+			}
+			return provider.NewOpenAI(key, base), "gpt-4o", nil
+		case "openrouter":
+			cred, _ := lookupCred(authFile, credstore.OpenRouter)
+			key := ""
+			base := "https://openrouter.ai/api/v1"
+			if cred != nil {
+				key = cred.APIKey
+				if cred.BaseURL != "" {
+					base = cred.BaseURL
+				}
+			}
+			if key == "" {
+				key = os.Getenv("OPENROUTER_API_KEY")
+			}
+			if key == "" {
+				return nil, "", fmt.Errorf("no credentials for openrouter")
+			}
+			return provider.NewOpenAI(key, base), "anthropic/claude-sonnet-4", nil
+		case "vllm", "local":
+			cred, _ := lookupCred(authFile, credstore.VLLM)
+			key, base := "", ""
+			if cred != nil {
+				key = cred.APIKey
+				base = cred.BaseURL
+			}
+			if base == "" {
+				base = os.Getenv("VLLM_BASE_URL")
+			}
+			if key == "" {
+				key = os.Getenv("VLLM_API_KEY")
+			}
+			if base == "" {
+				// vLLM has no canonical endpoint; refuse rather than guess.
+				return nil, "", fmt.Errorf("no credentials for vllm: base URL required")
+			}
+			// vLLM often runs unauthenticated, so an empty key is allowed —
+			// the OpenAI adapter omits the Authorization header in that case.
+			// The model name has no default; the caller must specify via
+			// spec.Models.Main since each vLLM deploy serves a different model.
+			return provider.NewOpenAI(key, base), "", nil
 		default:
-			// Listed providers reflect Phase 11 plan; not all are wired yet.
-			return nil, "", fmt.Errorf("unknown provider %q (available: anthropic, mock)", name)
+			return nil, "", fmt.Errorf("unknown provider %q (available: anthropic, openai, openrouter, vllm, mock)", name)
 		}
 	}
 
@@ -277,6 +326,19 @@ func lookupCredKey(authFile string, name credstore.ProviderName) (string, error)
 		return "", nil
 	}
 	return cred.APIKey, nil
+}
+
+// lookupCred returns the full credential record for name, or (nil, nil)
+// when no credstore file or entry exists. Unlike lookupCredKey, this
+// preserves BaseURL so providers like vllm and openrouter can use a
+// stored endpoint without extra plumbing. Errors are swallowed and
+// returned alongside nil so the factory can fall back to env vars.
+func lookupCred(authFile string, name credstore.ProviderName) (*credstore.Credential, error) {
+	if authFile == "" {
+		return nil, nil
+	}
+	store := credstore.NewFileStore(authFile)
+	return store.Get(context.Background(), name)
 }
 
 // AttachTCP binds an additional TCP listener and serves the same gRPC server on it.
