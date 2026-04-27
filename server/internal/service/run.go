@@ -22,6 +22,7 @@ import (
 	"github.com/mindungil/gil/core/memory"
 	"github.com/mindungil/gil/core/paths"
 	"github.com/mindungil/gil/core/permission"
+	"github.com/mindungil/gil/core/plan"
 	"github.com/mindungil/gil/core/provider"
 	"github.com/mindungil/gil/core/runner"
 	"github.com/mindungil/gil/core/session"
@@ -799,6 +800,39 @@ func (s *RunService) executeRun(
 		&tool.WebSearch{},
 	)
 
+	// Plan store + tool (Phase 18 Track A). The plan persists at
+	// <sessionsBase>/<sessionID>/plan.json and is the agent's TODO
+	// checklist surfaced in the TUI/CLI. The tool is added to the
+	// per-run set so the agent can call it directly; the loop's
+	// Plan/SessionID fields below let the runner prepend a plan
+	// summary to the system prompt every iteration. Emit closes over
+	// the per-session stream so plan_updated events flow to TUI/CLI
+	// observers.
+	planStore := plan.NewStore(s.sessionsBase)
+	planTool := &tool.Plan{
+		Store:     planStore,
+		SessionID: sessionID,
+		Emit: func(ctx context.Context, p *plan.Plan, op string) {
+			pen, ip, comp := p.Counts()
+			b, _ := json.Marshal(map[string]any{
+				"op":          op,
+				"version":     p.Version,
+				"items":       len(p.Items),
+				"pending":     pen,
+				"in_progress": ip,
+				"completed":   comp,
+			})
+			_, _ = stream.Append(event.Event{
+				Timestamp: time.Now().UTC(),
+				Source:    event.SourceAgent,
+				Kind:      event.KindObservation,
+				Type:      "plan_updated",
+				Data:      b,
+			})
+		},
+	}
+	tools = append(tools, planTool)
+
 	// LSP manager + tool (Phase 18 Track C). One manager per run, scoped
 	// to the workspace root; servers (gopls / pyright /
 	// typescript-language-server / rust-analyzer) are spawned lazily on
@@ -840,6 +874,11 @@ func (s *RunService) executeRun(
 	loop := runner.NewAgentLoop(spec, prov, model, tools, ver)
 	loop.Events = stream
 	loop.Memory = bank
+	// Plan wiring: same per-session store as the plan tool above; the
+	// runner uses it ONLY for the system-prompt prepend (read-side).
+	// All mutations flow through the tool, never the loop directly.
+	loop.Plan = planStore
+	loop.SessionID = sessionID
 
 	// Register the loop pointer so RequestCompact / PostHint RPCs can
 	// stage actions for the next iteration boundary. Cleared in the
