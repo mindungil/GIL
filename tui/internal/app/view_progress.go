@@ -44,6 +44,62 @@ func parseVerifyChecks(raw []byte) []string {
 	return out
 }
 
+// parseBudgetEvent extracts (reason, used, limit) from a budget_warning
+// or budget_exceeded payload. The runner emits "tokens" with int64
+// counters and "cost" with float64 USD; we read both as float64 so a
+// single helper covers both shapes (cost.used is e.g. 0.61, tokens.used
+// is e.g. 75000, both round-trip cleanly through JSON's number type).
+//
+// Returns ("", 0, 0) on parse failure so callers can ignore malformed
+// payloads silently — a missing budget event is preferable to a
+// half-rendered meter pointing at nonsense numbers.
+func parseBudgetEvent(raw []byte) (reason string, used, limit float64) {
+	if len(raw) == 0 {
+		return "", 0, 0
+	}
+	var d struct {
+		Reason string  `json:"reason"`
+		Used   float64 `json:"used"`
+		Limit  float64 `json:"limit"`
+	}
+	if err := json.Unmarshal(raw, &d); err != nil {
+		return "", 0, 0
+	}
+	return d.Reason, d.Used, d.Limit
+}
+
+// applyBudget folds a budget event into the ProgressData. The reason
+// dispatches to the right pair of fields; we deliberately copy `used`
+// onto the live counter as well so the meter renders even between
+// iteration_start events (the session row's CurrentTokens lags by one
+// stream tick).
+func applyBudget(pd *ProgressData, reason string, used, limit float64, exceeded bool) {
+	switch reason {
+	case "tokens":
+		if limit > 0 {
+			pd.TokensBudget = int64(limit)
+		}
+		// Don't overwrite the live in/out split — the row helper sums
+		// them. Just make sure the totals are at least as high as the
+		// reported `used` so the meter doesn't snap backwards if events
+		// land out of order.
+		if int64(used) > pd.TokensIn+pd.TokensOut {
+			pd.TokensIn = int64(used) // accumulate as input-side; sum is what the renderer cares about
+			pd.TokensOut = 0
+		}
+	case "cost":
+		if limit > 0 {
+			pd.CostBudget = limit
+		}
+		if used > pd.CostUSD {
+			pd.CostUSD = used
+		}
+	}
+	if exceeded {
+		pd.BudgetExceeded = true
+	}
+}
+
 // parseStuckPattern returns the "pattern" field from a stuck_detected.
 func parseStuckPattern(raw []byte) string {
 	var d struct {
@@ -180,6 +236,83 @@ func humanTokens(n int64) string {
 	}
 }
 
+// renderBudgetMeter renders the "<used> / <total>   <bar>   <pct>%"
+// suffix used by the Tokens and Cost rows when the spec set a cap on
+// that dimension. The bar fill / percentage text shifts color at the
+// 75% (caution → amber) and 100% (alert → coral) thresholds per
+// terminal-aesthetic.md §1; when both severities apply only the
+// higher one is shown (caller passes exceeded=true to force coral).
+//
+// The 10-cell bar mirrors the spec mockup width and is intentionally
+// shorter than the Progress row's 12 cells so the eye reads them as
+// distinct meters rather than a stacked total.
+func renderBudgetMeter(used, total string, frac float64, exceeded bool) string {
+	if frac < 0 {
+		frac = 0
+	}
+	if frac > 1 {
+		frac = 1
+	}
+	bar := renderProgressBar(frac, 10)
+	pct := fmt.Sprintf("%d%%", int(frac*100+0.5))
+	g := Glyphs()
+
+	// Severity selection: exceeded wins over warning so the same row
+	// never carries both ⚠ and ✗ (spec aesthetic budget: "never both at
+	// once"). The bar is recoloured by overwriting it with the alert
+	// palette when exceeded.
+	switch {
+	case exceeded:
+		// Recolor: build a fresh fully-filled coral bar so the user sees
+		// the run stopped rather than a half-filled "still going" bar.
+		bar = styleAlert(strings.Repeat(g.BarFill, 10))
+		pct = styleAlert(pct)
+		tail := "  " + styleAlert(g.Failed+" EXHAUSTED — run stopped")
+		return fmt.Sprintf("%s / %s   %s   %s%s", used, total, bar, pct, tail)
+	case frac >= 0.75:
+		// Warning: keep the success-colored bar (it's a normal in-progress
+		// run) but tint the percentage + add an amber suffix so a
+		// peripheral glance picks up the approaching limit.
+		pct = styleCaution(pct)
+		tail := "  " + styleCaution(g.Warn+" approaching limit")
+		return fmt.Sprintf("%s / %s   %s   %s%s", used, total, bar, pct, tail)
+	default:
+		return fmt.Sprintf("%s / %s   %s   %s", used, total, bar, styleDim(pct))
+	}
+}
+
+// renderTokensRow returns the right-hand cell for the Tokens row. When
+// no token budget is set, falls back to the legacy "in / out" pair so
+// the row is unchanged for the no-budget case (the more common path).
+func renderTokensRow(p ProgressData) string {
+	base := formatTokensPair(p.TokensIn, p.TokensOut)
+	if p.TokensBudget <= 0 {
+		return base
+	}
+	used := p.TokensIn + p.TokensOut
+	frac := float64(used) / float64(p.TokensBudget)
+	usedStr := humanTokens(used)
+	totStr := humanTokens(p.TokensBudget)
+	exceeded := p.BudgetExceeded && p.BudgetReason == "tokens"
+	return renderBudgetMeter(usedStr, totStr, frac, exceeded)
+}
+
+// renderCostRow returns the right-hand cell for the Cost row. When no
+// cost budget is set, falls back to the bare formatted value so the
+// existing layout (and Phase-14 cost trend in `gil watch`) is unchanged
+// for the no-budget case.
+func renderCostRow(p ProgressData) string {
+	base := formatCostUSD(p.CostUSD)
+	if p.CostBudget <= 0 {
+		return base
+	}
+	frac := p.CostUSD / p.CostBudget
+	usedStr := formatCostUSD(p.CostUSD)
+	totStr := formatCostUSD(p.CostBudget)
+	exceeded := p.BudgetExceeded && p.BudgetReason == "cost"
+	return renderBudgetMeter(usedStr, totStr, frac, exceeded)
+}
+
 // renderProgressPane composes the spec+progress block content (without
 // border). Layout per spec §6:
 //
@@ -211,8 +344,8 @@ func renderProgressPane(width int, p ProgressData) string {
 	rows := [][2]string{
 		{"Progress", strings.TrimSpace(bar + "  " + progressVal)},
 		{"Verify", renderVerifyMatrix(p.VerifyResults)},
-		{"Tokens", formatTokensPair(p.TokensIn, p.TokensOut)},
-		{"Cost", formatCostUSD(p.CostUSD)},
+		{"Tokens", renderTokensRow(p)},
+		{"Cost", renderCostRow(p)},
 		{"Stuck", renderStuckCell(p)},
 		{"Autonomy", styleDim(p.Autonomy)},
 	}
@@ -247,6 +380,12 @@ func renderStuckCell(p ProgressData) string {
 // ProgressData is the view-model for the progress pane. It's a flat
 // struct so renderers stay pure functions; the Update layer fills it
 // from session + tail events.
+//
+// TokensBudget / CostBudget are 0 when the spec didn't set a cap on
+// that dimension; renderers must treat zero as "no budget" and fall
+// back to the bare value. BudgetExceeded is a sticky bit set when the
+// runner emits budget_exceeded so the row stays in the alert palette
+// even after the run stops and the live counter rolls over.
 type ProgressData struct {
 	Goal           string
 	Iter           int32
@@ -254,7 +393,11 @@ type ProgressData struct {
 	VerifyResults  []string // "pass" / "fail" / "skip" / ""
 	TokensIn       int64
 	TokensOut      int64
+	TokensBudget   int64
 	CostUSD        float64
+	CostBudget     float64
+	BudgetExceeded bool   // sticky after a budget_exceeded event
+	BudgetReason   string // "tokens" | "cost" — set with BudgetExceeded
 	Autonomy       string
 	StuckPattern   string // empty when not stuck
 	StuckRecovery  string // strategy currently in flight

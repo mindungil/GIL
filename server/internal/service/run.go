@@ -40,9 +40,17 @@ import (
 )
 
 // runProgressSnap holds live iteration/token counters for an active run.
+//
+// cost / budgetExceeded / budgetReason are populated by the run's event
+// subscriber when budget_warning / budget_exceeded fire so other RPCs
+// (Session.toProto) can surface the alert state without needing to
+// re-derive the per-iteration cost themselves.
 type runProgressSnap struct {
-	iters  int32
-	tokens int64
+	iters          int32
+	tokens         int64
+	cost           float64
+	budgetExceeded bool
+	budgetReason   string
 }
 
 // pendingAsk records everything AnswerPermission needs to dispatch a
@@ -106,6 +114,20 @@ func (s *RunService) Progress(sessionID string) (iters int32, tokens int64, ok b
 		return 0, 0, false
 	}
 	return p.iters, p.tokens, true
+}
+
+// Budget implements service.BudgetGetter. Returns the live cost +
+// sticky budget_exceeded flag for the in-flight run. ok=false when
+// there is no active run for sessionID — SessionService falls back
+// to the persisted rollup in that case.
+func (s *RunService) Budget(sessionID string) (cost float64, exceeded bool, reason string, ok bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p, ok := s.runProgress[sessionID]
+	if !ok {
+		return 0, false, "", false
+	}
+	return p.cost, p.budgetExceeded, p.budgetReason, true
 }
 
 func (s *RunService) sessionDir(sessionID string) string {
@@ -575,6 +597,25 @@ func (s *RunService) executeRun(
 				}
 				if evt.Metrics.Tokens > 0 {
 					snap.tokens += evt.Metrics.Tokens
+				}
+				// Budget signals: parse the JSON payload so the live
+				// cost + sticky exceeded flag are available to
+				// SessionService.toProto(). budget_warning carries the
+				// running cost; budget_exceeded latches the alert bit.
+				if evt.Type == "budget_warning" || evt.Type == "budget_exceeded" {
+					var d struct {
+						Reason string  `json:"reason"`
+						Used   float64 `json:"used"`
+					}
+					if jerr := json.Unmarshal(evt.Data, &d); jerr == nil {
+						if d.Reason == "cost" && d.Used > snap.cost {
+							snap.cost = d.Used
+						}
+						if evt.Type == "budget_exceeded" {
+							snap.budgetExceeded = true
+							snap.budgetReason = d.Reason
+						}
+					}
 				}
 			}
 			s.mu.Unlock()

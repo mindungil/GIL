@@ -297,7 +297,7 @@ func newServer(dbPath, sockPath, sessionsBase, authFile string, authMW *auth.Mid
 	g := grpc.NewServer(grpcOpts...)
 	repo := session.NewRepo(db)
 	runSvc := service.NewRunService(repo, sessionsBase, factory)
-	gilv1.RegisterSessionServiceServer(g, service.NewSessionService(repo, runSvc).WithSessionsBase(sessionsBase))
+	gilv1.RegisterSessionServiceServer(g, service.NewSessionService(repo, runSvc).WithSessionsBase(sessionsBase).WithBudgetGetter(runSvc))
 	gilv1.RegisterInterviewServiceServer(g, service.NewInterviewService(repo, sessionsBase, factory))
 	gilv1.RegisterRunServiceServer(g, runSvc)
 

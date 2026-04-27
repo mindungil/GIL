@@ -153,3 +153,141 @@ func TestRenderProgressPane_StuckExhausted(t *testing.T) {
 	out := renderProgressPane(80, pd)
 	require.Contains(t, out, "exhausted")
 }
+
+// Budget meter coverage — verifies the row shape under each band:
+//
+//   0%   plain "$0.00 / $5.00 ▱▱▱▱▱▱▱▱▱▱ 0%" (no warning glyph)
+//   50%  plain bar + dim percentage, no warning text
+//   80%  amber percentage + "approaching limit" warn text
+//   100% coral fill + "EXHAUSTED" alert text
+//
+// The 75% threshold is the same warning band as 80% so we don't
+// duplicate; the 100% case requires BudgetExceeded sticky bit because
+// the runner sets it as part of the budget_exceeded event payload.
+
+func TestRenderCostRow_NoBudget_FallsBackToBareValue(t *testing.T) {
+	nocolor(t)
+	unicodeOnly(t)
+	out := renderCostRow(ProgressData{CostUSD: 0.61})
+	require.Equal(t, "$0.61", out)
+}
+
+func TestRenderCostRow_Budget_ZeroPercent(t *testing.T) {
+	nocolor(t)
+	unicodeOnly(t)
+	pd := ProgressData{CostUSD: 0.00, CostBudget: 5.00}
+	out := renderCostRow(pd)
+	require.Contains(t, out, "$0.00 / $5.00")
+	require.Contains(t, out, "0%")
+	require.NotContains(t, out, "approaching")
+	require.NotContains(t, out, "EXHAUSTED")
+}
+
+func TestRenderCostRow_Budget_FiftyPercent(t *testing.T) {
+	nocolor(t)
+	unicodeOnly(t)
+	pd := ProgressData{CostUSD: 2.50, CostBudget: 5.00}
+	out := renderCostRow(pd)
+	require.Contains(t, out, "$2.50 / $5.00")
+	require.Contains(t, out, "50%")
+	require.NotContains(t, out, "approaching")
+}
+
+func TestRenderCostRow_Budget_EightyPercent_ShowsWarning(t *testing.T) {
+	nocolor(t)
+	unicodeOnly(t)
+	pd := ProgressData{CostUSD: 4.00, CostBudget: 5.00}
+	out := renderCostRow(pd)
+	require.Contains(t, out, "$4.00 / $5.00")
+	require.Contains(t, out, "80%")
+	require.Contains(t, out, "approaching limit")
+	require.Contains(t, out, "⚠")
+}
+
+func TestRenderCostRow_Budget_ExceededShowsAlert(t *testing.T) {
+	nocolor(t)
+	unicodeOnly(t)
+	pd := ProgressData{
+		CostUSD: 5.02, CostBudget: 5.00,
+		BudgetExceeded: true,
+		BudgetReason:   "cost",
+	}
+	out := renderCostRow(pd)
+	require.Contains(t, out, "EXHAUSTED")
+	require.Contains(t, out, "✗")
+	require.NotContains(t, out, "approaching", "amber+coral never both at once per spec")
+}
+
+func TestRenderTokensRow_NoBudget_FallsBackToPair(t *testing.T) {
+	nocolor(t)
+	unicodeOnly(t)
+	out := renderTokensRow(ProgressData{TokensIn: 32100, TokensOut: 8400})
+	require.Equal(t, "32.1K in / 8.4K out", out)
+}
+
+func TestRenderTokensRow_Budget_PercentBands(t *testing.T) {
+	nocolor(t)
+	unicodeOnly(t)
+
+	// 50% — no warning
+	pd := ProgressData{TokensIn: 25_000, TokensOut: 25_000, TokensBudget: 100_000}
+	out := renderTokensRow(pd)
+	require.Contains(t, out, "50%")
+	require.NotContains(t, out, "approaching")
+
+	// 80% — amber warning
+	pd = ProgressData{TokensIn: 40_000, TokensOut: 40_000, TokensBudget: 100_000}
+	out = renderTokensRow(pd)
+	require.Contains(t, out, "80%")
+	require.Contains(t, out, "approaching limit")
+
+	// 100%+ — coral exhaust
+	pd = ProgressData{
+		TokensIn: 60_000, TokensOut: 50_000, TokensBudget: 100_000,
+		BudgetExceeded: true,
+		BudgetReason:   "tokens",
+	}
+	out = renderTokensRow(pd)
+	require.Contains(t, out, "EXHAUSTED")
+}
+
+func TestRenderProgressPane_BudgetVisibleAndOnlyOneSeverity(t *testing.T) {
+	unicodeOnly(t)
+	nocolor(t)
+	// Cost is exhausted; tokens are at 80% — both severity bands would
+	// otherwise compete on the same screen. Per spec the higher severity
+	// (coral) wins on the cost row, while the tokens row stays amber.
+	pd := ProgressData{
+		Goal:           "Add dark mode",
+		Iter:           50,
+		MaxIter:        100,
+		TokensIn:       40_000,
+		TokensOut:      40_000,
+		TokensBudget:   100_000,
+		CostUSD:        5.02,
+		CostBudget:     5.00,
+		BudgetExceeded: true,
+		BudgetReason:   "cost",
+		Autonomy:       "ASK_DESTRUCTIVE",
+	}
+	out := renderProgressPane(80, pd)
+	require.Contains(t, out, "EXHAUSTED", "cost row in alert")
+	require.Contains(t, out, "approaching limit", "tokens row in caution")
+}
+
+func TestParseBudgetEvent_TokensAndCost(t *testing.T) {
+	r, used, lim := parseBudgetEvent([]byte(`{"reason":"tokens","used":750,"limit":1000,"fraction":0.75}`))
+	require.Equal(t, "tokens", r)
+	require.Equal(t, 750.0, used)
+	require.Equal(t, 1000.0, lim)
+
+	r, used, lim = parseBudgetEvent([]byte(`{"reason":"cost","used":3.85,"limit":5.0,"fraction":0.77}`))
+	require.Equal(t, "cost", r)
+	require.InDelta(t, 3.85, used, 0.001)
+	require.Equal(t, 5.0, lim)
+
+	r, used, lim = parseBudgetEvent(nil)
+	require.Equal(t, "", r)
+	require.Equal(t, 0.0, used)
+	require.Equal(t, 0.0, lim)
+}

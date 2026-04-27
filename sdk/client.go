@@ -57,6 +57,11 @@ type CreateOptions struct {
 // the proto field (e.g. older daemons). TotalTokens / TotalCostUSD
 // are the persisted rollup; CurrentIteration / CurrentTokens are
 // the live snapshot for RUNNING sessions.
+//
+// BudgetMaxTokens / BudgetMaxCostUSD are zero when the spec didn't
+// set a cap on that dimension. BudgetExceeded is the sticky flag
+// the server sets after observing a budget_exceeded event; clients
+// use it to keep the alert glyph on the row after the run stops.
 type Session struct {
 	ID               string
 	Status           string
@@ -69,6 +74,10 @@ type Session struct {
 	TotalCostUSD     float64
 	CurrentIteration int32
 	CurrentTokens    int64
+	BudgetMaxTokens  int64
+	BudgetMaxCostUSD float64
+	BudgetExceeded   bool
+	BudgetReason     string
 }
 
 // CreateSession creates a new session with the given options.
@@ -134,6 +143,10 @@ func fromProto(s *gilv1.Session) *Session {
 		TotalCostUSD:     s.TotalCostUsd,
 		CurrentIteration: s.CurrentIteration,
 		CurrentTokens:    s.CurrentTokens,
+		BudgetMaxTokens:  s.BudgetMaxTokens,
+		BudgetMaxCostUSD: s.BudgetMaxCostUsd,
+		BudgetExceeded:   s.BudgetExceeded,
+		BudgetReason:     s.BudgetReason,
 	}
 	if s.CreatedAt != nil {
 		out.CreatedAt = s.CreatedAt.AsTime()

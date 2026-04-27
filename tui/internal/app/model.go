@@ -123,6 +123,15 @@ func (m *Model) rebuildProgressFromEvents() {
 			stuckRecovery = parseStuckStrategy(ev.GetDataJson())
 		case "stuck_unrecovered":
 			stuckExhausted = true
+		case "budget_warning":
+			// Pick up the cap from the warning payload so the meter
+			// can render even if the TUI never fetched the spec.
+			reason, used, limit := parseBudgetEvent(ev.GetDataJson())
+			applyBudget(&pd, reason, used, limit, false)
+		case "budget_exceeded":
+			reason, used, limit := parseBudgetEvent(ev.GetDataJson())
+			applyBudget(&pd, reason, used, limit, true)
+			pd.BudgetReason = reason
 		}
 	}
 	pd.StuckPattern = stuckPattern

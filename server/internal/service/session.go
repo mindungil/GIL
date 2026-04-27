@@ -12,6 +12,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/mindungil/gil/core/session"
+	"github.com/mindungil/gil/core/specstore"
 	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
 )
 
@@ -21,11 +22,22 @@ type ProgressGetter interface {
 	Progress(sessionID string) (iters int32, tokens int64, ok bool)
 }
 
+// BudgetGetter exposes the latest live budget snapshot for a session.
+// Implementations may return `ok=false` when the session has no active
+// run; SessionService will then fall back to the on-disk spec for the
+// caps and report exceeded=false. Kept separate from ProgressGetter so
+// the two interfaces can be wired independently — the unit tests for
+// SessionService don't need to model budget semantics.
+type BudgetGetter interface {
+	Budget(sessionID string) (cost float64, exceeded bool, reason string, ok bool)
+}
+
 // SessionService implements the gRPC SessionService server-side handler.
 type SessionService struct {
 	gilv1.UnimplementedSessionServiceServer
 	repo     *session.Repo
 	progress ProgressGetter // may be nil for tests/standalone
+	budgets  BudgetGetter   // may be nil for tests/standalone
 	// sessionsBase is the on-disk root under which per-session
 	// workspace dirs live (Layout.SessionsDir()). When non-empty,
 	// Delete will recursively unlink <sessionsBase>/<id> after the
@@ -52,6 +64,14 @@ func NewSessionService(repo *session.Repo, progress ProgressGetter) *SessionServ
 // `service.NewSessionService(...).WithSessionsBase(layout.SessionsDir())`.
 func (s *SessionService) WithSessionsBase(base string) *SessionService {
 	s.sessionsBase = base
+	return s
+}
+
+// WithBudgetGetter wires a BudgetGetter (typically *RunService) so
+// SessionService can populate the live budget_exceeded / cost fields
+// on RUNNING sessions. nil is OK and results in zero values.
+func (s *SessionService) WithBudgetGetter(b BudgetGetter) *SessionService {
+	s.budgets = b
 	return s
 }
 
@@ -164,6 +184,16 @@ func dirSize(dir string) int64 {
 // toProto converts a core Session to a proto Session. When the session status
 // is "running" and a ProgressGetter is wired in, it enriches the response with
 // live iteration and token counts.
+//
+// Budget fields are best-effort: when sessionsBase is set we read the
+// frozen spec from disk to copy MaxTotalTokens / MaxTotalCostUsd. The
+// live "exceeded" sticky flag comes from the BudgetGetter (when
+// wired); for finished sessions where the live state has been torn
+// down, the sticky field remains false — long-term persistence of
+// budget_exceeded would require a session-row migration, which we
+// defer. Disk read errors are silently ignored: the row still
+// renders with zero budget caps and the client falls back to the
+// no-budget display.
 func (s *SessionService) toProto(sess session.Session) *gilv1.Session {
 	p := &gilv1.Session{
 		Id:           sess.ID,
@@ -180,6 +210,26 @@ func (s *SessionService) toProto(sess session.Session) *gilv1.Session {
 		if iters, tokens, ok := s.progress.Progress(sess.ID); ok {
 			p.CurrentIteration = iters
 			p.CurrentTokens = tokens
+		}
+	}
+	if s.sessionsBase != "" && sess.SpecID != "" {
+		dir := filepath.Join(s.sessionsBase, sess.ID)
+		store := specstore.NewStore(dir)
+		if fs, err := store.Load(); err == nil && fs != nil && fs.Budget != nil {
+			p.BudgetMaxTokens = fs.Budget.MaxTotalTokens
+			p.BudgetMaxCostUsd = fs.Budget.MaxTotalCostUsd
+		}
+	}
+	if s.budgets != nil {
+		if cost, exceeded, reason, ok := s.budgets.Budget(sess.ID); ok {
+			// Cost from the live snapshot supersedes the persisted
+			// rollup for RUNNING sessions — the persister only updates
+			// TotalCostUSD on row UpdateStatus.
+			if cost > p.TotalCostUsd {
+				p.TotalCostUsd = cost
+			}
+			p.BudgetExceeded = exceeded
+			p.BudgetReason = reason
 		}
 	}
 	return p
