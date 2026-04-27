@@ -16,8 +16,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/jedutools/gil/core/credstore"
-	"github.com/jedutools/gil/core/paths"
+	"github.com/mindungil/gil/core/credstore"
+	"github.com/mindungil/gil/core/paths"
 )
 
 // Status discriminates the four outcomes of a single check. INFO is the
@@ -268,25 +268,74 @@ func checkLegacyTilde(layout paths.Layout) Check {
 // so tests can swap in a temp PATH without affecting the rest of the
 // process. Missing `gild` is a FAIL because the daemon is essential —
 // every non-trivial gil command shells out to it.
-var lookPath = exec.LookPath
+//
+// Dev fallback: when PATH lookup fails, try `./bin/gild` relative to cwd
+// and `<exe-dir>/gild` (a sibling of the running gil binary). This makes
+// `./bin/gil doctor` work straight after `make build` without first
+// running `make install`. The fallback path is annotated " (dev)" so
+// the operator sees it isn't a globally-installed copy.
+var (
+	lookPath          = exec.LookPath
+	gildExecutableFn  = os.Executable
+	gildWorkingDirFn  = os.Getwd
+	gildStatFn        = os.Stat
+)
 
 func checkGildBinary() Check {
-	p, err := lookPath("gild")
-	if err != nil {
+	if p, err := lookPath("gild"); err == nil {
 		return Check{
 			Group:   "Daemon",
 			Name:    "gild binary",
-			Status:  StatusFail,
-			Message: "not found on PATH",
-			Hint:    `install with "make build install" or download a release bundle`,
+			Status:  StatusOK,
+			Message: p,
+		}
+	}
+	// Dev fallbacks. Prefer ./bin/gild (the make-build artifact) over
+	// the sibling-of-gil path because it's the location the project
+	// docs and Makefile both reference; the sibling probe catches the
+	// case where the gil binary itself was placed elsewhere (e.g.
+	// `go install` into GOBIN).
+	if p, ok := devGildPath(); ok {
+		return Check{
+			Group:   "Daemon",
+			Name:    "gild binary",
+			Status:  StatusOK,
+			Message: p + " (dev)",
 		}
 	}
 	return Check{
 		Group:   "Daemon",
 		Name:    "gild binary",
-		Status:  StatusOK,
-		Message: p,
+		Status:  StatusFail,
+		Message: "not found on PATH",
+		Hint:    `install with "make build install" or download a release bundle`,
 	}
+}
+
+// devGildPath returns a path to a `gild` binary discovered via the dev
+// fallbacks (cwd/bin/gild or sibling-of-exe), and ok=true when one was
+// found. The probes use the injectable seams so tests can drive them
+// hermetically.
+func devGildPath() (string, bool) {
+	candidates := []string{}
+	if cwd, err := gildWorkingDirFn(); err == nil {
+		candidates = append(candidates, filepath.Join(cwd, "bin", "gild"))
+	}
+	if exe, err := gildExecutableFn(); err == nil {
+		candidates = append(candidates, filepath.Join(filepath.Dir(exe), "gild"))
+	}
+	for _, c := range candidates {
+		info, err := gildStatFn(c)
+		if err != nil || info.IsDir() {
+			continue
+		}
+		// Executable bit check: at least one of u/g/o-x must be set.
+		if info.Mode()&0o111 == 0 {
+			continue
+		}
+		return c, true
+	}
+	return "", false
 }
 
 // checkDaemonRunning dials the gild Unix socket; OK when it answers,

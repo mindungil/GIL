@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jedutools/gil/core/credstore"
+	"github.com/mindungil/gil/core/credstore"
 )
 
 // withDoctorEnv pins HOME, GIL_HOME, and PATH to a controlled tmpdir
@@ -150,6 +150,10 @@ func TestDoctor_AfterInit_LayoutOK(t *testing.T) {
 
 func TestDoctor_GildMissing_Fails(t *testing.T) {
 	withDoctorEnv(t, false) // no gild shim under PATH
+	// Pin the dev-fallback seams to a tmpdir that has no gild, so the
+	// FAIL we observe is purely the PATH absence (and not accidentally
+	// rescued by a stray bin/gild in the dev tree where the test runs).
+	pinDevGildSeams(t, t.TempDir(), t.TempDir())
 
 	stdout, _, exit, err := runDoctorCmd(t)
 	if err != nil {
@@ -169,6 +173,80 @@ func TestDoctor_GildMissing_Fails(t *testing.T) {
 	if !strings.Contains(stdout, "FAIL") {
 		t.Errorf("expected FAIL counter > 0 in summary, got: %s", stdout)
 	}
+}
+
+// TestDoctor_GildDevFallback_CwdBin verifies the dev fallback: when `gild`
+// is absent from PATH but exists at `<cwd>/bin/gild`, doctor reports OK
+// (not FAIL) and annotates the path with a "(dev)" suffix.
+func TestDoctor_GildDevFallback_CwdBin(t *testing.T) {
+	withDoctorEnv(t, false) // gild explicitly NOT on PATH
+	cwd := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cwd, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gildPath := filepath.Join(cwd, "bin", "gild")
+	if err := os.WriteFile(gildPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pinDevGildSeams(t, cwd, t.TempDir())
+
+	stdout, _, exit, err := runDoctorCmd(t)
+	if err != nil {
+		t.Fatalf("doctor: %v", err)
+	}
+	if !strings.Contains(stdout, gildPath) {
+		t.Errorf("expected dev-fallback gild path %q in output, got: %s", gildPath, stdout)
+	}
+	if !strings.Contains(stdout, "(dev)") {
+		t.Errorf("expected '(dev)' annotation on gild path, got: %s", stdout)
+	}
+	if exit != 0 {
+		t.Errorf("expected exit 0 with dev-fallback gild present, got %d", exit)
+	}
+}
+
+// TestDoctor_GildDevFallback_Sibling verifies the second dev-fallback
+// probe: a `gild` next to the running gil executable. This is the
+// `go install`-into-GOBIN case where the cwd has no `bin/`.
+func TestDoctor_GildDevFallback_Sibling(t *testing.T) {
+	withDoctorEnv(t, false)
+	exeDir := t.TempDir()
+	gildPath := filepath.Join(exeDir, "gild")
+	if err := os.WriteFile(gildPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// cwd points somewhere with no bin/gild; the sibling probe must
+	// be the one that succeeds.
+	pinDevGildSeams(t, t.TempDir(), filepath.Join(exeDir, "gil"))
+
+	stdout, _, exit, err := runDoctorCmd(t)
+	if err != nil {
+		t.Fatalf("doctor: %v", err)
+	}
+	if !strings.Contains(stdout, gildPath) {
+		t.Errorf("expected sibling gild path %q in output, got: %s", gildPath, stdout)
+	}
+	if !strings.Contains(stdout, "(dev)") {
+		t.Errorf("expected '(dev)' annotation on gild path, got: %s", stdout)
+	}
+	if exit != 0 {
+		t.Errorf("expected exit 0 with sibling gild present, got %d", exit)
+	}
+}
+
+// pinDevGildSeams overrides the package-level cwd and exe seams so dev
+// fallback probes look at the test-controlled paths instead of wherever
+// `go test` happens to run. Both seams are restored by t.Cleanup.
+func pinDevGildSeams(t *testing.T, cwd, exePath string) {
+	t.Helper()
+	prevCwd := gildWorkingDirFn
+	prevExe := gildExecutableFn
+	gildWorkingDirFn = func() (string, error) { return cwd, nil }
+	gildExecutableFn = func() (string, error) { return exePath, nil }
+	t.Cleanup(func() {
+		gildWorkingDirFn = prevCwd
+		gildExecutableFn = prevExe
+	})
 }
 
 func TestDoctor_GitMissing_Fails(t *testing.T) {
