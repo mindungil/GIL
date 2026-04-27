@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jedutools/gil/core/tool"
+	"github.com/mindungil/gil/core/tool"
 )
 
 // Runner executes a Recipe.

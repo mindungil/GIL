@@ -11,8 +11,8 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"github.com/jedutools/gil/core/session"
-	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
+	"github.com/mindungil/gil/core/session"
+	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
 )
 
 func newTestService(t *testing.T) *SessionService {

@@ -11,10 +11,10 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/jedutools/gil/core/cliutil"
-	"github.com/jedutools/gil/core/cost"
-	"github.com/jedutools/gil/core/event"
-	"github.com/jedutools/gil/core/paths"
+	"github.com/mindungil/gil/core/cliutil"
+	"github.com/mindungil/gil/core/cost"
+	"github.com/mindungil/gil/core/event"
+	"github.com/mindungil/gil/core/paths"
 )
 
 // costCmd returns the `gil cost [<session-id>]` command. It reads the

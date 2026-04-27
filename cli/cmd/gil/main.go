@@ -1,8 +1,8 @@
 package main
 
 import (
-	"github.com/jedutools/gil/cli/internal/cmd"
-	"github.com/jedutools/gil/core/cliutil"
+	"github.com/mindungil/gil/cli/internal/cmd"
+	"github.com/mindungil/gil/core/cliutil"
 )
 
 func main() {

@@ -9,8 +9,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
-	"github.com/jedutools/gil/sdk"
+	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
+	"github.com/mindungil/gil/sdk"
 )
 
 // eventStream is satisfied by both Start and Reply client streams.

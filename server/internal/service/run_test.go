@@ -18,15 +18,15 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/test/bufconn"
 
-	"github.com/jedutools/gil/core/checkpoint"
-	"github.com/jedutools/gil/core/event"
-	"github.com/jedutools/gil/core/provider"
-	"github.com/jedutools/gil/core/session"
-	"github.com/jedutools/gil/core/specstore"
-	"github.com/jedutools/gil/core/tool"
-	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
-	"github.com/jedutools/gil/runtime/docker"
-	"github.com/jedutools/gil/runtime/local"
+	"github.com/mindungil/gil/core/checkpoint"
+	"github.com/mindungil/gil/core/event"
+	"github.com/mindungil/gil/core/provider"
+	"github.com/mindungil/gil/core/session"
+	"github.com/mindungil/gil/core/specstore"
+	"github.com/mindungil/gil/core/tool"
+	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
+	"github.com/mindungil/gil/runtime/docker"
+	"github.com/mindungil/gil/runtime/local"
 )
 
 func newRunSvc(t *testing.T, mockTurns []provider.MockTurn) (*RunService, *session.Repo, string) {

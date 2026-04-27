@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jedutools/gil/core/credstore"
+	"github.com/mindungil/gil/core/credstore"
 )
 
 // runAuthCmd executes a `gil auth ...` command in-process and returns the

@@ -451,7 +451,7 @@ const file_gil_v1_session_proto_rawDesc = "" +
 	"\x0eSessionService\x12I\n" +
 	"\x06Create\x12\x15.gil.v1.CreateRequest\x1a\x0f.gil.v1.Session\"\x17\x82\xd3\xe4\x93\x02\x11:\x01*\"\f/v1/sessions\x12E\n" +
 	"\x03Get\x12\x12.gil.v1.GetRequest\x1a\x0f.gil.v1.Session\"\x19\x82\xd3\xe4\x93\x02\x13\x12\x11/v1/sessions/{id}\x12G\n" +
-	"\x04List\x12\x13.gil.v1.ListRequest\x1a\x14.gil.v1.ListResponse\"\x14\x82\xd3\xe4\x93\x02\x0e\x12\f/v1/sessionsB1Z/github.com/jedutools/gil/proto/gen/gil/v1;gilv1b\x06proto3"
+	"\x04List\x12\x13.gil.v1.ListRequest\x1a\x14.gil.v1.ListResponse\"\x14\x82\xd3\xe4\x93\x02\x0e\x12\f/v1/sessionsB1Z/github.com/mindungil/gil/proto/gen/gil/v1;gilv1b\x06proto3"
 
 var (
 	file_gil_v1_session_proto_rawDescOnce sync.Once

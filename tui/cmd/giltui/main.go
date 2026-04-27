@@ -7,8 +7,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/jedutools/gil/core/version"
-	"github.com/jedutools/gil/tui/internal/app"
+	"github.com/mindungil/gil/core/version"
+	"github.com/mindungil/gil/tui/internal/app"
 )
 
 func main() {

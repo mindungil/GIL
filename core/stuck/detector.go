@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"strings"
 
-	"github.com/jedutools/gil/core/event"
+	"github.com/mindungil/gil/core/event"
 )
 
 // Pattern identifies a category of stuck behaviour.

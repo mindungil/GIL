@@ -3,7 +3,7 @@ package compact
 import (
 	"strings"
 
-	"github.com/jedutools/gil/core/provider"
+	"github.com/mindungil/gil/core/provider"
 )
 
 // BuildSummaryPrompt returns the LLM prompt used to compress a middle slice of

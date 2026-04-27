@@ -1,4 +1,4 @@
-module github.com/jedutools/gil/proto
+module github.com/mindungil/gil/proto
 
 go 1.25.0
 

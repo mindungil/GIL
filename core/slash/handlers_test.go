@@ -10,8 +10,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/jedutools/gil/core/checkpoint"
-	"github.com/jedutools/gil/core/paths"
+	"github.com/mindungil/gil/core/checkpoint"
+	"github.com/mindungil/gil/core/paths"
 )
 
 func newTestEnv(t *testing.T, sessionID string) (*Registry, *HandlerEnv, paths.Layout, string) {

@@ -320,7 +320,7 @@ const file_gil_v1_event_proto_rawDesc = "" +
 	"\n" +
 	"\x06ACTION\x10\x01\x12\x0f\n" +
 	"\vOBSERVATION\x10\x02\x12\b\n" +
-	"\x04NOTE\x10\x03B1Z/github.com/jedutools/gil/proto/gen/gil/v1;gilv1b\x06proto3"
+	"\x04NOTE\x10\x03B1Z/github.com/mindungil/gil/proto/gen/gil/v1;gilv1b\x06proto3"
 
 var (
 	file_gil_v1_event_proto_rawDescOnce sync.Once

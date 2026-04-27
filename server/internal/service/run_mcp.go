@@ -1,7 +1,7 @@
 package service
 
 import (
-	"github.com/jedutools/gil/core/mcpregistry"
+	"github.com/mindungil/gil/core/mcpregistry"
 )
 
 // mergeMCPServers returns a single map combining spec-pinned servers and

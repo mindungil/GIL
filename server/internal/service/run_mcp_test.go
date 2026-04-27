@@ -5,7 +5,7 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/jedutools/gil/core/mcpregistry"
+	"github.com/mindungil/gil/core/mcpregistry"
 )
 
 func TestMergeMCPServers_RegistryOnly(t *testing.T) {

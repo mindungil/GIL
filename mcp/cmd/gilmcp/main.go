@@ -8,11 +8,11 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/jedutools/gil/core/mcp/jsonrpc"
-	"github.com/jedutools/gil/core/paths"
-	"github.com/jedutools/gil/core/version"
-	"github.com/jedutools/gil/mcp/internal/server"
-	"github.com/jedutools/gil/sdk"
+	"github.com/mindungil/gil/core/mcp/jsonrpc"
+	"github.com/mindungil/gil/core/paths"
+	"github.com/mindungil/gil/core/version"
+	"github.com/mindungil/gil/mcp/internal/server"
+	"github.com/mindungil/gil/sdk"
 )
 
 func main() {

@@ -6,7 +6,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/jedutools/gil/sdk"
+	"github.com/mindungil/gil/sdk"
 )
 
 const eventBufferSize = 200

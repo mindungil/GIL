@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/jedutools/gil/core/tool"
+	"github.com/mindungil/gil/core/tool"
 )
 
 // RemoteTool wraps a single MCP-server-advertised tool as a core/tool.Tool.

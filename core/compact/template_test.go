@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jedutools/gil/core/provider"
+	"github.com/mindungil/gil/core/provider"
 	"github.com/stretchr/testify/require"
 )
 

@@ -7,7 +7,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/jedutools/gil/core/repomap"
+	"github.com/mindungil/gil/core/repomap"
 )
 
 func TestParseFile_Go_ExtractsSymbols(t *testing.T) {

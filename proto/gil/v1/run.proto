@@ -5,7 +5,7 @@ package gil.v1;
 import "gil/v1/event.proto";
 import "google/api/annotations.proto";
 
-option go_package = "github.com/jedutools/gil/proto/gen/gil/v1;gilv1";
+option go_package = "github.com/mindungil/gil/proto/gen/gil/v1;gilv1";
 
 service RunService {
   // Start runs the agent loop synchronously and returns the final result.

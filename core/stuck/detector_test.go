@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/jedutools/gil/core/event"
+	"github.com/mindungil/gil/core/event"
 )
 
 // --------------------------------------------------------------------------

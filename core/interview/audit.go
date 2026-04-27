@@ -7,7 +7,7 @@ import (
 
 	"google.golang.org/protobuf/encoding/protojson"
 
-	"github.com/jedutools/gil/core/provider"
+	"github.com/mindungil/gil/core/provider"
 )
 
 // SelfAuditGate is the explicit "is the agent ready to advance?" check at

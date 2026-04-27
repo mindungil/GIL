@@ -10,7 +10,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/jedutools/gil/core/provider"
+	"github.com/mindungil/gil/core/provider"
 )
 
 // Result describes what one compaction did.

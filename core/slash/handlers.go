@@ -12,9 +12,9 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/jedutools/gil/core/checkpoint"
-	"github.com/jedutools/gil/core/instructions"
-	"github.com/jedutools/gil/core/paths"
+	"github.com/mindungil/gil/core/checkpoint"
+	"github.com/mindungil/gil/core/instructions"
+	"github.com/mindungil/gil/core/paths"
 )
 
 // SessionInfo is a tiny sub-set of sdk.Session that the handlers need.

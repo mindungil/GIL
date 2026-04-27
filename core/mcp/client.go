@@ -17,7 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/jedutools/gil/core/mcp/jsonrpc"
+	"github.com/mindungil/gil/core/mcp/jsonrpc"
 )
 
 // Client speaks JSON-RPC 2.0 to a stdio MCP server subprocess.

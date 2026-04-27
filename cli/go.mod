@@ -1,11 +1,11 @@
-module github.com/jedutools/gil/cli
+module github.com/mindungil/gil/cli
 
 go 1.25.0
 
 require (
-	github.com/jedutools/gil/core v0.0.0-00010101000000-000000000000
-	github.com/jedutools/gil/proto v0.0.0
-	github.com/jedutools/gil/sdk v0.0.0-00010101000000-000000000000
+	github.com/mindungil/gil/core v0.0.0-00010101000000-000000000000
+	github.com/mindungil/gil/proto v0.0.0
+	github.com/mindungil/gil/sdk v0.0.0-00010101000000-000000000000
 	github.com/oklog/ulid/v2 v2.1.1
 	github.com/spf13/cobra v1.10.2
 	github.com/stretchr/testify v1.11.1
@@ -15,6 +15,7 @@ require (
 )
 
 require (
+	github.com/BurntSushi/toml v1.6.0 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.22.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
@@ -29,7 +30,7 @@ require (
 )
 
 replace (
-	github.com/jedutools/gil/core => ../core
-	github.com/jedutools/gil/proto => ../proto
-	github.com/jedutools/gil/sdk => ../sdk
+	github.com/mindungil/gil/core => ../core
+	github.com/mindungil/gil/proto => ../proto
+	github.com/mindungil/gil/sdk => ../sdk
 )

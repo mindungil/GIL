@@ -1265,7 +1265,7 @@ const file_gil_v1_spec_proto_rawDesc = "" +
 	"\tPLAN_ONLY\x10\x01\x12\x12\n" +
 	"\x0eASK_PER_ACTION\x10\x02\x12\x18\n" +
 	"\x14ASK_DESTRUCTIVE_ONLY\x10\x03\x12\b\n" +
-	"\x04FULL\x10\x04B1Z/github.com/jedutools/gil/proto/gen/gil/v1;gilv1b\x06proto3"
+	"\x04FULL\x10\x04B1Z/github.com/mindungil/gil/proto/gen/gil/v1;gilv1b\x06proto3"
 
 var (
 	file_gil_v1_spec_proto_rawDescOnce sync.Once

@@ -4,7 +4,7 @@ package gil.v1;
 
 import "gil/v1/spec.proto";
 
-option go_package = "github.com/jedutools/gil/proto/gen/gil/v1;gilv1";
+option go_package = "github.com/mindungil/gil/proto/gen/gil/v1;gilv1";
 
 service InterviewService {
   // Start launches the interview for a session. The agent runs Sensing

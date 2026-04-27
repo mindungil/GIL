@@ -6,8 +6,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/jedutools/gil/core/provider"
-	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
+	"github.com/mindungil/gil/core/provider"
+	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
 )
 
 func TestSlotFiller_ExtractsGoalAndConstraints(t *testing.T) {

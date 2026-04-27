@@ -8,8 +8,8 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	"github.com/jedutools/gil/core/session"
-	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
+	"github.com/mindungil/gil/core/session"
+	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
 )
 
 // ProgressGetter exposes live run progress so SessionService can enrich

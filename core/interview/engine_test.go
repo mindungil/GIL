@@ -7,8 +7,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/jedutools/gil/core/provider"
-	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
+	"github.com/mindungil/gil/core/provider"
+	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
 )
 
 // recordingProvider wraps a Mock provider and records the Model field of every

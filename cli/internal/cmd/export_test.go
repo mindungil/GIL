@@ -12,8 +12,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/jedutools/gil/core/event"
-	"github.com/jedutools/gil/core/paths"
+	"github.com/mindungil/gil/core/event"
+	"github.com/mindungil/gil/core/paths"
 )
 
 // writeFakeSession creates a sessions/<id>/ directory tree containing a

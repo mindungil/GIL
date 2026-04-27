@@ -12,9 +12,9 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/metadata"
 
-	"github.com/jedutools/gil/core/provider"
-	"github.com/jedutools/gil/core/session"
-	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
+	"github.com/mindungil/gil/core/provider"
+	"github.com/mindungil/gil/core/session"
+	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
 )
 
 // recordingProvider wraps a Mock and records the model field of every Complete call.

@@ -1,4 +1,4 @@
-module github.com/jedutools/gil/runtime
+module github.com/mindungil/gil/runtime
 
 go 1.23
 

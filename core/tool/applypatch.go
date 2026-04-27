@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/jedutools/gil/core/patch"
+	"github.com/mindungil/gil/core/patch"
 )
 
 // ApplyPatch is the agent-callable tool that parses and applies an apply_patch

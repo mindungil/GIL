@@ -8,8 +8,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/stretchr/testify/require"
 
-	"github.com/jedutools/gil/core/slash"
-	"github.com/jedutools/gil/sdk"
+	"github.com/mindungil/gil/core/slash"
+	"github.com/mindungil/gil/sdk"
 )
 
 // stubSlashState builds a slashState that's wired to an in-memory fetcher

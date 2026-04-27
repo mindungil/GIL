@@ -4,7 +4,7 @@ package gil.v1;
 
 import "google/protobuf/timestamp.proto";
 
-option go_package = "github.com/jedutools/gil/proto/gen/gil/v1;gilv1";
+option go_package = "github.com/mindungil/gil/proto/gen/gil/v1;gilv1";
 
 message Event {
   int64 id = 1;

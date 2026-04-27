@@ -3,8 +3,8 @@ package cmd
 import (
 	"github.com/spf13/cobra"
 
-	"github.com/jedutools/gil/core/paths"
-	"github.com/jedutools/gil/core/version"
+	"github.com/mindungil/gil/core/paths"
+	"github.com/mindungil/gil/core/version"
 )
 
 // outputFormat is the value of the persistent `--output` flag wired in

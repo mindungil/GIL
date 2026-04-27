@@ -6,7 +6,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"github.com/jedutools/gil/core/cliutil"
+	"github.com/mindungil/gil/core/cliutil"
 )
 
 // wrapRPCError converts a gRPC error returned from gild into a *cliutil.UserError

@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/jedutools/gil/core/mcp/jsonrpc"
-	"github.com/jedutools/gil/sdk"
+	"github.com/mindungil/gil/core/mcp/jsonrpc"
+	"github.com/mindungil/gil/sdk"
 )
 
 // Server is a single-server MCP adapter backed by a gil SDK client.

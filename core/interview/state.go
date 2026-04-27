@@ -4,9 +4,9 @@
 package interview
 
 import (
-	"github.com/jedutools/gil/core/provider"
-	"github.com/jedutools/gil/core/spec"
-	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
+	"github.com/mindungil/gil/core/provider"
+	"github.com/mindungil/gil/core/spec"
+	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
 )
 
 // Stage represents the interview phase.

@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jedutools/gil/core/checkpoint"
-	"github.com/jedutools/gil/core/provider"
+	"github.com/mindungil/gil/core/checkpoint"
+	"github.com/mindungil/gil/core/provider"
 	"github.com/stretchr/testify/require"
 )
 

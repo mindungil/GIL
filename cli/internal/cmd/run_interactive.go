@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jedutools/gil/core/paths"
-	"github.com/jedutools/gil/core/slash"
-	"github.com/jedutools/gil/sdk"
+	"github.com/mindungil/gil/core/paths"
+	"github.com/mindungil/gil/core/slash"
+	"github.com/mindungil/gil/sdk"
 )
 
 // runInteractive blocks on stdin reading line-by-line. Lines starting

@@ -1,7 +1,7 @@
 package app
 
 import (
-	"github.com/jedutools/gil/core/paths"
+	"github.com/mindungil/gil/core/paths"
 )
 
 // DefaultSocket returns the default UDS path used by gild, derived from

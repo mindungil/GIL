@@ -7,7 +7,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/jedutools/gil/core/tool"
+	"github.com/mindungil/gil/core/tool"
 )
 
 // execFakeTool is a minimal tool.Tool for testing ExecTool without external deps.

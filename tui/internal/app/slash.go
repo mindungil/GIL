@@ -9,9 +9,9 @@ import (
 	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/jedutools/gil/core/paths"
-	"github.com/jedutools/gil/core/slash"
-	"github.com/jedutools/gil/sdk"
+	"github.com/mindungil/gil/core/paths"
+	"github.com/mindungil/gil/core/slash"
+	"github.com/mindungil/gil/sdk"
 )
 
 // slashState tracks the surface-side slash-command lifecycle. It is

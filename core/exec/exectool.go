@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/jedutools/gil/core/tool"
+	"github.com/mindungil/gil/core/tool"
 )
 
 // ExecTool is the agent-callable tool that runs a Recipe (declarative sequence

@@ -7,7 +7,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/jedutools/gil/core/repomap"
+	"github.com/mindungil/gil/core/repomap"
 )
 
 func TestRank_HigherScoreForReferencedSymbols(t *testing.T) {

@@ -1,12 +1,12 @@
-module github.com/jedutools/gil/server
+module github.com/mindungil/gil/server
 
 go 1.25.0
 
 require (
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.22.0
-	github.com/jedutools/gil/core v0.0.0-00010101000000-000000000000
-	github.com/jedutools/gil/proto v0.0.0
-	github.com/jedutools/gil/runtime v0.0.0-00010101000000-000000000000
+	github.com/mindungil/gil/core v0.0.0-00010101000000-000000000000
+	github.com/mindungil/gil/proto v0.0.0
+	github.com/mindungil/gil/runtime v0.0.0-00010101000000-000000000000
 	github.com/oklog/ulid/v2 v2.1.1
 	github.com/prometheus/client_golang v1.20.5
 	github.com/stretchr/testify v1.11.1
@@ -54,7 +54,7 @@ require (
 )
 
 replace (
-	github.com/jedutools/gil/core => ../core
-	github.com/jedutools/gil/proto => ../proto
-	github.com/jedutools/gil/runtime => ../runtime
+	github.com/mindungil/gil/core => ../core
+	github.com/mindungil/gil/proto => ../proto
+	github.com/mindungil/gil/runtime => ../runtime
 )

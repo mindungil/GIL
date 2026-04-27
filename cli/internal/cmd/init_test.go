@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jedutools/gil/core/credstore"
+	"github.com/mindungil/gil/core/credstore"
 )
 
 // withInitEnv pins HOME, GIL_HOME, and the XDG_* env vars to a fresh

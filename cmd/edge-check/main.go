@@ -2,8 +2,8 @@ package main
 
 import (
 	"fmt"
-	"github.com/jedutools/gil/core/spec"
-	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
+	"github.com/mindungil/gil/core/spec"
+	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
 )
 
 func validSpec() *gilv1.FrozenSpec {

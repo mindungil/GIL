@@ -13,7 +13,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/require"
 
-	"github.com/jedutools/gil/core/cliutil"
+	"github.com/mindungil/gil/core/cliutil"
 )
 
 // withSeams swaps the package-level test seams atomically and returns
@@ -195,7 +195,7 @@ func TestUpdateCheck_NetworkErrorBecomesUserError(t *testing.T) {
 	var ue *cliutil.UserError
 	require.ErrorAs(t, err, &ue)
 	require.Contains(t, ue.Msg, "GitHub releases API")
-	require.Contains(t, ue.Hint, "github.com/jedutools/gil/releases")
+	require.Contains(t, ue.Hint, "github.com/mindungil/gil/releases")
 }
 
 func TestUpdateCheck_PromptsToUpgradeWhenNewerAvailable(t *testing.T) {

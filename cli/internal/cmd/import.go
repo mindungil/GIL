@@ -57,8 +57,8 @@ import (
 	"github.com/oklog/ulid/v2"
 	"github.com/spf13/cobra"
 
-	"github.com/jedutools/gil/core/cliutil"
-	"github.com/jedutools/gil/sdk"
+	"github.com/mindungil/gil/core/cliutil"
+	"github.com/mindungil/gil/sdk"
 )
 
 // importCmd returns the `gil import <jsonl-file>` command.

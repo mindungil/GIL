@@ -11,7 +11,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/jedutools/gil/core/paths"
+	"github.com/mindungil/gil/core/paths"
 )
 
 // runImport invokes the import cobra command with a fresh stdout buffer.

@@ -1,7 +1,7 @@
 package workspace
 
 import (
-	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
+	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
 )
 
 // ApplyDefaults fills empty fields on a FrozenSpec from a resolved

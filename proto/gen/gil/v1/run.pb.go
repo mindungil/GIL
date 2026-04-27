@@ -651,7 +651,7 @@ const file_gil_v1_run_proto_rawDesc = "" +
 	"\x05Start\x12\x17.gil.v1.StartRunRequest\x1a\x18.gil.v1.StartRunResponse\"(\x82\xd3\xe4\x93\x02\":\x01*\"\x1d/v1/sessions/{session_id}/run\x12V\n" +
 	"\x04Tail\x12\x13.gil.v1.TailRequest\x1a\r.gil.v1.Event\"(\x82\xd3\xe4\x93\x02\"\x12 /v1/sessions/{session_id}/events0\x01\x12h\n" +
 	"\aRestore\x12\x16.gil.v1.RestoreRequest\x1a\x17.gil.v1.RestoreResponse\",\x82\xd3\xe4\x93\x02&:\x01*\"!/v1/sessions/{session_id}/restore\x12\x8d\x01\n" +
-	"\x10AnswerPermission\x12\x1f.gil.v1.AnswerPermissionRequest\x1a .gil.v1.AnswerPermissionResponse\"6\x82\xd3\xe4\x93\x020:\x01*\"+/v1/sessions/{session_id}/answer_permissionB1Z/github.com/jedutools/gil/proto/gen/gil/v1;gilv1b\x06proto3"
+	"\x10AnswerPermission\x12\x1f.gil.v1.AnswerPermissionRequest\x1a .gil.v1.AnswerPermissionResponse\"6\x82\xd3\xe4\x93\x020:\x01*\"+/v1/sessions/{session_id}/answer_permissionB1Z/github.com/mindungil/gil/proto/gen/gil/v1;gilv1b\x06proto3"
 
 var (
 	file_gil_v1_run_proto_rawDescOnce sync.Once

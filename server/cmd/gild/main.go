@@ -21,16 +21,16 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	"github.com/jedutools/gil/core/credstore"
-	"github.com/jedutools/gil/core/paths"
-	"github.com/jedutools/gil/core/provider"
-	"github.com/jedutools/gil/core/session"
-	"github.com/jedutools/gil/core/version"
-	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
-	"github.com/jedutools/gil/server/internal/auth"
-	"github.com/jedutools/gil/server/internal/metrics"
-	"github.com/jedutools/gil/server/internal/service"
-	"github.com/jedutools/gil/server/internal/uds"
+	"github.com/mindungil/gil/core/credstore"
+	"github.com/mindungil/gil/core/paths"
+	"github.com/mindungil/gil/core/provider"
+	"github.com/mindungil/gil/core/session"
+	"github.com/mindungil/gil/core/version"
+	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
+	"github.com/mindungil/gil/server/internal/auth"
+	"github.com/mindungil/gil/server/internal/metrics"
+	"github.com/mindungil/gil/server/internal/service"
+	"github.com/mindungil/gil/server/internal/uds"
 )
 
 // server wraps a gRPC server, Unix Domain Socket listener, optional TCP listener,

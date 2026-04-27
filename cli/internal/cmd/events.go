@@ -9,9 +9,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/jedutools/gil/core/cliutil"
-	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
-	"github.com/jedutools/gil/sdk"
+	"github.com/mindungil/gil/core/cliutil"
+	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
+	"github.com/mindungil/gil/sdk"
 )
 
 // eventsCmd returns the `gil events <session-id>` command.

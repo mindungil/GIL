@@ -14,8 +14,8 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
-	"github.com/jedutools/gil/core/cliutil"
-	"github.com/jedutools/gil/core/credstore"
+	"github.com/mindungil/gil/core/cliutil"
+	"github.com/mindungil/gil/core/credstore"
 )
 
 // authProviderJSON is the per-provider shape emitted by `gil auth list

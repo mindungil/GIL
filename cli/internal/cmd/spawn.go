@@ -7,7 +7,7 @@ import (
 	"os/exec"
 	"time"
 
-	"github.com/jedutools/gil/core/cliutil"
+	"github.com/mindungil/gil/core/cliutil"
 )
 
 // ensureDaemon checks if the gild daemon socket is responsive. If not,

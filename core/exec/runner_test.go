@@ -10,7 +10,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/jedutools/gil/core/tool"
+	"github.com/mindungil/gil/core/tool"
 )
 
 // fakeTool returns a fixed Result.

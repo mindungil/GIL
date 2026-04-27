@@ -14,8 +14,8 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	"github.com/jedutools/gil/core/cliutil"
-	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
+	"github.com/mindungil/gil/core/cliutil"
+	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
 )
 
 // mockTailClient is a minimal in-memory implementation of

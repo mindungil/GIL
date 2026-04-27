@@ -1,6 +1,6 @@
 package compact
 
-import "github.com/jedutools/gil/core/provider"
+import "github.com/mindungil/gil/core/provider"
 
 // MarkCacheBreakpoints applies the Anthropic "system-and-3" cache control
 // strategy to a message slice. It MUTATES the slice in place — callers that

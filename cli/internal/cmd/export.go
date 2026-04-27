@@ -44,12 +44,12 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/jedutools/gil/core/cliutil"
-	"github.com/jedutools/gil/core/event"
-	"github.com/jedutools/gil/core/paths"
-	"github.com/jedutools/gil/core/specstore"
-	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
-	"github.com/jedutools/gil/sdk"
+	"github.com/mindungil/gil/core/cliutil"
+	"github.com/mindungil/gil/core/event"
+	"github.com/mindungil/gil/core/paths"
+	"github.com/mindungil/gil/core/specstore"
+	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
+	"github.com/mindungil/gil/sdk"
 )
 
 // truncateBytes is the threshold past which embedded tool/result blobs are

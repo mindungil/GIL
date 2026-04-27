@@ -25,9 +25,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/jedutools/gil/core/tool"
-	"github.com/jedutools/gil/runtime/cloud"
-	"github.com/jedutools/gil/runtime/daytona"
+	"github.com/mindungil/gil/core/tool"
+	"github.com/mindungil/gil/runtime/cloud"
+	"github.com/mindungil/gil/runtime/daytona"
 )
 
 func main() {

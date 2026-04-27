@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/jedutools/gil/core/provider"
-	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
+	"github.com/mindungil/gil/core/provider"
+	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
 )
 
 // SlotFiller analyzes a user reply and updates the working spec accordingly.

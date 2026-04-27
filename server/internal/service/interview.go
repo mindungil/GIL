@@ -11,12 +11,12 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/jedutools/gil/core/interview"
-	"github.com/jedutools/gil/core/provider"
-	"github.com/jedutools/gil/core/session"
-	"github.com/jedutools/gil/core/spec"
-	"github.com/jedutools/gil/core/specstore"
-	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
+	"github.com/mindungil/gil/core/interview"
+	"github.com/mindungil/gil/core/provider"
+	"github.com/mindungil/gil/core/session"
+	"github.com/mindungil/gil/core/spec"
+	"github.com/mindungil/gil/core/specstore"
+	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
 )
 
 // ProviderFactory returns a Provider + default model name for the given provider name.

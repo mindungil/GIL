@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/jedutools/gil/core/checkpoint"
-	"github.com/jedutools/gil/core/provider"
+	"github.com/mindungil/gil/core/checkpoint"
+	"github.com/mindungil/gil/core/provider"
 )
 
 // Strategy is one tactic for recovering from a detected stuck Signal.

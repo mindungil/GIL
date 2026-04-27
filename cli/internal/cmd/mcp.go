@@ -12,9 +12,9 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
-	"github.com/jedutools/gil/core/cliutil"
-	"github.com/jedutools/gil/core/mcpregistry"
-	"github.com/jedutools/gil/core/workspace"
+	"github.com/mindungil/gil/core/cliutil"
+	"github.com/mindungil/gil/core/mcpregistry"
+	"github.com/mindungil/gil/core/workspace"
 )
 
 // mcpServerJSON is the per-server shape emitted by `gil mcp list --output

@@ -1,4 +1,4 @@
-module github.com/jedutools/gil/tui
+module github.com/mindungil/gil/tui
 
 go 1.25.0
 
@@ -6,9 +6,9 @@ require (
 	github.com/charmbracelet/bubbles v0.20.0
 	github.com/charmbracelet/bubbletea v1.1.0
 	github.com/charmbracelet/lipgloss v0.13.1
-	github.com/jedutools/gil/core v0.0.0
-	github.com/jedutools/gil/proto v0.0.0
-	github.com/jedutools/gil/sdk v0.0.0
+	github.com/mindungil/gil/core v0.0.0
+	github.com/mindungil/gil/proto v0.0.0
+	github.com/mindungil/gil/sdk v0.0.0
 	github.com/stretchr/testify v1.11.1
 	google.golang.org/protobuf v1.34.2
 )
@@ -40,7 +40,7 @@ require (
 )
 
 replace (
-	github.com/jedutools/gil/core => ../core
-	github.com/jedutools/gil/proto => ../proto
-	github.com/jedutools/gil/sdk => ../sdk
+	github.com/mindungil/gil/core => ../core
+	github.com/mindungil/gil/proto => ../proto
+	github.com/mindungil/gil/sdk => ../sdk
 )

@@ -31,9 +31,9 @@ gen:
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "0.0.0-dev")
 COMMIT  := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 DATE    := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
-LDFLAGS := -X 'github.com/jedutools/gil/core/version.Version=$(VERSION)' \
-           -X 'github.com/jedutools/gil/core/version.Commit=$(COMMIT)'   \
-           -X 'github.com/jedutools/gil/core/version.BuildDate=$(DATE)'
+LDFLAGS := -X 'github.com/mindungil/gil/core/version.Version=$(VERSION)' \
+           -X 'github.com/mindungil/gil/core/version.Commit=$(COMMIT)'   \
+           -X 'github.com/mindungil/gil/core/version.BuildDate=$(DATE)'
 
 build:
 	@mkdir -p bin

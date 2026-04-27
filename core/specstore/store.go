@@ -12,8 +12,8 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 	"gopkg.in/yaml.v3"
 
-	"github.com/jedutools/gil/core/spec"
-	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
+	"github.com/mindungil/gil/core/spec"
+	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
 )
 
 // ErrFrozen is returned when Save is called on a store that has a spec.lock.

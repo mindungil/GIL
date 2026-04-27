@@ -683,7 +683,7 @@ const file_gil_v1_interview_proto_rawDesc = "" +
 	"\x05Start\x12\x1d.gil.v1.StartInterviewRequest\x1a\x16.gil.v1.InterviewEvent0\x01\x127\n" +
 	"\x05Reply\x12\x14.gil.v1.ReplyRequest\x1a\x16.gil.v1.InterviewEvent0\x01\x12:\n" +
 	"\aConfirm\x12\x16.gil.v1.ConfirmRequest\x1a\x17.gil.v1.ConfirmResponse\x125\n" +
-	"\aGetSpec\x12\x16.gil.v1.GetSpecRequest\x1a\x12.gil.v1.FrozenSpecB1Z/github.com/jedutools/gil/proto/gen/gil/v1;gilv1b\x06proto3"
+	"\aGetSpec\x12\x16.gil.v1.GetSpecRequest\x1a\x12.gil.v1.FrozenSpecB1Z/github.com/mindungil/gil/proto/gen/gil/v1;gilv1b\x06proto3"
 
 var (
 	file_gil_v1_interview_proto_rawDescOnce sync.Once

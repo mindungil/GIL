@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/jedutools/gil/core/edit"
+	"github.com/mindungil/gil/core/edit"
 )
 
 // Edit is the agent-callable tool that applies SEARCH/REPLACE blocks parsed
