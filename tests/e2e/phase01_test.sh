@@ -25,7 +25,9 @@ ID1=$("$ROOT/bin/gil" new --socket "$SOCK" --working-dir /tmp/proj1 | awk '{prin
 ID2=$("$ROOT/bin/gil" new --socket "$SOCK" --working-dir /tmp/proj2 | awk '{print $3}')
 
 # 2. status — 2 세션 확인
-OUT=$("$ROOT/bin/gil" status --socket "$SOCK")
+# Phase 14 made `gil status` visual by default; the legacy table is
+# preserved verbatim under --plain for scripts.
+OUT=$("$ROOT/bin/gil" status --plain --socket "$SOCK")
 echo "$OUT" | grep -q "$ID1" || { echo "FAIL: $ID1 not in status"; exit 1; }
 echo "$OUT" | grep -q "$ID2" || { echo "FAIL: $ID2 not in status"; exit 1; }
 echo "$OUT" | grep -q CREATED || { echo "FAIL: status not CREATED"; exit 1; }

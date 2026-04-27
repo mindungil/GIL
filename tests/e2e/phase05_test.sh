@@ -102,7 +102,8 @@ echo "OK: shadow git has $COMMITS commits"
 
 # 6. Wait for session status to flip to done (poll up to 3s)
 for _ in $(seq 1 30); do
-  STATUS=$("$ROOT/bin/gil" status --socket "$SOCK" 2>/dev/null | awk -v id="$ID" '$1==id {print $2}')
+  # --plain: column shape is the legacy table (script friendly)
+  STATUS=$("$ROOT/bin/gil" status --plain --socket "$SOCK" 2>/dev/null | awk -v id="$ID" '$1==id {print $2}')
   if [ "$STATUS" = "DONE" ] || [ "$STATUS" = "STOPPED" ]; then break; fi
   sleep 0.1
 done
