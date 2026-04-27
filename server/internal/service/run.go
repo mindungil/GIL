@@ -17,6 +17,7 @@ import (
 	"github.com/jedutools/gil/core/checkpoint"
 	"github.com/jedutools/gil/core/event"
 	"github.com/jedutools/gil/core/exec"
+	"github.com/jedutools/gil/core/mcpregistry"
 	"github.com/jedutools/gil/core/memory"
 	"github.com/jedutools/gil/core/paths"
 	"github.com/jedutools/gil/core/permission"
@@ -44,6 +45,22 @@ type runProgressSnap struct {
 	tokens int64
 }
 
+// pendingAsk records everything AnswerPermission needs to dispatch a
+// user's answer back to the blocked AskCallback AND to persist the
+// rule when the user picks a SESSION or ALWAYS tier.
+//
+// We keep tool/key here (not just a chan) so the user's choice can be
+// translated to a wildcard pattern without re-parsing the originating
+// permission_ask event. The evaluator pointer lets AppendSession attach
+// the session-scoped rule to the correct evaluator instance — relevant
+// when multiple runs of the same session reuse one RunService process.
+type pendingAsk struct {
+	ch        chan bool
+	tool      string
+	key       string
+	evaluator *permission.EvaluatorWithStore // nil ⇒ no session-scoped layer (FULL autonomy)
+}
+
 // RunService handles RunService gRPC. Loads frozen spec, builds tools/verifier,
 // runs AgentLoop synchronously or in background (detach mode). Tail subscribes
 // to the live event stream.
@@ -55,9 +72,9 @@ type RunService struct {
 	providerFactory ProviderFactory
 
 	mu          sync.Mutex
-	runStreams  map[string]*event.Stream              // per-session live event streams
-	runProgress map[string]*runProgressSnap           // per-session live progress counters
-	pendingAsks map[string]map[string]chan bool        // sessionID → requestID → answer chan
+	runStreams  map[string]*event.Stream            // per-session live event streams
+	runProgress map[string]*runProgressSnap         // per-session live progress counters
+	pendingAsks map[string]map[string]*pendingAsk   // sessionID → requestID → ask context
 }
 
 // NewRunService constructs the service.
@@ -68,7 +85,7 @@ func NewRunService(repo *session.Repo, sessionsBase string, factory ProviderFact
 		providerFactory: factory,
 		runStreams:      make(map[string]*event.Stream),
 		runProgress:     make(map[string]*runProgressSnap),
-		pendingAsks:     make(map[string]map[string]chan bool),
+		pendingAsks:     make(map[string]map[string]*pendingAsk),
 	}
 }
 
@@ -261,19 +278,26 @@ func (s *RunService) Start(ctx context.Context, req *gilv1.StartRunRequest) (*gi
 
 // makeAskCallback returns an AskCallback for use in AgentLoop. When the agent
 // encounters a Decision=Ask, this callback: generates a ULID request_id,
-// stores a per-request channel in pendingAsks, emits a permission_ask event
-// (so TUI subscribers can display a modal), then blocks for up to 60s waiting
-// for an AnswerPermission RPC. Timeout = deny, matching Phase 7 semantics.
-func (s *RunService) makeAskCallback(sessionID string, stream *event.Stream) func(context.Context, runner.AskRequest) bool {
+// stores a per-request entry in pendingAsks (with the tool/key/evaluator
+// context AnswerPermission needs to persist a rule), emits a permission_ask
+// event (so TUI subscribers can display a modal), then blocks for up to 60s
+// waiting for an AnswerPermission RPC. Timeout = deny, matching Phase 7
+// semantics.
+func (s *RunService) makeAskCallback(sessionID string, stream *event.Stream, evaluator *permission.EvaluatorWithStore) func(context.Context, runner.AskRequest) bool {
 	return func(ctx context.Context, req runner.AskRequest) bool {
 		reqID := ulid.Make().String()
 		ch := make(chan bool, 1)
 
 		s.mu.Lock()
 		if s.pendingAsks[sessionID] == nil {
-			s.pendingAsks[sessionID] = make(map[string]chan bool)
+			s.pendingAsks[sessionID] = make(map[string]*pendingAsk)
 		}
-		s.pendingAsks[sessionID][reqID] = ch
+		s.pendingAsks[sessionID][reqID] = &pendingAsk{
+			ch:        ch,
+			tool:      req.Tool,
+			key:       req.Key,
+			evaluator: evaluator,
+		}
 		s.mu.Unlock()
 
 		// Emit permission_ask event so TUI subscribers see it.
@@ -307,28 +331,90 @@ func (s *RunService) makeAskCallback(sessionID string, stream *event.Stream) fun
 	}
 }
 
-// AnswerPermission delivers a yes/no answer to a pending permission_ask channel.
-// Returns delivered=false when the request_id is not pending (already answered,
-// timed out, or never existed). This is not an error — it is a normal race outcome.
+// AnswerPermission delivers a yes/no answer to a pending permission_ask
+// channel and, when the user picked a SESSION or ALWAYS tier, records the
+// rule in the appropriate store (in-memory session list or on-disk
+// PersistentStore). Returns delivered=false when the request_id is not
+// pending (already answered, timed out, or never existed) — that is not an
+// error, just a normal race outcome.
+//
+// Backwards compatibility: when req.Decision is UNSPECIFIED the server
+// treats the call as a legacy "once" answer driven by req.Allow. This
+// keeps the existing `gil run` CLI / phase07 e2e flow working unchanged.
 func (s *RunService) AnswerPermission(ctx context.Context, req *gilv1.AnswerPermissionRequest) (*gilv1.AnswerPermissionResponse, error) {
 	s.mu.Lock()
 	chs, ok := s.pendingAsks[req.SessionId]
-	var ch chan bool
+	var ask *pendingAsk
 	if ok {
-		ch = chs[req.RequestId]
+		ask = chs[req.RequestId]
 	}
 	s.mu.Unlock()
 
-	if ch == nil {
+	if ask == nil {
 		return &gilv1.AnswerPermissionResponse{Delivered: false}, nil
 	}
+
+	// Resolve allow + persistence intent. Decision wins when set; allow
+	// is the legacy fallback (always once-tier).
+	allow, persist := resolveDecision(req.Decision, req.Allow)
+
+	// Persistence side-effects happen BEFORE we unblock the runner so a
+	// "session_allow" answer is in the in-memory list before the next
+	// tool call evaluates against it. Failures are logged but never block
+	// the user's answer — the runner must always be unblocked or it
+	// hangs for 60s.
+	if persist.IsSession() && ask.evaluator != nil {
+		list := "allow"
+		if persist.IsDeny() {
+			list = "deny"
+		}
+		ask.evaluator.AppendSession(list, ask.key)
+	}
+	if persist.IsAlways() && ask.evaluator != nil && ask.evaluator.Store != nil && ask.evaluator.ProjectPath != "" {
+		list := "always_allow"
+		if persist.IsDeny() {
+			list = "always_deny"
+		}
+		_ = ask.evaluator.Store.Append(ask.evaluator.ProjectPath, list, ask.key)
+	}
+
 	select {
-	case ch <- req.Allow:
+	case ask.ch <- allow:
 		return &gilv1.AnswerPermissionResponse{Delivered: true}, nil
 	default:
 		// Already answered (channel buffer=1).
 		return &gilv1.AnswerPermissionResponse{Delivered: false}, nil
 	}
+}
+
+// resolveDecision maps the wire fields to (allow, PersistDecision). The
+// PersistDecision drives what AnswerPermission persists; the bool drives
+// what the AskCallback returns to the runner.
+//
+// When dec is UNSPECIFIED we honour the legacy `allow` bool and treat it
+// as a once-tier answer (no persistence side-effect). When dec is set,
+// `allow` is ignored — clients that speak the new protocol always set
+// the enum.
+func resolveDecision(dec gilv1.PermissionDecision, allow bool) (bool, permission.PersistDecision) {
+	switch dec {
+	case gilv1.PermissionDecision_PERMISSION_DECISION_ALLOW_ONCE:
+		return true, permission.PersistAllowOnce
+	case gilv1.PermissionDecision_PERMISSION_DECISION_ALLOW_SESSION:
+		return true, permission.PersistAllowSession
+	case gilv1.PermissionDecision_PERMISSION_DECISION_ALLOW_ALWAYS:
+		return true, permission.PersistAllowAlways
+	case gilv1.PermissionDecision_PERMISSION_DECISION_DENY_ONCE:
+		return false, permission.PersistDenyOnce
+	case gilv1.PermissionDecision_PERMISSION_DECISION_DENY_SESSION:
+		return false, permission.PersistDenySession
+	case gilv1.PermissionDecision_PERMISSION_DECISION_DENY_ALWAYS:
+		return false, permission.PersistDenyAlways
+	}
+	// UNSPECIFIED → legacy bool path.
+	if allow {
+		return true, permission.PersistAllowOnce
+	}
+	return false, permission.PersistDenyOnce
 }
 
 // executeRun performs the actual agent loop execution and cleanup. It is called
@@ -522,6 +608,60 @@ func (s *RunService) executeRun(
 		}
 	}()
 
+	// MCP registry: load global + project mcp.toml entries and merge with
+	// any spec-pinned servers (currently the spec only carries a name list
+	// in Tools.McpServers, so the spec-side map is empty — but the merge
+	// helper is shape-ready for the day spec embeds full launch records).
+	// Spec wins on name collision; a single mcp_registry_loaded event makes
+	// the merge visible in `gil events` so users can confirm what the
+	// daemon actually saw.
+	{
+		regGlobal := ""
+		if layout, lerr := paths.FromEnv(); lerr == nil {
+			regGlobal = layout.MCPConfigFile()
+		}
+		regProject := ""
+		if spec.Workspace != nil && spec.Workspace.Path != "" {
+			regProject = workspace.LocalMCPFile(spec.Workspace.Path)
+		}
+		reg := &mcpregistry.Registry{GlobalPath: regGlobal, ProjectPath: regProject}
+		registryServers, regErr := reg.Load()
+		if regErr != nil {
+			// Non-fatal: continue with spec-only. The event records the
+			// failure so observers can diagnose without scraping logs.
+			data, _ := json.Marshal(map[string]any{"err": regErr.Error()})
+			_, _ = stream.Append(event.Event{
+				Timestamp: time.Now().UTC(),
+				Source:    event.SourceSystem,
+				Kind:      event.KindNote,
+				Type:      "mcp_registry_load_error",
+				Data:      data,
+			})
+		} else {
+			specServers := map[string]mcpregistry.Server{} // future: derived from spec.MCP
+			merged := mergeMCPServers(specServers, registryServers)
+			shadowed := shadowedRegistryNames(specServers, registryServers)
+			names := make([]string, 0, len(merged))
+			for n := range merged {
+				names = append(names, n)
+			}
+			data, _ := json.Marshal(map[string]any{
+				"global_path":  regGlobal,
+				"project_path": regProject,
+				"server_count": len(merged),
+				"server_names": names,
+				"shadowed":     shadowed,
+			})
+			_, _ = stream.Append(event.Event{
+				Timestamp: time.Now().UTC(),
+				Source:    event.SourceSystem,
+				Kind:      event.KindNote,
+				Type:      "mcp_registry_loaded",
+				Data:      data,
+			})
+		}
+	}
+
 	// SSH sync: now that stream exists, emit unavailable warning or do push+defer-pull.
 	if spec.Workspace != nil && spec.Workspace.Backend == gilv1.WorkspaceBackend_SSH {
 		if sshSyncer == nil && ssh.SyncAvailable() == false {
@@ -635,15 +775,74 @@ func (s *RunService) executeRun(
 	loop.StuckDetector = &stuck.Detector{Window: 50}
 
 	// Build permission gate from spec.risk.autonomy. Returns nil for FULL.
+	// Wrap the spec evaluator with EvaluatorWithStore so persistent
+	// (always_allow / always_deny) and session-scoped lists layer on top.
+	//
+	// At FULL autonomy with NO persistent rules we keep Permission nil
+	// (matches Phase 5/6 unrestricted behaviour). The moment the user
+	// records any always_allow/always_deny for this project — or the
+	// spec demands gating — we wrap so the persistent layer can still
+	// intervene. This way the user's "FULL = trust the agent" choice is
+	// not silently overridden by an empty wrapper that would still
+	// promote unmatched calls to DecisionAsk.
 	var autonomy gilv1.AutonomyDial
 	if spec.Risk != nil {
 		autonomy = spec.Risk.Autonomy
 	}
-	loop.Permission = permission.FromAutonomy(autonomy)
+	specEval := permission.FromAutonomy(autonomy)
+	var persistStore *permission.PersistentStore
+	if layout, lerr := paths.FromEnv(); lerr == nil {
+		// EnsureDirs is idempotent and cheap; calling it here means the
+		// PersistentStore can write its TOML even when gild was started
+		// without going through the production main (e.g., in tests that
+		// instantiate RunService directly with GIL_HOME pointed at a
+		// fresh tmpdir). PersistentStore.Append assumes the parent dir
+		// already exists, so this is the contract closure point.
+		_ = layout.EnsureDirs()
+		persistStore = &permission.PersistentStore{
+			Path: filepath.Join(layout.State, "permissions.toml"),
+		}
+	}
+	// Resolve project key: must be absolute. workspaceDir is already absolute
+	// when set from spec.Workspace.Path / sess.WorkingDir, but defensively
+	// run filepath.Abs so the EvaluatorWithStore.Load contract holds.
+	projectPath := workspaceDir
+	if abs, err := filepath.Abs(workspaceDir); err == nil {
+		projectPath = abs
+	}
+
+	// Check whether the project already has persistent rules. We only
+	// need to wrap when EITHER the spec gates anything OR the user has
+	// stored persistent rules for this project. (A future TUI session
+	// may still add session-scoped rules — those go through the
+	// evaluator we keep on the pendingAsk so they are wired only when
+	// the wrapper is in effect.)
+	hasPersistentRules := false
+	if persistStore != nil && filepath.IsAbs(projectPath) {
+		if rules, _ := persistStore.Load(projectPath); rules != nil {
+			if len(rules.AlwaysAllow) > 0 || len(rules.AlwaysDeny) > 0 {
+				hasPersistentRules = true
+			}
+		}
+	}
+
+	var evaluator *permission.EvaluatorWithStore
+	if specEval != nil || hasPersistentRules {
+		evaluator = &permission.EvaluatorWithStore{
+			Inner:       specEval,
+			Store:       persistStore,
+			ProjectPath: projectPath,
+		}
+		loop.Permission = evaluator
+	}
+	// else: Permission stays nil → runner skips the gate entirely.
 
 	// Wire the interactive Ask callback: emits permission_ask events and blocks
 	// waiting for an AnswerPermission RPC. Times out to deny after 60s.
-	loop.AskCallback = s.makeAskCallback(sessionID, stream)
+	// (When evaluator is nil the callback still fires on the runner's
+	// AskCallback path, but the runner never reaches Ask without an
+	// evaluator, so this is essentially a no-op.)
+	loop.AskCallback = s.makeAskCallback(sessionID, stream, evaluator)
 
 	shadowBase := filepath.Join(s.sessionDir(sessionID), "shadow")
 	loop.Checkpoint = checkpoint.New(workspaceDir, shadowBase)

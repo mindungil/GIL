@@ -554,7 +554,7 @@ func TestRunService_AnswerPermission_Delivered(t *testing.T) {
 	// Manually plant a pending channel to simulate an in-flight permission ask.
 	ch := make(chan bool, 1)
 	svc.mu.Lock()
-	svc.pendingAsks[sessID] = map[string]chan bool{reqID: ch}
+	svc.pendingAsks[sessID] = map[string]*pendingAsk{reqID: {ch: ch}}
 	svc.mu.Unlock()
 
 	resp, err := svc.AnswerPermission(context.Background(), &gilv1.AnswerPermissionRequest{
@@ -581,7 +581,7 @@ func TestRunService_AnswerPermission_DoubleSend_SecondNotDelivered(t *testing.T)
 
 	ch := make(chan bool, 1)
 	svc.mu.Lock()
-	svc.pendingAsks[sessID] = map[string]chan bool{reqID: ch}
+	svc.pendingAsks[sessID] = map[string]*pendingAsk{reqID: {ch: ch}}
 	svc.mu.Unlock()
 
 	// First answer → delivered.

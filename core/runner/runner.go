@@ -65,7 +65,10 @@ type AgentLoop struct {
 	AdversaryModel string
 
 	// Permission, when non-nil, gates each tool call. nil → no gating (Allow all).
-	Permission *permission.Evaluator
+	// The interface form (Decider) lets the server pass an EvaluatorWithStore
+	// so persistent + session-scoped allow/deny rules layer on top of the
+	// spec-derived Evaluator without the runner needing to know about them.
+	Permission permission.Decider
 
 	// AskCallback, when non-nil AND Permission returns Ask, is called to ask
 	// for human permission. Returning true treats the call as Allow; false as
