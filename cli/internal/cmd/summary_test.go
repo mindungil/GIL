@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -233,6 +234,49 @@ func TestLoadSessionPlanCounts_RoundTrip(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, 1, comp)
 	require.Equal(t, 3, total)
+}
+
+// TestRenderSummary_OverflowHint — when TotalSessions > len(Sessions)
+// the renderer emits a "+ N more" line after the session rows.
+func TestRenderSummary_OverflowHint(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	sessions := make([]summaryRow, 10)
+	for i := range sessions {
+		sessions[i] = summaryRow{ID: fmt.Sprintf("01AAA%03d", i), Status: "RUNNING", Iter: int32(i), MaxIter: 100, Goal: fmt.Sprintf("Goal %d", i)}
+	}
+	var buf bytes.Buffer
+	renderSummary(&buf, summaryEnv{
+		Version:       "v0.1.0",
+		User:          "u", Host: "h",
+		Now:           time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC),
+		Glyphs:        uistyle.NewGlyphs(false),
+		Palette:       uistyle.NewPalette(true),
+		Sessions:      sessions,
+		TotalSessions: 15,
+	})
+	out := buf.String()
+	require.Contains(t, out, "+ 5 more", "overflow hint should show remaining count")
+}
+
+// TestRenderSummary_NoOverflowHint — when TotalSessions == len(Sessions)
+// no "+ N more" line appears.
+func TestRenderSummary_NoOverflowHint(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	sessions := []summaryRow{
+		{ID: "01AAA", Status: "RUNNING", Iter: 5, MaxIter: 100, Goal: "x"},
+	}
+	var buf bytes.Buffer
+	renderSummary(&buf, summaryEnv{
+		Version:       "v0.1.0",
+		User:          "u", Host: "h",
+		Now:           time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC),
+		Glyphs:        uistyle.NewGlyphs(false),
+		Palette:       uistyle.NewPalette(true),
+		Sessions:      sessions,
+		TotalSessions: 1,
+	})
+	out := buf.String()
+	require.NotContains(t, out, "+", "no overflow hint when all sessions shown")
 }
 
 func TestRenderSummary_AsciiFallback(t *testing.T) {

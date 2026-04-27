@@ -59,14 +59,21 @@ func runSummary(out io.Writer, socket, base string, ascii bool) error {
 		rows = append(rows, summaryRowFromSession(s))
 	}
 
+	total := len(rows)
+	const maxRows = 10
+	if len(rows) > maxRows {
+		rows = rows[:maxRows]
+	}
+
 	renderSummary(out, summaryEnv{
-		Version:  version.Short(),
-		User:     currentUser(),
-		Host:     currentHost(),
-		Now:      time.Now(),
-		Glyphs:   g,
-		Palette:  p,
-		Sessions: rows,
+		Version:       version.Short(),
+		User:          currentUser(),
+		Host:          currentHost(),
+		Now:           time.Now(),
+		Glyphs:        g,
+		Palette:       p,
+		Sessions:      rows,
+		TotalSessions: total,
 	})
 	return nil
 }
@@ -81,7 +88,8 @@ type summaryEnv struct {
 	Now      time.Time
 	Glyphs   uistyle.Glyphs
 	Palette  uistyle.Palette
-	Sessions []summaryRow
+	Sessions      []summaryRow
+	TotalSessions int // total count before truncation; renderer emits overflow hint
 }
 
 // summaryRow is the renderable view of one session. The row carries
@@ -186,6 +194,11 @@ func renderSummary(out io.Writer, e summaryEnv) {
 			fmt.Fprintf(out, "%s%s %s\n", indent, p.Caution(g.Warn),
 				p.Caution("STUCK · "+r.StuckNote))
 		}
+	}
+
+	if e.TotalSessions > len(e.Sessions) {
+		extra := e.TotalSessions - len(e.Sessions)
+		fmt.Fprintf(out, "   %s\n", p.Dim(fmt.Sprintf("›  + %d more", extra)))
 	}
 
 	fmt.Fprintln(out)
