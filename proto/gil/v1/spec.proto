@@ -22,6 +22,28 @@ message FrozenSpec {
   RiskProfile risk = 17;
   repeated Microagent microagents = 18;
   Setup setup = 20;
+  RunOptions run = 21;
+}
+
+// RunOptions carries per-run knobs that don't fit cleanly into the
+// other message types (Goal/Constraints/Verification/etc). Today only
+// system_prompt diet flags live here; future runtime tuning can land
+// alongside without churning the rest of the schema.
+message RunOptions {
+  SystemPromptOptions system_prompt = 1;
+}
+
+// SystemPromptOptions tunes how the AgentLoop assembles the per-iteration
+// system prompt. Defaults match historical behavior; both flags are
+// opt-in for token-conscious runs (small models, tight budgets).
+//   - minimal: drop AGENTS.md / CLAUDE.md project-instructions section
+//     entirely (still discovered, just not injected).
+//   - no_memory: never prepend the memory bank section, regardless of
+//     bank size or iteration. The model can still call memory_load on
+//     demand.
+message SystemPromptOptions {
+  bool minimal = 1;
+  bool no_memory = 2;
 }
 
 message Goal {
@@ -76,12 +98,40 @@ enum WorkspaceBackend {
   DAYTONA = 7;  // Daytona (https://daytona.io) cloud workspace
 }
 
+// ModelConfig holds the per-role model selections. Empty fields fall back
+// to `main`. Roles split across two phases of the session lifecycle:
+//
+// Interview-time (server-side InterviewService):
+//   - main / interview: drive the conversation
+//   - slot: extracts structured slots from the user's freeform reply
+//   - adversary: red-teams the agent's own questions
+//   - audit: gates stage transitions
+//
+// Run-time (core/runner AgentLoop):
+//   - main: default for "ambiguous" turns (mixed text + tool calls)
+//   - planner: turn 1 + any turn that calls the `plan` tool — the
+//     "architect" model in aider's split.
+//   - editor: tool-heavy execution turns (bash/edit/write_file/etc.) —
+//     the "coder" model in aider's split.
+//   - weak: legacy slot kept for compaction summarization (Phase 17+).
+//
+// The split lets users pair a strong reasoning model (planner) with a
+// cheap+fast edit model (editor) per `docs/recipes/architect-coder.md`.
 message ModelConfig {
   ModelChoice main = 1;
   ModelChoice weak = 2;
   ModelChoice editor = 3;
   ModelChoice adversary = 4;
   ModelChoice interview = 5;
+  // planner: used for turn 1 of a run AND any turn whose previous response
+  // invoked the `plan` tool. Maps to aider's "architect" coder.
+  ModelChoice planner = 6;
+  // slot: extracts structured fields from user replies during interview.
+  // Falls back to main when unset. Persisted in the spec so resumed
+  // interviews keep using the same submodel.
+  ModelChoice slot = 7;
+  // audit: gates interview stage transitions ("ready to confirm?" check).
+  ModelChoice audit = 8;
 }
 
 message ModelChoice {
@@ -96,6 +146,13 @@ message Budget {
   int32 max_iterations = 4;
   int32 max_subagent_depth = 5;
   bool grace_call_on_exhaustion = 6;
+  // reserve_tokens carves out a portion of max_total_tokens that the runner
+  // refuses to spend during the main provider-call loop. The reserve is held
+  // back so the final verifier checks + a closing "I'm done" summary turn
+  // can still run when the budget has otherwise been exhausted. The loop
+  // trips the budget cap at (max_total_tokens - reserve_tokens). When zero,
+  // the runner uses an 8000-token default — sensible across modern LLMs.
+  int64 reserve_tokens = 7;
 }
 
 message Tools {

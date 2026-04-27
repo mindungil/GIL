@@ -215,6 +215,7 @@ type FrozenSpec struct {
 	Risk          *RiskProfile           `protobuf:"bytes,17,opt,name=risk,proto3" json:"risk,omitempty"`
 	Microagents   []*Microagent          `protobuf:"bytes,18,rep,name=microagents,proto3" json:"microagents,omitempty"`
 	Setup         *Setup                 `protobuf:"bytes,20,opt,name=setup,proto3" json:"setup,omitempty"`
+	Run           *RunOptions            `protobuf:"bytes,21,opt,name=run,proto3" json:"run,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -347,6 +348,121 @@ func (x *FrozenSpec) GetSetup() *Setup {
 	return nil
 }
 
+func (x *FrozenSpec) GetRun() *RunOptions {
+	if x != nil {
+		return x.Run
+	}
+	return nil
+}
+
+// RunOptions carries per-run knobs that don't fit cleanly into the
+// other message types (Goal/Constraints/Verification/etc). Today only
+// system_prompt diet flags live here; future runtime tuning can land
+// alongside without churning the rest of the schema.
+type RunOptions struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SystemPrompt  *SystemPromptOptions   `protobuf:"bytes,1,opt,name=system_prompt,json=systemPrompt,proto3" json:"system_prompt,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RunOptions) Reset() {
+	*x = RunOptions{}
+	mi := &file_gil_v1_spec_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RunOptions) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RunOptions) ProtoMessage() {}
+
+func (x *RunOptions) ProtoReflect() protoreflect.Message {
+	mi := &file_gil_v1_spec_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RunOptions.ProtoReflect.Descriptor instead.
+func (*RunOptions) Descriptor() ([]byte, []int) {
+	return file_gil_v1_spec_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *RunOptions) GetSystemPrompt() *SystemPromptOptions {
+	if x != nil {
+		return x.SystemPrompt
+	}
+	return nil
+}
+
+// SystemPromptOptions tunes how the AgentLoop assembles the per-iteration
+// system prompt. Defaults match historical behavior; both flags are
+// opt-in for token-conscious runs (small models, tight budgets).
+//   - minimal: drop AGENTS.md / CLAUDE.md project-instructions section
+//     entirely (still discovered, just not injected).
+//   - no_memory: never prepend the memory bank section, regardless of
+//     bank size or iteration. The model can still call memory_load on
+//     demand.
+type SystemPromptOptions struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Minimal       bool                   `protobuf:"varint,1,opt,name=minimal,proto3" json:"minimal,omitempty"`
+	NoMemory      bool                   `protobuf:"varint,2,opt,name=no_memory,json=noMemory,proto3" json:"no_memory,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SystemPromptOptions) Reset() {
+	*x = SystemPromptOptions{}
+	mi := &file_gil_v1_spec_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SystemPromptOptions) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SystemPromptOptions) ProtoMessage() {}
+
+func (x *SystemPromptOptions) ProtoReflect() protoreflect.Message {
+	mi := &file_gil_v1_spec_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SystemPromptOptions.ProtoReflect.Descriptor instead.
+func (*SystemPromptOptions) Descriptor() ([]byte, []int) {
+	return file_gil_v1_spec_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *SystemPromptOptions) GetMinimal() bool {
+	if x != nil {
+		return x.Minimal
+	}
+	return false
+}
+
+func (x *SystemPromptOptions) GetNoMemory() bool {
+	if x != nil {
+		return x.NoMemory
+	}
+	return false
+}
+
 type Goal struct {
 	state                  protoimpl.MessageState `protogen:"open.v1"`
 	OneLiner               string                 `protobuf:"bytes,1,opt,name=one_liner,json=oneLiner,proto3" json:"one_liner,omitempty"`
@@ -359,7 +475,7 @@ type Goal struct {
 
 func (x *Goal) Reset() {
 	*x = Goal{}
-	mi := &file_gil_v1_spec_proto_msgTypes[1]
+	mi := &file_gil_v1_spec_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -371,7 +487,7 @@ func (x *Goal) String() string {
 func (*Goal) ProtoMessage() {}
 
 func (x *Goal) ProtoReflect() protoreflect.Message {
-	mi := &file_gil_v1_spec_proto_msgTypes[1]
+	mi := &file_gil_v1_spec_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -384,7 +500,7 @@ func (x *Goal) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Goal.ProtoReflect.Descriptor instead.
 func (*Goal) Descriptor() ([]byte, []int) {
-	return file_gil_v1_spec_proto_rawDescGZIP(), []int{1}
+	return file_gil_v1_spec_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *Goal) GetOneLiner() string {
@@ -427,7 +543,7 @@ type Constraints struct {
 
 func (x *Constraints) Reset() {
 	*x = Constraints{}
-	mi := &file_gil_v1_spec_proto_msgTypes[2]
+	mi := &file_gil_v1_spec_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -439,7 +555,7 @@ func (x *Constraints) String() string {
 func (*Constraints) ProtoMessage() {}
 
 func (x *Constraints) ProtoReflect() protoreflect.Message {
-	mi := &file_gil_v1_spec_proto_msgTypes[2]
+	mi := &file_gil_v1_spec_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -452,7 +568,7 @@ func (x *Constraints) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Constraints.ProtoReflect.Descriptor instead.
 func (*Constraints) Descriptor() ([]byte, []int) {
-	return file_gil_v1_spec_proto_rawDescGZIP(), []int{2}
+	return file_gil_v1_spec_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *Constraints) GetTechStack() []string {
@@ -494,7 +610,7 @@ type Verification struct {
 
 func (x *Verification) Reset() {
 	*x = Verification{}
-	mi := &file_gil_v1_spec_proto_msgTypes[3]
+	mi := &file_gil_v1_spec_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -506,7 +622,7 @@ func (x *Verification) String() string {
 func (*Verification) ProtoMessage() {}
 
 func (x *Verification) ProtoReflect() protoreflect.Message {
-	mi := &file_gil_v1_spec_proto_msgTypes[3]
+	mi := &file_gil_v1_spec_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -519,7 +635,7 @@ func (x *Verification) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Verification.ProtoReflect.Descriptor instead.
 func (*Verification) Descriptor() ([]byte, []int) {
-	return file_gil_v1_spec_proto_rawDescGZIP(), []int{3}
+	return file_gil_v1_spec_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *Verification) GetChecks() []*Check {
@@ -555,7 +671,7 @@ type Check struct {
 
 func (x *Check) Reset() {
 	*x = Check{}
-	mi := &file_gil_v1_spec_proto_msgTypes[4]
+	mi := &file_gil_v1_spec_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -567,7 +683,7 @@ func (x *Check) String() string {
 func (*Check) ProtoMessage() {}
 
 func (x *Check) ProtoReflect() protoreflect.Message {
-	mi := &file_gil_v1_spec_proto_msgTypes[4]
+	mi := &file_gil_v1_spec_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -580,7 +696,7 @@ func (x *Check) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Check.ProtoReflect.Descriptor instead.
 func (*Check) Descriptor() ([]byte, []int) {
-	return file_gil_v1_spec_proto_rawDescGZIP(), []int{4}
+	return file_gil_v1_spec_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *Check) GetName() string {
@@ -621,7 +737,7 @@ type Workspace struct {
 
 func (x *Workspace) Reset() {
 	*x = Workspace{}
-	mi := &file_gil_v1_spec_proto_msgTypes[5]
+	mi := &file_gil_v1_spec_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -633,7 +749,7 @@ func (x *Workspace) String() string {
 func (*Workspace) ProtoMessage() {}
 
 func (x *Workspace) ProtoReflect() protoreflect.Message {
-	mi := &file_gil_v1_spec_proto_msgTypes[5]
+	mi := &file_gil_v1_spec_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -646,7 +762,7 @@ func (x *Workspace) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Workspace.ProtoReflect.Descriptor instead.
 func (*Workspace) Descriptor() ([]byte, []int) {
-	return file_gil_v1_spec_proto_rawDescGZIP(), []int{5}
+	return file_gil_v1_spec_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *Workspace) GetBackend() WorkspaceBackend {
@@ -663,20 +779,48 @@ func (x *Workspace) GetPath() string {
 	return ""
 }
 
+// ModelConfig holds the per-role model selections. Empty fields fall back
+// to `main`. Roles split across two phases of the session lifecycle:
+//
+// Interview-time (server-side InterviewService):
+//   - main / interview: drive the conversation
+//   - slot: extracts structured slots from the user's freeform reply
+//   - adversary: red-teams the agent's own questions
+//   - audit: gates stage transitions
+//
+// Run-time (core/runner AgentLoop):
+//   - main: default for "ambiguous" turns (mixed text + tool calls)
+//   - planner: turn 1 + any turn that calls the `plan` tool — the
+//     "architect" model in aider's split.
+//   - editor: tool-heavy execution turns (bash/edit/write_file/etc.) —
+//     the "coder" model in aider's split.
+//   - weak: legacy slot kept for compaction summarization (Phase 17+).
+//
+// The split lets users pair a strong reasoning model (planner) with a
+// cheap+fast edit model (editor) per `docs/recipes/architect-coder.md`.
 type ModelConfig struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Main          *ModelChoice           `protobuf:"bytes,1,opt,name=main,proto3" json:"main,omitempty"`
-	Weak          *ModelChoice           `protobuf:"bytes,2,opt,name=weak,proto3" json:"weak,omitempty"`
-	Editor        *ModelChoice           `protobuf:"bytes,3,opt,name=editor,proto3" json:"editor,omitempty"`
-	Adversary     *ModelChoice           `protobuf:"bytes,4,opt,name=adversary,proto3" json:"adversary,omitempty"`
-	Interview     *ModelChoice           `protobuf:"bytes,5,opt,name=interview,proto3" json:"interview,omitempty"`
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	Main      *ModelChoice           `protobuf:"bytes,1,opt,name=main,proto3" json:"main,omitempty"`
+	Weak      *ModelChoice           `protobuf:"bytes,2,opt,name=weak,proto3" json:"weak,omitempty"`
+	Editor    *ModelChoice           `protobuf:"bytes,3,opt,name=editor,proto3" json:"editor,omitempty"`
+	Adversary *ModelChoice           `protobuf:"bytes,4,opt,name=adversary,proto3" json:"adversary,omitempty"`
+	Interview *ModelChoice           `protobuf:"bytes,5,opt,name=interview,proto3" json:"interview,omitempty"`
+	// planner: used for turn 1 of a run AND any turn whose previous response
+	// invoked the `plan` tool. Maps to aider's "architect" coder.
+	Planner *ModelChoice `protobuf:"bytes,6,opt,name=planner,proto3" json:"planner,omitempty"`
+	// slot: extracts structured fields from user replies during interview.
+	// Falls back to main when unset. Persisted in the spec so resumed
+	// interviews keep using the same submodel.
+	Slot *ModelChoice `protobuf:"bytes,7,opt,name=slot,proto3" json:"slot,omitempty"`
+	// audit: gates interview stage transitions ("ready to confirm?" check).
+	Audit         *ModelChoice `protobuf:"bytes,8,opt,name=audit,proto3" json:"audit,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ModelConfig) Reset() {
 	*x = ModelConfig{}
-	mi := &file_gil_v1_spec_proto_msgTypes[6]
+	mi := &file_gil_v1_spec_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -688,7 +832,7 @@ func (x *ModelConfig) String() string {
 func (*ModelConfig) ProtoMessage() {}
 
 func (x *ModelConfig) ProtoReflect() protoreflect.Message {
-	mi := &file_gil_v1_spec_proto_msgTypes[6]
+	mi := &file_gil_v1_spec_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -701,7 +845,7 @@ func (x *ModelConfig) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ModelConfig.ProtoReflect.Descriptor instead.
 func (*ModelConfig) Descriptor() ([]byte, []int) {
-	return file_gil_v1_spec_proto_rawDescGZIP(), []int{6}
+	return file_gil_v1_spec_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *ModelConfig) GetMain() *ModelChoice {
@@ -739,6 +883,27 @@ func (x *ModelConfig) GetInterview() *ModelChoice {
 	return nil
 }
 
+func (x *ModelConfig) GetPlanner() *ModelChoice {
+	if x != nil {
+		return x.Planner
+	}
+	return nil
+}
+
+func (x *ModelConfig) GetSlot() *ModelChoice {
+	if x != nil {
+		return x.Slot
+	}
+	return nil
+}
+
+func (x *ModelConfig) GetAudit() *ModelChoice {
+	if x != nil {
+		return x.Audit
+	}
+	return nil
+}
+
 type ModelChoice struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Provider      string                 `protobuf:"bytes,1,opt,name=provider,proto3" json:"provider,omitempty"`
@@ -749,7 +914,7 @@ type ModelChoice struct {
 
 func (x *ModelChoice) Reset() {
 	*x = ModelChoice{}
-	mi := &file_gil_v1_spec_proto_msgTypes[7]
+	mi := &file_gil_v1_spec_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -761,7 +926,7 @@ func (x *ModelChoice) String() string {
 func (*ModelChoice) ProtoMessage() {}
 
 func (x *ModelChoice) ProtoReflect() protoreflect.Message {
-	mi := &file_gil_v1_spec_proto_msgTypes[7]
+	mi := &file_gil_v1_spec_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -774,7 +939,7 @@ func (x *ModelChoice) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ModelChoice.ProtoReflect.Descriptor instead.
 func (*ModelChoice) Descriptor() ([]byte, []int) {
-	return file_gil_v1_spec_proto_rawDescGZIP(), []int{7}
+	return file_gil_v1_spec_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *ModelChoice) GetProvider() string {
@@ -799,13 +964,20 @@ type Budget struct {
 	MaxIterations         int32                  `protobuf:"varint,4,opt,name=max_iterations,json=maxIterations,proto3" json:"max_iterations,omitempty"`
 	MaxSubagentDepth      int32                  `protobuf:"varint,5,opt,name=max_subagent_depth,json=maxSubagentDepth,proto3" json:"max_subagent_depth,omitempty"`
 	GraceCallOnExhaustion bool                   `protobuf:"varint,6,opt,name=grace_call_on_exhaustion,json=graceCallOnExhaustion,proto3" json:"grace_call_on_exhaustion,omitempty"`
-	unknownFields         protoimpl.UnknownFields
-	sizeCache             protoimpl.SizeCache
+	// reserve_tokens carves out a portion of max_total_tokens that the runner
+	// refuses to spend during the main provider-call loop. The reserve is held
+	// back so the final verifier checks + a closing "I'm done" summary turn
+	// can still run when the budget has otherwise been exhausted. The loop
+	// trips the budget cap at (max_total_tokens - reserve_tokens). When zero,
+	// the runner uses an 8000-token default — sensible across modern LLMs.
+	ReserveTokens int64 `protobuf:"varint,7,opt,name=reserve_tokens,json=reserveTokens,proto3" json:"reserve_tokens,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Budget) Reset() {
 	*x = Budget{}
-	mi := &file_gil_v1_spec_proto_msgTypes[8]
+	mi := &file_gil_v1_spec_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -817,7 +989,7 @@ func (x *Budget) String() string {
 func (*Budget) ProtoMessage() {}
 
 func (x *Budget) ProtoReflect() protoreflect.Message {
-	mi := &file_gil_v1_spec_proto_msgTypes[8]
+	mi := &file_gil_v1_spec_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -830,7 +1002,7 @@ func (x *Budget) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Budget.ProtoReflect.Descriptor instead.
 func (*Budget) Descriptor() ([]byte, []int) {
-	return file_gil_v1_spec_proto_rawDescGZIP(), []int{8}
+	return file_gil_v1_spec_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *Budget) GetMaxTotalTokens() int64 {
@@ -875,6 +1047,13 @@ func (x *Budget) GetGraceCallOnExhaustion() bool {
 	return false
 }
 
+func (x *Budget) GetReserveTokens() int64 {
+	if x != nil {
+		return x.ReserveTokens
+	}
+	return 0
+}
+
 type Tools struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Bash          bool                   `protobuf:"varint,1,opt,name=bash,proto3" json:"bash,omitempty"`
@@ -890,7 +1069,7 @@ type Tools struct {
 
 func (x *Tools) Reset() {
 	*x = Tools{}
-	mi := &file_gil_v1_spec_proto_msgTypes[9]
+	mi := &file_gil_v1_spec_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -902,7 +1081,7 @@ func (x *Tools) String() string {
 func (*Tools) ProtoMessage() {}
 
 func (x *Tools) ProtoReflect() protoreflect.Message {
-	mi := &file_gil_v1_spec_proto_msgTypes[9]
+	mi := &file_gil_v1_spec_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -915,7 +1094,7 @@ func (x *Tools) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Tools.ProtoReflect.Descriptor instead.
 func (*Tools) Descriptor() ([]byte, []int) {
-	return file_gil_v1_spec_proto_rawDescGZIP(), []int{9}
+	return file_gil_v1_spec_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *Tools) GetBash() bool {
@@ -978,7 +1157,7 @@ type RiskProfile struct {
 
 func (x *RiskProfile) Reset() {
 	*x = RiskProfile{}
-	mi := &file_gil_v1_spec_proto_msgTypes[10]
+	mi := &file_gil_v1_spec_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -990,7 +1169,7 @@ func (x *RiskProfile) String() string {
 func (*RiskProfile) ProtoMessage() {}
 
 func (x *RiskProfile) ProtoReflect() protoreflect.Message {
-	mi := &file_gil_v1_spec_proto_msgTypes[10]
+	mi := &file_gil_v1_spec_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1003,7 +1182,7 @@ func (x *RiskProfile) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RiskProfile.ProtoReflect.Descriptor instead.
 func (*RiskProfile) Descriptor() ([]byte, []int) {
-	return file_gil_v1_spec_proto_rawDescGZIP(), []int{10}
+	return file_gil_v1_spec_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *RiskProfile) GetAutonomy() AutonomyDial {
@@ -1039,7 +1218,7 @@ type Microagent struct {
 
 func (x *Microagent) Reset() {
 	*x = Microagent{}
-	mi := &file_gil_v1_spec_proto_msgTypes[11]
+	mi := &file_gil_v1_spec_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1051,7 +1230,7 @@ func (x *Microagent) String() string {
 func (*Microagent) ProtoMessage() {}
 
 func (x *Microagent) ProtoReflect() protoreflect.Message {
-	mi := &file_gil_v1_spec_proto_msgTypes[11]
+	mi := &file_gil_v1_spec_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1064,7 +1243,7 @@ func (x *Microagent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Microagent.ProtoReflect.Descriptor instead.
 func (*Microagent) Descriptor() ([]byte, []int) {
-	return file_gil_v1_spec_proto_rawDescGZIP(), []int{11}
+	return file_gil_v1_spec_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *Microagent) GetName() string {
@@ -1106,7 +1285,7 @@ type Setup struct {
 
 func (x *Setup) Reset() {
 	*x = Setup{}
-	mi := &file_gil_v1_spec_proto_msgTypes[12]
+	mi := &file_gil_v1_spec_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1118,7 +1297,7 @@ func (x *Setup) String() string {
 func (*Setup) ProtoMessage() {}
 
 func (x *Setup) ProtoReflect() protoreflect.Message {
-	mi := &file_gil_v1_spec_proto_msgTypes[12]
+	mi := &file_gil_v1_spec_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1131,7 +1310,7 @@ func (x *Setup) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Setup.ProtoReflect.Descriptor instead.
 func (*Setup) Descriptor() ([]byte, []int) {
-	return file_gil_v1_spec_proto_rawDescGZIP(), []int{12}
+	return file_gil_v1_spec_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *Setup) GetCommands() []string {
@@ -1159,7 +1338,7 @@ var File_gil_v1_spec_proto protoreflect.FileDescriptor
 
 const file_gil_v1_spec_proto_rawDesc = "" +
 	"\n" +
-	"\x11gil/v1/spec.proto\x12\x06gil.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xe6\x04\n" +
+	"\x11gil/v1/spec.proto\x12\x06gil.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\x8c\x05\n" +
 	"\n" +
 	"FrozenSpec\x12\x17\n" +
 	"\aspec_id\x18\x01 \x01(\tR\x06specId\x12\x1d\n" +
@@ -1177,7 +1356,14 @@ const file_gil_v1_spec_proto_rawDesc = "" +
 	"\x05tools\x18\x10 \x01(\v2\r.gil.v1.ToolsR\x05tools\x12'\n" +
 	"\x04risk\x18\x11 \x01(\v2\x13.gil.v1.RiskProfileR\x04risk\x124\n" +
 	"\vmicroagents\x18\x12 \x03(\v2\x12.gil.v1.MicroagentR\vmicroagents\x12#\n" +
-	"\x05setup\x18\x14 \x01(\v2\r.gil.v1.SetupR\x05setup\"\x96\x01\n" +
+	"\x05setup\x18\x14 \x01(\v2\r.gil.v1.SetupR\x05setup\x12$\n" +
+	"\x03run\x18\x15 \x01(\v2\x12.gil.v1.RunOptionsR\x03run\"N\n" +
+	"\n" +
+	"RunOptions\x12@\n" +
+	"\rsystem_prompt\x18\x01 \x01(\v2\x1b.gil.v1.SystemPromptOptionsR\fsystemPrompt\"L\n" +
+	"\x13SystemPromptOptions\x12\x18\n" +
+	"\aminimal\x18\x01 \x01(\bR\aminimal\x12\x1b\n" +
+	"\tno_memory\x18\x02 \x01(\bR\bnoMemory\"\x96\x01\n" +
 	"\x04Goal\x12\x1b\n" +
 	"\tone_liner\x18\x01 \x01(\tR\boneLiner\x12\x1a\n" +
 	"\bdetailed\x18\x02 \x01(\tR\bdetailed\x128\n" +
@@ -1201,23 +1387,27 @@ const file_gil_v1_spec_proto_rawDesc = "" +
 	"\x12expected_exit_code\x18\x04 \x01(\x05R\x10expectedExitCode\"S\n" +
 	"\tWorkspace\x122\n" +
 	"\abackend\x18\x01 \x01(\x0e2\x18.gil.v1.WorkspaceBackendR\abackend\x12\x12\n" +
-	"\x04path\x18\x02 \x01(\tR\x04path\"\xf2\x01\n" +
+	"\x04path\x18\x02 \x01(\tR\x04path\"\xf5\x02\n" +
 	"\vModelConfig\x12'\n" +
 	"\x04main\x18\x01 \x01(\v2\x13.gil.v1.ModelChoiceR\x04main\x12'\n" +
 	"\x04weak\x18\x02 \x01(\v2\x13.gil.v1.ModelChoiceR\x04weak\x12+\n" +
 	"\x06editor\x18\x03 \x01(\v2\x13.gil.v1.ModelChoiceR\x06editor\x121\n" +
 	"\tadversary\x18\x04 \x01(\v2\x13.gil.v1.ModelChoiceR\tadversary\x121\n" +
-	"\tinterview\x18\x05 \x01(\v2\x13.gil.v1.ModelChoiceR\tinterview\"D\n" +
+	"\tinterview\x18\x05 \x01(\v2\x13.gil.v1.ModelChoiceR\tinterview\x12-\n" +
+	"\aplanner\x18\x06 \x01(\v2\x13.gil.v1.ModelChoiceR\aplanner\x12'\n" +
+	"\x04slot\x18\a \x01(\v2\x13.gil.v1.ModelChoiceR\x04slot\x12)\n" +
+	"\x05audit\x18\b \x01(\v2\x13.gil.v1.ModelChoiceR\x05audit\"D\n" +
 	"\vModelChoice\x12\x1a\n" +
 	"\bprovider\x18\x01 \x01(\tR\bprovider\x12\x19\n" +
-	"\bmodel_id\x18\x02 \x01(\tR\amodelId\"\xa2\x02\n" +
+	"\bmodel_id\x18\x02 \x01(\tR\amodelId\"\xc9\x02\n" +
 	"\x06Budget\x12(\n" +
 	"\x10max_total_tokens\x18\x01 \x01(\x03R\x0emaxTotalTokens\x12+\n" +
 	"\x12max_total_cost_usd\x18\x02 \x01(\x01R\x0fmaxTotalCostUsd\x123\n" +
 	"\x16max_wall_clock_seconds\x18\x03 \x01(\x03R\x13maxWallClockSeconds\x12%\n" +
 	"\x0emax_iterations\x18\x04 \x01(\x05R\rmaxIterations\x12,\n" +
 	"\x12max_subagent_depth\x18\x05 \x01(\x05R\x10maxSubagentDepth\x127\n" +
-	"\x18grace_call_on_exhaustion\x18\x06 \x01(\bR\x15graceCallOnExhaustion\"\xca\x01\n" +
+	"\x18grace_call_on_exhaustion\x18\x06 \x01(\bR\x15graceCallOnExhaustion\x12%\n" +
+	"\x0ereserve_tokens\x18\a \x01(\x03R\rreserveTokens\"\xca\x01\n" +
 	"\x05Tools\x12\x12\n" +
 	"\x04bash\x18\x01 \x01(\bR\x04bash\x12\x19\n" +
 	"\bfile_ops\x18\x02 \x01(\bR\afileOps\x12\x1d\n" +
@@ -1280,52 +1470,59 @@ func file_gil_v1_spec_proto_rawDescGZIP() []byte {
 }
 
 var file_gil_v1_spec_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_gil_v1_spec_proto_msgTypes = make([]protoimpl.MessageInfo, 13)
+var file_gil_v1_spec_proto_msgTypes = make([]protoimpl.MessageInfo, 15)
 var file_gil_v1_spec_proto_goTypes = []any{
 	(CheckKind)(0),                // 0: gil.v1.CheckKind
 	(WorkspaceBackend)(0),         // 1: gil.v1.WorkspaceBackend
 	(AutonomyDial)(0),             // 2: gil.v1.AutonomyDial
 	(*FrozenSpec)(nil),            // 3: gil.v1.FrozenSpec
-	(*Goal)(nil),                  // 4: gil.v1.Goal
-	(*Constraints)(nil),           // 5: gil.v1.Constraints
-	(*Verification)(nil),          // 6: gil.v1.Verification
-	(*Check)(nil),                 // 7: gil.v1.Check
-	(*Workspace)(nil),             // 8: gil.v1.Workspace
-	(*ModelConfig)(nil),           // 9: gil.v1.ModelConfig
-	(*ModelChoice)(nil),           // 10: gil.v1.ModelChoice
-	(*Budget)(nil),                // 11: gil.v1.Budget
-	(*Tools)(nil),                 // 12: gil.v1.Tools
-	(*RiskProfile)(nil),           // 13: gil.v1.RiskProfile
-	(*Microagent)(nil),            // 14: gil.v1.Microagent
-	(*Setup)(nil),                 // 15: gil.v1.Setup
-	(*timestamppb.Timestamp)(nil), // 16: google.protobuf.Timestamp
+	(*RunOptions)(nil),            // 4: gil.v1.RunOptions
+	(*SystemPromptOptions)(nil),   // 5: gil.v1.SystemPromptOptions
+	(*Goal)(nil),                  // 6: gil.v1.Goal
+	(*Constraints)(nil),           // 7: gil.v1.Constraints
+	(*Verification)(nil),          // 8: gil.v1.Verification
+	(*Check)(nil),                 // 9: gil.v1.Check
+	(*Workspace)(nil),             // 10: gil.v1.Workspace
+	(*ModelConfig)(nil),           // 11: gil.v1.ModelConfig
+	(*ModelChoice)(nil),           // 12: gil.v1.ModelChoice
+	(*Budget)(nil),                // 13: gil.v1.Budget
+	(*Tools)(nil),                 // 14: gil.v1.Tools
+	(*RiskProfile)(nil),           // 15: gil.v1.RiskProfile
+	(*Microagent)(nil),            // 16: gil.v1.Microagent
+	(*Setup)(nil),                 // 17: gil.v1.Setup
+	(*timestamppb.Timestamp)(nil), // 18: google.protobuf.Timestamp
 }
 var file_gil_v1_spec_proto_depIdxs = []int32{
-	16, // 0: gil.v1.FrozenSpec.frozen_at:type_name -> google.protobuf.Timestamp
-	4,  // 1: gil.v1.FrozenSpec.goal:type_name -> gil.v1.Goal
-	5,  // 2: gil.v1.FrozenSpec.constraints:type_name -> gil.v1.Constraints
-	6,  // 3: gil.v1.FrozenSpec.verification:type_name -> gil.v1.Verification
-	8,  // 4: gil.v1.FrozenSpec.workspace:type_name -> gil.v1.Workspace
-	9,  // 5: gil.v1.FrozenSpec.models:type_name -> gil.v1.ModelConfig
-	11, // 6: gil.v1.FrozenSpec.budget:type_name -> gil.v1.Budget
-	12, // 7: gil.v1.FrozenSpec.tools:type_name -> gil.v1.Tools
-	13, // 8: gil.v1.FrozenSpec.risk:type_name -> gil.v1.RiskProfile
-	14, // 9: gil.v1.FrozenSpec.microagents:type_name -> gil.v1.Microagent
-	15, // 10: gil.v1.FrozenSpec.setup:type_name -> gil.v1.Setup
-	7,  // 11: gil.v1.Verification.checks:type_name -> gil.v1.Check
-	0,  // 12: gil.v1.Check.kind:type_name -> gil.v1.CheckKind
-	1,  // 13: gil.v1.Workspace.backend:type_name -> gil.v1.WorkspaceBackend
-	10, // 14: gil.v1.ModelConfig.main:type_name -> gil.v1.ModelChoice
-	10, // 15: gil.v1.ModelConfig.weak:type_name -> gil.v1.ModelChoice
-	10, // 16: gil.v1.ModelConfig.editor:type_name -> gil.v1.ModelChoice
-	10, // 17: gil.v1.ModelConfig.adversary:type_name -> gil.v1.ModelChoice
-	10, // 18: gil.v1.ModelConfig.interview:type_name -> gil.v1.ModelChoice
-	2,  // 19: gil.v1.RiskProfile.autonomy:type_name -> gil.v1.AutonomyDial
-	20, // [20:20] is the sub-list for method output_type
-	20, // [20:20] is the sub-list for method input_type
-	20, // [20:20] is the sub-list for extension type_name
-	20, // [20:20] is the sub-list for extension extendee
-	0,  // [0:20] is the sub-list for field type_name
+	18, // 0: gil.v1.FrozenSpec.frozen_at:type_name -> google.protobuf.Timestamp
+	6,  // 1: gil.v1.FrozenSpec.goal:type_name -> gil.v1.Goal
+	7,  // 2: gil.v1.FrozenSpec.constraints:type_name -> gil.v1.Constraints
+	8,  // 3: gil.v1.FrozenSpec.verification:type_name -> gil.v1.Verification
+	10, // 4: gil.v1.FrozenSpec.workspace:type_name -> gil.v1.Workspace
+	11, // 5: gil.v1.FrozenSpec.models:type_name -> gil.v1.ModelConfig
+	13, // 6: gil.v1.FrozenSpec.budget:type_name -> gil.v1.Budget
+	14, // 7: gil.v1.FrozenSpec.tools:type_name -> gil.v1.Tools
+	15, // 8: gil.v1.FrozenSpec.risk:type_name -> gil.v1.RiskProfile
+	16, // 9: gil.v1.FrozenSpec.microagents:type_name -> gil.v1.Microagent
+	17, // 10: gil.v1.FrozenSpec.setup:type_name -> gil.v1.Setup
+	4,  // 11: gil.v1.FrozenSpec.run:type_name -> gil.v1.RunOptions
+	5,  // 12: gil.v1.RunOptions.system_prompt:type_name -> gil.v1.SystemPromptOptions
+	9,  // 13: gil.v1.Verification.checks:type_name -> gil.v1.Check
+	0,  // 14: gil.v1.Check.kind:type_name -> gil.v1.CheckKind
+	1,  // 15: gil.v1.Workspace.backend:type_name -> gil.v1.WorkspaceBackend
+	12, // 16: gil.v1.ModelConfig.main:type_name -> gil.v1.ModelChoice
+	12, // 17: gil.v1.ModelConfig.weak:type_name -> gil.v1.ModelChoice
+	12, // 18: gil.v1.ModelConfig.editor:type_name -> gil.v1.ModelChoice
+	12, // 19: gil.v1.ModelConfig.adversary:type_name -> gil.v1.ModelChoice
+	12, // 20: gil.v1.ModelConfig.interview:type_name -> gil.v1.ModelChoice
+	12, // 21: gil.v1.ModelConfig.planner:type_name -> gil.v1.ModelChoice
+	12, // 22: gil.v1.ModelConfig.slot:type_name -> gil.v1.ModelChoice
+	12, // 23: gil.v1.ModelConfig.audit:type_name -> gil.v1.ModelChoice
+	2,  // 24: gil.v1.RiskProfile.autonomy:type_name -> gil.v1.AutonomyDial
+	25, // [25:25] is the sub-list for method output_type
+	25, // [25:25] is the sub-list for method input_type
+	25, // [25:25] is the sub-list for extension type_name
+	25, // [25:25] is the sub-list for extension extendee
+	0,  // [0:25] is the sub-list for field type_name
 }
 
 func init() { file_gil_v1_spec_proto_init() }
@@ -1339,7 +1536,7 @@ func file_gil_v1_spec_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_gil_v1_spec_proto_rawDesc), len(file_gil_v1_spec_proto_rawDesc)),
 			NumEnums:      3,
-			NumMessages:   13,
+			NumMessages:   15,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
