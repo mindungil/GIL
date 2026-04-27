@@ -18,6 +18,13 @@ import (
 // resetOutputFormatForTest at the bottom of root.go.
 var outputFormat = "text"
 
+// asciiMode is the persistent --ascii flag. When set the visual
+// surfaces (gil, gil watch, gil status visual mode) swap their
+// Unicode glyphs for the ASCII fallbacks defined in
+// cli/internal/cmd/uistyle/glyph.go. The default keeps the spec's
+// Unicode set per terminal-aesthetic.md §3.
+var asciiMode = false
+
 // outputJSON reports whether the user asked for JSON via the persistent
 // --output flag. We compare case-insensitively so `--output JSON` works
 // the same as `--output json` (matches goose/codex tolerance).
@@ -36,6 +43,7 @@ func outputJSON() bool {
 // previous test does not bleed into a sibling.
 func resetOutputFormatForTest() {
 	outputFormat = "text"
+	asciiMode = false
 }
 
 // defaultLayout returns the XDG-derived layout (or the GIL_HOME single-
@@ -88,6 +96,17 @@ func Root() *cobra.Command {
 		// core/version package, which is stamped via -ldflags at build
 		// time and falls back to runtime/debug.BuildInfo otherwise.
 		Version: version.String(),
+		// Args=NoArgs forbids `gil <unknown>` (cobra would otherwise
+		// emit "unknown command"); we want our own tighter error path,
+		// and the no-arg case is handled by RunE below.
+		Args: cobra.NoArgs,
+		// RunE only fires on bare `gil` (no subcommand, no `--help`,
+		// no `--version`). Cobra resolves --help / --version itself
+		// before this hook, so the mission-control summary is the
+		// only thing the user sees when they type `gil` alone.
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runSummary(cmd.OutOrStdout(), defaultSocket(), defaultBase(), asciiMode)
+		},
 	}
 	// SetVersionTemplate strips cobra's default "gil version vX.Y.Z\n"
 	// banner in favour of just the version line — matches the goose /
@@ -105,6 +124,13 @@ func Root() *cobra.Command {
 	// instead of the human table. Default "text" preserves the existing
 	// CLI surface 1:1; unknown values fall through to text.
 	root.PersistentFlags().StringVar(&outputFormat, "output", "text", "output format: text|json")
+	// --ascii is the global toggle for the Unicode glyph set used by
+	// the visual surfaces (no-arg summary, watch, status). Off by
+	// default so the spec aesthetic ships out of the box; users on
+	// terminals without a Unicode font opt in (LANG=C is also a
+	// reasonable trigger but we leave that to the caller; the env
+	// variable does not auto-flip the flag).
+	root.PersistentFlags().BoolVar(&asciiMode, "ascii", false, "use ASCII fallback glyphs (no Unicode)")
 	root.AddCommand(daemonCmd())
 	root.AddCommand(authCmd())
 	root.AddCommand(initCmd())
@@ -116,6 +142,7 @@ func Root() *cobra.Command {
 	root.AddCommand(specCmd())
 	root.AddCommand(runCmd())
 	root.AddCommand(eventsCmd())
+	root.AddCommand(watchCmd())
 	root.AddCommand(exportCmd())
 	root.AddCommand(importCmd())
 	root.AddCommand(restoreCmd())
