@@ -1,4 +1,4 @@
-.PHONY: tidy test gen build install clean e2e e2e2 e2e3 e2e4 e2e5 e2e6 e2e7 e2e8 e2e9 e2e10-modal e2e10-daytona e2e10-oidc e2e11-freshinstall e2e12-in-session-ux e2e-all python-protos python-test release release-host release-check
+.PHONY: tidy test gen build install install-script clean e2e e2e2 e2e3 e2e4 e2e5 e2e6 e2e7 e2e8 e2e9 e2e10-modal e2e10-daytona e2e10-oidc e2e11-freshinstall e2e12-in-session-ux e2e-all python-protos python-test release release-host release-check
 
 tidy:
 	@for m in core runtime proto server cli tui sdk mcp; do \
@@ -28,6 +28,22 @@ install: build
 	@install -m 0755 bin/giltui /usr/local/bin/giltui 2>/dev/null || sudo install -m 0755 bin/giltui /usr/local/bin/giltui
 	@install -m 0755 bin/gilmcp /usr/local/bin/gilmcp 2>/dev/null || sudo install -m 0755 bin/gilmcp /usr/local/bin/gilmcp
 	@echo "Installed gil, gild, giltui, gilmcp to /usr/local/bin"
+
+# install-script: syntax-check scripts/install.sh and (optionally) serve it
+# locally for end-to-end smoke testing of the curl pipe. Useful while
+# iterating on the installer itself.
+#
+#   make install-script              # syntax-check only
+#   make install-script SERVE=1      # also serve scripts/ on :8080
+#
+# In the SERVE=1 mode, point another shell at it with:
+#   curl -fsSL http://localhost:8080/install.sh | bash
+install-script:
+	@bash -n scripts/install.sh && echo "scripts/install.sh: syntax OK"
+	@if [ "$(SERVE)" = "1" ]; then \
+		echo "Serving scripts/ on http://localhost:8080 — Ctrl-C to stop"; \
+		cd scripts && python3 -m http.server 8080; \
+	fi
 
 e2e: build
 	@bash tests/e2e/phase01_test.sh
