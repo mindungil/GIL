@@ -81,6 +81,23 @@ type sessionCostReport struct {
 	CostUSD  float64      `json:"cost_usd"`
 	Estimate bool         `json:"estimate"` // true when prices come from catalog (always true today)
 	Known    bool         `json:"model_known"`
+	// ByRole breaks the spend down by classifyTurn role
+	// ("planner"/"editor"/"main"). Empty when the run never used the
+	// architect/coder split (single-provider configs leave the field
+	// empty so legacy JSON consumers stay byte-compatible).
+	ByRole []roleCostRow `json:"by_role,omitempty"`
+}
+
+// roleCostRow is one entry of the per-role breakdown rendered below
+// the global tokens/cost block.
+type roleCostRow struct {
+	Role         string  `json:"role"`
+	Model        string  `json:"model"`
+	Calls        int     `json:"calls"`
+	InputTokens  int64   `json:"input_tokens"`
+	OutputTokens int64   `json:"output_tokens"`
+	CostUSD      float64 `json:"cost_usd"`
+	Known        bool    `json:"model_known"`
 }
 
 type tokenSummary struct {
@@ -155,6 +172,13 @@ func buildSessionCost(layout paths.Layout, sessionID string) (sessionCostReport,
 		CacheWriteTokens: totals.CacheWrite,
 	})
 
+	// Phase 19 Track C: per-role breakdown. Pulls (role, model, tokens)
+	// from the paired provider_request / provider_response events.
+	// Empty result when the run never used the architect/coder split
+	// (no role field in provider_request) — keeping the JSON shape
+	// stable for legacy single-provider runs.
+	byRole := aggregateByRole(events, calc)
+
 	return sessionCostReport{
 		Session:  sessionID,
 		Provider: providerForModel(model),
@@ -163,7 +187,106 @@ func buildSessionCost(layout paths.Layout, sessionID string) (sessionCostReport,
 		CostUSD:  usd,
 		Estimate: true,
 		Known:    ok,
+		ByRole:   byRole,
 	}, nil
+}
+
+// aggregateByRole walks the event stream pairing each provider_request
+// (which carries role + model) with the immediately following
+// provider_response (which carries token counts). Returns a stable
+// ordering: planner → editor → main → other (alphabetical), so the
+// rendered output reads top-down by importance.
+//
+// We deliberately use list-of-rows rather than a map so the JSON shape
+// is friendly for downstream tooling (e.g., GitHub Actions that wants
+// to assert "planner cost stayed under $0.05").
+func aggregateByRole(events []event.Event, calc *cost.Calculator) []roleCostRow {
+	type accum struct {
+		Calls        int
+		InputTokens  int64
+		OutputTokens int64
+		Model        string
+	}
+	// Keyed by (role, model) so a role that switched models mid-run
+	// shows separate rows. Most runs have one model per role, but the
+	// stuck-recovery path can swap models, and we want that visible.
+	type key struct{ role, model string }
+	byKey := map[key]*accum{}
+
+	var pendingRole, pendingModel string
+	havePending := false
+
+	for _, e := range events {
+		switch e.Type {
+		case "provider_request":
+			var data struct {
+				Role  string `json:"role"`
+				Model string `json:"model"`
+			}
+			_ = json.Unmarshal(e.Data, &data)
+			pendingRole = data.Role
+			pendingModel = data.Model
+			havePending = true
+		case "provider_response":
+			if !havePending || pendingRole == "" {
+				havePending = false
+				continue
+			}
+			var data struct {
+				Input  int64 `json:"input_tokens"`
+				Output int64 `json:"output_tokens"`
+			}
+			_ = json.Unmarshal(e.Data, &data)
+			k := key{role: pendingRole, model: pendingModel}
+			a := byKey[k]
+			if a == nil {
+				a = &accum{Model: pendingModel}
+				byKey[k] = a
+			}
+			a.Calls++
+			a.InputTokens += data.Input
+			a.OutputTokens += data.Output
+			havePending = false
+		}
+	}
+
+	if len(byKey) == 0 {
+		return nil
+	}
+
+	rows := make([]roleCostRow, 0, len(byKey))
+	for k, a := range byKey {
+		usd, known := calc.Estimate(a.Model, cost.Usage{
+			InputTokens:  a.InputTokens,
+			OutputTokens: a.OutputTokens,
+		})
+		rows = append(rows, roleCostRow{
+			Role:         k.role,
+			Model:        a.Model,
+			Calls:        a.Calls,
+			InputTokens:  a.InputTokens,
+			OutputTokens: a.OutputTokens,
+			CostUSD:      usd,
+			Known:        known,
+		})
+	}
+	// Order: planner → editor → main → others (alphabetical).
+	roleOrder := map[string]int{"planner": 0, "editor": 1, "main": 2}
+	sort.Slice(rows, func(i, j int) bool {
+		oi, iok := roleOrder[rows[i].Role]
+		oj, jok := roleOrder[rows[j].Role]
+		if iok && jok {
+			return oi < oj
+		}
+		if iok != jok {
+			return iok // known orders come before unknown
+		}
+		if rows[i].Role != rows[j].Role {
+			return rows[i].Role < rows[j].Role
+		}
+		return rows[i].Model < rows[j].Model
+	})
+	return rows
 }
 
 // aggregateUsage walks an event stream summing the token counters that
@@ -245,6 +368,24 @@ func writeCostText(w io.Writer, r sessionCostReport) error {
 		fmt.Fprintln(w, "Cost (USD):    n/a  (no provider response recorded)")
 	} else {
 		fmt.Fprintf(w, "Cost (USD):    n/a  (model %q not in catalog; override Cache/models.json)\n", r.Model)
+	}
+
+	// Per-role breakdown — only rendered when the run actually used the
+	// architect/coder split (i.e., at least 2 distinct roles fired).
+	// Single-role runs print the same numbers as the global block above
+	// and would just be visual noise.
+	if len(r.ByRole) > 1 {
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "By role:")
+		for _, row := range r.ByRole {
+			tokens := row.InputTokens + row.OutputTokens
+			costStr := "n/a"
+			if row.Known {
+				costStr = fmt.Sprintf("$%.4f", row.CostUSD)
+			}
+			fmt.Fprintf(w, "  %-8s %s  %d call(s)  %s tokens  %s\n",
+				row.Role, row.Model, row.Calls, formatThousands(tokens), costStr)
+		}
 	}
 	return nil
 }

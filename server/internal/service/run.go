@@ -310,6 +310,18 @@ func (s *RunService) Start(ctx context.Context, req *gilv1.StartRunRequest) (*gi
 	}
 	prov = provider.NewRetry(prov)
 
+	// providerName is the FACTORY key the default provider was built
+	// from. Plumbed into executeRun so buildRoleProviders can match
+	// per-role overrides against this name (the Provider's .Name()
+	// carries wrapper suffixes like "+retry" that would break the
+	// match). Fallback to spec.Models.Main.Provider when the request
+	// didn't pin the provider on the wire — keeps the routing
+	// consistent with whatever the factory accepted as its default.
+	providerName := req.Provider
+	if providerName == "" && spec.Models != nil && spec.Models.Main != nil {
+		providerName = spec.Models.Main.Provider
+	}
+
 	tools, err := buildTools(workspaceDir, spec.Workspace)
 	if err != nil {
 		return nil, status.Errorf(codes.FailedPrecondition, "workspace backend: %v", err)
@@ -326,11 +338,11 @@ func (s *RunService) Start(ctx context.Context, req *gilv1.StartRunRequest) (*gi
 		go func() {
 			// Use a background context: the gRPC ctx cancels when Start returns.
 			bgCtx := context.Background()
-			_, _ = s.executeRun(bgCtx, req.SessionId, spec, prov, model, tools, ver, workspaceDir)
+			_, _ = s.executeRun(bgCtx, req.SessionId, spec, prov, providerName, model, tools, ver, workspaceDir)
 		}()
 		return &gilv1.StartRunResponse{Status: "started"}, nil
 	}
-	return s.executeRun(ctx, req.SessionId, spec, prov, model, tools, ver, workspaceDir)
+	return s.executeRun(ctx, req.SessionId, spec, prov, providerName, model, tools, ver, workspaceDir)
 }
 
 // makeAskCallback returns an AskCallback for use in AgentLoop. When the agent
@@ -678,6 +690,7 @@ func (s *RunService) executeRun(
 	sessionID string,
 	spec *gilv1.FrozenSpec,
 	prov provider.Provider,
+	providerName string,
 	model string,
 	tools []tool.Tool,
 	ver *verify.Runner,
@@ -1129,6 +1142,35 @@ func (s *RunService) executeRun(
 	loop := runner.NewAgentLoop(spec, prov, model, tools, ver)
 	loop.Events = stream
 	loop.Memory = bank
+
+	// Phase 19 Track C: wire the architect/coder split. buildRoleProviders
+	// constructs per-role Provider+Model maps from spec.Models.{planner,
+	// editor, main}, sharing one Provider instance when multiple roles
+	// point at the same backend. Single-provider specs (just main) yield
+	// a 1-entry map and the runner's pickProvider helpers fall through
+	// to a.Provider for any unset role — preserving the legacy single-
+	// provider behaviour bit-for-bit.
+	roleProviders, roleModels, rerr := buildRoleProviders(spec, s.providerFactory, prov, model, providerName)
+	if rerr != nil {
+		// A typo'd provider name in spec.Models is a hard failure: the
+		// user clearly intended an override and we don't want to
+		// silently downgrade. Emit an event before returning so the
+		// failure is visible in the persisted event stream.
+		data, _ := json.Marshal(map[string]any{
+			"err": rerr.Error(),
+		})
+		_, _ = stream.Append(event.Event{
+			Timestamp: time.Now().UTC(),
+			Source:    event.SourceSystem,
+			Kind:      event.KindNote,
+			Type:      "role_providers_error",
+			Data:      data,
+		})
+		_ = s.repo.UpdateStatus(ctx, sessionID, "stopped")
+		return nil, status.Errorf(codes.InvalidArgument, "role provider: %v", rerr)
+	}
+	loop.Providers = roleProviders
+	loop.Models = roleModels
 	// Plan wiring: same per-session store as the plan tool above; the
 	// runner uses it ONLY for the system-prompt prepend (read-side).
 	// All mutations flow through the tool, never the loop directly.
