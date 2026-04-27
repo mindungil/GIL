@@ -40,11 +40,16 @@ builds:
     goarch: [amd64, arm64]
     flags:
       - -trimpath
+    # Stamp the shared core/version package so all four binaries
+    # report the same Version/Commit/BuildDate via `--version`.
+    # Targeting main.version (the prior shape) was a no-op because
+    # the four mains live in different modules and don't define
+    # version vars themselves.
     ldflags:
       - -s -w
-      - -X main.version={{ .Version }}
-      - -X main.commit={{ .Commit }}
-      - -X main.date={{ .Date }}
+      - -X 'github.com/jedutools/gil/core/version.Version={{ .Version }}'
+      - -X 'github.com/jedutools/gil/core/version.Commit={{ .Commit }}'
+      - -X 'github.com/jedutools/gil/core/version.BuildDate={{ .Date }}'
 
   - id: gild
     binary: gild
@@ -56,11 +61,16 @@ builds:
     goarch: [amd64, arm64]
     flags:
       - -trimpath
+    # Stamp the shared core/version package so all four binaries
+    # report the same Version/Commit/BuildDate via `--version`.
+    # Targeting main.version (the prior shape) was a no-op because
+    # the four mains live in different modules and don't define
+    # version vars themselves.
     ldflags:
       - -s -w
-      - -X main.version={{ .Version }}
-      - -X main.commit={{ .Commit }}
-      - -X main.date={{ .Date }}
+      - -X 'github.com/jedutools/gil/core/version.Version={{ .Version }}'
+      - -X 'github.com/jedutools/gil/core/version.Commit={{ .Commit }}'
+      - -X 'github.com/jedutools/gil/core/version.BuildDate={{ .Date }}'
 
   - id: giltui
     binary: giltui
@@ -72,11 +82,16 @@ builds:
     goarch: [amd64, arm64]
     flags:
       - -trimpath
+    # Stamp the shared core/version package so all four binaries
+    # report the same Version/Commit/BuildDate via `--version`.
+    # Targeting main.version (the prior shape) was a no-op because
+    # the four mains live in different modules and don't define
+    # version vars themselves.
     ldflags:
       - -s -w
-      - -X main.version={{ .Version }}
-      - -X main.commit={{ .Commit }}
-      - -X main.date={{ .Date }}
+      - -X 'github.com/jedutools/gil/core/version.Version={{ .Version }}'
+      - -X 'github.com/jedutools/gil/core/version.Commit={{ .Commit }}'
+      - -X 'github.com/jedutools/gil/core/version.BuildDate={{ .Date }}'
 
   - id: gilmcp
     binary: gilmcp
@@ -88,11 +103,16 @@ builds:
     goarch: [amd64, arm64]
     flags:
       - -trimpath
+    # Stamp the shared core/version package so all four binaries
+    # report the same Version/Commit/BuildDate via `--version`.
+    # Targeting main.version (the prior shape) was a no-op because
+    # the four mains live in different modules and don't define
+    # version vars themselves.
     ldflags:
       - -s -w
-      - -X main.version={{ .Version }}
-      - -X main.commit={{ .Commit }}
-      - -X main.date={{ .Date }}
+      - -X 'github.com/jedutools/gil/core/version.Version={{ .Version }}'
+      - -X 'github.com/jedutools/gil/core/version.Commit={{ .Commit }}'
+      - -X 'github.com/jedutools/gil/core/version.BuildDate={{ .Date }}'
 
 archives:
   # One bundle per (os, arch) containing all four binaries — that's the

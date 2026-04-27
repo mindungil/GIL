@@ -10,13 +10,22 @@ import (
 
 	"github.com/jedutools/gil/core/mcp/jsonrpc"
 	"github.com/jedutools/gil/core/paths"
+	"github.com/jedutools/gil/core/version"
 	"github.com/jedutools/gil/mcp/internal/server"
 	"github.com/jedutools/gil/sdk"
 )
 
 func main() {
 	socket := flag.String("socket", defaultSocket(), "gild UDS socket path")
+	// --version handled before dialing the daemon so a fresh-install
+	// user can ask the binary "what version are you?" without gild
+	// running.
+	versionFlag := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
+	if *versionFlag {
+		fmt.Fprintf(os.Stdout, "gilmcp %s\n", version.String())
+		return
+	}
 
 	cli, err := sdk.Dial(*socket)
 	if err != nil {

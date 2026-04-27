@@ -15,12 +15,32 @@ test:
 gen:
 	@cd proto && buf generate
 
+# Version stamping. VERSION is whatever `git describe --tags` returns
+# (or 0.0.0-dev when there are no tags yet); COMMIT/DATE are derived
+# from the working tree. All three are surfaced through
+# core/version.{Version,Commit,BuildDate} via -ldflags below, and
+# `gil --version` (and the gild/giltui/gilmcp equivalents) prints them
+# verbatim.
+#
+# The fallbacks are intentional: contributors building from a tarball
+# without git history still get a sensible "0.0.0-dev (unknown,
+# unknown)" line rather than a build error. Release builds (driven by
+# .goreleaser.yaml) plumb the same -X targets through goreleaser's
+# template, so the same stamping mechanism covers both make build and
+# tagged releases.
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "0.0.0-dev")
+COMMIT  := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+DATE    := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+LDFLAGS := -X 'github.com/jedutools/gil/core/version.Version=$(VERSION)' \
+           -X 'github.com/jedutools/gil/core/version.Commit=$(COMMIT)'   \
+           -X 'github.com/jedutools/gil/core/version.BuildDate=$(DATE)'
+
 build:
 	@mkdir -p bin
-	@cd cli && go build -o ../bin/gil ./cmd/gil
-	@cd server && go build -o ../bin/gild ./cmd/gild
-	@cd tui && go build -o ../bin/giltui ./cmd/giltui
-	@cd mcp && go build -o ../bin/gilmcp ./cmd/gilmcp
+	@cd cli    && go build -ldflags "$(LDFLAGS)" -o ../bin/gil    ./cmd/gil
+	@cd server && go build -ldflags "$(LDFLAGS)" -o ../bin/gild   ./cmd/gild
+	@cd tui    && go build -ldflags "$(LDFLAGS)" -o ../bin/giltui ./cmd/giltui
+	@cd mcp    && go build -ldflags "$(LDFLAGS)" -o ../bin/gilmcp ./cmd/gilmcp
 
 install: build
 	@install -m 0755 bin/gil    /usr/local/bin/gil    2>/dev/null || sudo install -m 0755 bin/gil    /usr/local/bin/gil

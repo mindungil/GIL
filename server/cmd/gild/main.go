@@ -25,6 +25,7 @@ import (
 	"github.com/jedutools/gil/core/paths"
 	"github.com/jedutools/gil/core/provider"
 	"github.com/jedutools/gil/core/session"
+	"github.com/jedutools/gil/core/version"
 	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
 	"github.com/jedutools/gil/server/internal/auth"
 	"github.com/jedutools/gil/server/internal/metrics"
@@ -340,7 +341,18 @@ func main() {
 	authAudience := flag.String("auth-audience", "", "expected OIDC token audience (`aud` claim); validated when --auth-issuer is set")
 	authAllowUDS := flag.Bool("auth-allow-uds", true, "skip auth on UDS connections (assumed local-trusted via socket file mode 0600)")
 	authEnforceSub := flag.String("auth-enforce-sub", "", "if non-empty, require token `sub` claim to equal this value (pairs with --user)")
+	// --version is handled before any other side-effect (path resolution,
+	// migration, listener bind) so a fresh-install user can run
+	// `gild --version` even when nothing else is configured. We mirror the
+	// cobra-style "gild vX.Y.Z" output the cli root produces, so the four
+	// gil binaries are interchangeable for version-sniffing scripts.
+	versionFlag := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
+
+	if *versionFlag {
+		fmt.Fprintf(os.Stdout, "gild %s\n", version.String())
+		return
+	}
 
 	if !*foreground {
 		fmt.Fprintln(os.Stderr, "gild: --foreground required for now (detach mode in Phase 2)")
@@ -382,7 +394,7 @@ func main() {
 		slog.Info("migrated legacy ~/.gil tree into XDG layout")
 	}
 
-	metrics.SetVersion("0.9.0-dev")
+	metrics.SetVersion(version.Short())
 
 	dbPath := layout.SessionsDB()
 	sockPath := layout.Sock()

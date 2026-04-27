@@ -4,6 +4,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/jedutools/gil/core/paths"
+	"github.com/jedutools/gil/core/version"
 )
 
 // outputFormat is the value of the persistent `--output` flag wired in
@@ -81,7 +82,24 @@ func Root() *cobra.Command {
 		Short:         "gil — autonomous coding harness",
 		SilenceUsage:  true,
 		SilenceErrors: true,
+		// Version powers cobra's built-in `gil --version` / `gil -v`
+		// flag handling. Setting it here (not via main) keeps the wiring
+		// in one place; the underlying string comes from the shared
+		// core/version package, which is stamped via -ldflags at build
+		// time and falls back to runtime/debug.BuildInfo otherwise.
+		Version: version.String(),
 	}
+	// SetVersionTemplate strips cobra's default "gil version vX.Y.Z\n"
+	// banner in favour of just the version line — matches the goose /
+	// codex shape and is friendlier to scripts that read --version
+	// output directly.
+	root.SetVersionTemplate("gil {{.Version}}\n")
+	// Mirror the build-time version into the doctor package so its
+	// header line and JSON output use the same source of truth as
+	// `gil --version`. Without this, doctor would still rely on
+	// runtime/debug.BuildInfo for release builds, missing the
+	// -ldflags-stamped value.
+	SetVersion(version.Short())
 	// Persistent --output flag (Phase 12, Track G / T13). Subcommands
 	// that have a structured form check outputJSON() and emit JSON
 	// instead of the human table. Default "text" preserves the existing

@@ -1,15 +1,26 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"os"
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/jedutools/gil/core/version"
 	"github.com/jedutools/gil/tui/internal/app"
 )
 
 func main() {
+	// --version handled before any side-effect (TUI alt-screen init,
+	// socket dial). Matches the gil/gild/gilmcp shape: "<binary> vX.Y.Z".
+	versionFlag := flag.Bool("version", false, "print version and exit")
+	flag.Parse()
+	if *versionFlag {
+		fmt.Fprintf(os.Stdout, "giltui %s\n", version.String())
+		return
+	}
+
 	socket := app.DefaultSocket()
 	if v := os.Getenv("GIL_SOCKET"); v != "" {
 		socket = v
