@@ -75,6 +75,12 @@ type RunService struct {
 	runStreams  map[string]*event.Stream            // per-session live event streams
 	runProgress map[string]*runProgressSnap         // per-session live progress counters
 	pendingAsks map[string]map[string]*pendingAsk   // sessionID → requestID → ask context
+	// runLoops holds a pointer to the AgentLoop for each in-flight run so
+	// surface-side RPCs (RequestCompact, PostHint) can stage actions for
+	// the next iteration without preempting the current tool call. The
+	// entry is removed in executeRun's defer once Run() returns. Nil when
+	// no run is in flight for that session.
+	runLoops    map[string]*runner.AgentLoop
 }
 
 // NewRunService constructs the service.
@@ -86,6 +92,7 @@ func NewRunService(repo *session.Repo, sessionsBase string, factory ProviderFact
 		runStreams:      make(map[string]*event.Stream),
 		runProgress:     make(map[string]*runProgressSnap),
 		pendingAsks:     make(map[string]map[string]*pendingAsk),
+		runLoops:        make(map[string]*runner.AgentLoop),
 	}
 }
 
@@ -534,11 +541,12 @@ func (s *RunService) executeRun(
 	s.runProgress[sessionID] = &runProgressSnap{}
 	s.mu.Unlock()
 
-	// Cleanup on exit: remove both stream and progress entry, decrement running gauge.
+	// Cleanup on exit: remove stream, progress, and loop entries, decrement running gauge.
 	defer func() {
 		s.mu.Lock()
 		delete(s.runStreams, sessionID)
 		delete(s.runProgress, sessionID)
+		delete(s.runLoops, sessionID)
 		s.mu.Unlock()
 		metrics.SessionsRunning.Dec()
 	}()
@@ -761,6 +769,14 @@ func (s *RunService) executeRun(
 	loop := runner.NewAgentLoop(spec, prov, model, tools, ver)
 	loop.Events = stream
 	loop.Memory = bank
+
+	// Register the loop pointer so RequestCompact / PostHint RPCs can
+	// stage actions for the next iteration boundary. Cleared in the
+	// existing exit-cleanup defer below alongside runStreams /
+	// runProgress so the lifetime matches the run exactly.
+	s.mu.Lock()
+	s.runLoops[sessionID] = loop
+	s.mu.Unlock()
 	// Tell the runner where the user's project lives so it can run the
 	// AGENTS.md / CLAUDE.md / .cursor/rules tree-walk and inject the
 	// resulting context into the system prompt. Empty workspaceDir leaves

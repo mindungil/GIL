@@ -139,6 +139,16 @@ func (a *AgentLoop) RequestCompact() {
 	a.compactNowRequested = true
 }
 
+// QueueSystemNote stages a one-shot note that will be appended to the
+// system prompt for the NEXT iteration only. Subsequent calls overwrite
+// any pending note (single-shot semantics — only the most recent
+// suggestion gets through). Used by RunService.PostHint to deliver
+// surface-issued hints (e.g., model preference) without preempting the
+// in-flight tool call. The agent decides whether to honor it.
+func (a *AgentLoop) QueueSystemNote(note string) {
+	a.extraSystemNote = note
+}
+
 // NewAgentLoop constructs a loop.
 func NewAgentLoop(spec *gilv1.FrozenSpec, prov provider.Provider, model string, tools []tool.Tool, ver *verify.Runner) *AgentLoop {
 	return &AgentLoop{Spec: spec, Provider: prov, Model: model, Tools: tools, Verifier: ver}
