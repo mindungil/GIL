@@ -228,3 +228,68 @@ func (c *Client) AnswerPermissionDecision(ctx context.Context, sessionID, reques
 	}
 	return resp.Delivered, nil
 }
+
+// RequestCompact asks the server to queue a compaction at the next turn
+// boundary for sessionID. Returns queued=false with reason set when no
+// run is in flight (the reason is server-supplied and safe to surface
+// directly to a user). The server never preempts an in-flight tool
+// call — the runner observes the flag at the top of the next iteration.
+func (c *Client) RequestCompact(ctx context.Context, sessionID string) (queued bool, reason string, err error) {
+	resp, err := c.runs.RequestCompact(ctx, &gilv1.RequestCompactRequest{SessionId: sessionID})
+	if err != nil {
+		return false, "", err
+	}
+	return resp.Queued, resp.Reason, nil
+}
+
+// PostHint stages a non-binding hint for the agent's next turn. The
+// hint shape is opaque key/value: today the canonical key is "model"
+// (suggest a model switch) but surfaces may carry additional keys
+// without a wire change. Returns posted=false when the session has no
+// run in flight.
+func (c *Client) PostHint(ctx context.Context, sessionID string, hint map[string]string) (posted bool, reason string, err error) {
+	resp, err := c.runs.PostHint(ctx, &gilv1.PostHintRequest{
+		SessionId: sessionID,
+		Hint:      hint,
+	})
+	if err != nil {
+		return false, "", err
+	}
+	return resp.Posted, resp.Reason, nil
+}
+
+// DiffResult is the SDK-side view of a session diff. Truncated indicates
+// the body was clipped server-side; TruncatedBytes carries the count the
+// server dropped from the tail. Note is non-empty when the session has
+// no checkpoints yet (a normal state, not an error).
+type DiffResult struct {
+	UnifiedDiff    string
+	FilesChanged   int32
+	LinesAdded     int32
+	LinesRemoved   int32
+	Truncated      bool
+	TruncatedBytes int32
+	CheckpointSHA  string
+	Note           string
+}
+
+// Diff fetches the unified diff between the latest shadow-git
+// checkpoint for sessionID and the current workspace state. The diff
+// is read-only — the workspace is unchanged. Use the Note field to
+// detect the "no checkpoints yet" case without parsing error strings.
+func (c *Client) Diff(ctx context.Context, sessionID string) (*DiffResult, error) {
+	resp, err := c.runs.Diff(ctx, &gilv1.DiffRequest{SessionId: sessionID})
+	if err != nil {
+		return nil, err
+	}
+	return &DiffResult{
+		UnifiedDiff:    resp.UnifiedDiff,
+		FilesChanged:   resp.FilesChanged,
+		LinesAdded:     resp.LinesAdded,
+		LinesRemoved:   resp.LinesRemoved,
+		Truncated:      resp.Truncated,
+		TruncatedBytes: resp.TruncatedBytes,
+		CheckpointSHA:  resp.CheckpointSha,
+		Note:           resp.Note,
+	}, nil
+}
