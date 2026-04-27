@@ -30,10 +30,22 @@ type statusJSONReport struct {
 }
 
 // statusCmd returns the "status" subcommand for listing sessions.
-// It lists all sessions from the gild gRPC server in a tab-separated table format.
+//
+// As of Phase 14 the default rendering is the visual "mission-control"
+// card layout (one card per session, with a sub-cell progress bar and
+// a meta row underneath). Two flags drop back to the legacy formats:
+//
+//   --plain       the original tab-separated table — script friendly,
+//                 stable column order, never emits ANSI
+//   --output json the structured JSON envelope — same shape as before
+//
+// We deliberately keep both fallbacks: any external script that has
+// been parsing the table since Phase 1-12 keeps working as long as it
+// is updated to pass --plain.
 func statusCmd() *cobra.Command {
 	var socket string
 	var limit int
+	var plain bool
 	c := &cobra.Command{
 		Use:   "status",
 		Short: "List sessions",
@@ -62,11 +74,15 @@ func statusCmd() *cobra.Command {
 			if outputJSON() {
 				return writeStatusJSON(cmd.OutOrStdout(), list)
 			}
-			return writeStatusText(cmd.OutOrStdout(), list)
+			if plain {
+				return writeStatusText(cmd.OutOrStdout(), list)
+			}
+			return writeStatusVisual(cmd.OutOrStdout(), list, asciiMode)
 		},
 	}
 	c.Flags().StringVar(&socket, "socket", defaultSocket(), "gild UDS socket path")
 	c.Flags().IntVar(&limit, "limit", 100, "max sessions to list")
+	c.Flags().BoolVar(&plain, "plain", false, "use the legacy tab-separated table (script friendly)")
 	return c
 }
 
