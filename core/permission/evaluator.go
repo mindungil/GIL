@@ -33,6 +33,16 @@ type Rule struct {
 	Action Decision
 }
 
+// Decider is the abstraction the runner uses to gate tool calls. Both
+// Evaluator (spec-derived only) and EvaluatorWithStore (spec + on-disk
+// + session-scoped) implement it, so the runner can stay ignorant of
+// the persistence layer entirely. Callers must accept that any
+// implementation may consult disk, locks, or network — Evaluate should
+// still return promptly (sub-millisecond for the in-memory cases).
+type Decider interface {
+	Evaluate(toolName, key string) Decision
+}
+
 // Evaluator decides allow/ask/deny per (tool, key) pair. Last-matching rule
 // wins (OpenCode pattern: rules.findLast).
 //
