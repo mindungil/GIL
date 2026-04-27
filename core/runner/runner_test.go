@@ -2115,6 +2115,10 @@ func TestAgentLoop_InstructionSourcesOverrideSkipsDiscovery(t *testing.T) {
 }
 
 func TestAgentLoop_MemoryBankAppearsAfterInstructions(t *testing.T) {
+	// Phase 19 Track B: memory bank is now LAZY — skipped on iter 1 to
+	// keep the first-call prompt slim, included on iter 2+. This test
+	// asserts the order rule (instructions BEFORE bank) on the second
+	// iteration's system prompt, where both are present.
 	ws := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(ws, "AGENTS.md"),
 		[]byte("INSTR_MARKER\n"), 0o644))
@@ -2124,11 +2128,16 @@ func TestAgentLoop_MemoryBankAppearsAfterInstructions(t *testing.T) {
 	require.NoError(t, bank.Init())
 	require.NoError(t, bank.Write(memory.FileProgress, "BANK_MARKER\n"))
 
-	prov := &systemRecordingProvider{endAfter: 1}
+	prov := &systemRecordingProvider{endAfter: 2}
 	spec := &gilv1.FrozenSpec{
-		Goal:         &gilv1.Goal{OneLiner: "t"},
-		Verification: &gilv1.Verification{},
-		Budget:       &gilv1.Budget{MaxIterations: 2},
+		Goal: &gilv1.Goal{OneLiner: "t"},
+		Verification: &gilv1.Verification{
+			// Inject one always-failing check so the loop runs a
+			// second iteration before the verifier passes; without
+			// this it'd end on the first end_turn.
+			Checks: []*gilv1.Check{{Name: "x", Kind: gilv1.CheckKind_SHELL, Command: "false", ExpectedExitCode: 0}},
+		},
+		Budget: &gilv1.Budget{MaxIterations: 3},
 	}
 	loop := &AgentLoop{
 		Spec:      spec,
@@ -2138,16 +2147,22 @@ func TestAgentLoop_MemoryBankAppearsAfterInstructions(t *testing.T) {
 		Memory:    bank,
 		Workspace: ws,
 	}
-	_, err := loop.Run(context.Background())
-	require.NoError(t, err)
+	_, _ = loop.Run(context.Background())
 
 	prov.mu.Lock()
+	require.GreaterOrEqual(t, len(prov.systems), 2, "expected at least two iterations recorded")
 	first := prov.systems[0]
+	second := prov.systems[1]
 	prov.mu.Unlock()
 
-	instrIdx := strings.Index(first, "INSTR_MARKER")
-	bankIdx := strings.Index(first, "BANK_MARKER")
-	require.Greater(t, instrIdx, 0, "expected AGENTS.md content in system prompt")
-	require.Greater(t, bankIdx, 0, "expected memory bank content in system prompt")
-	require.Less(t, instrIdx, bankIdx, "instructions must precede memory bank in the system prompt")
+	// Iter 1: instructions present, bank absent (lazy).
+	require.Contains(t, first, "INSTR_MARKER", "iter 1 should include AGENTS.md")
+	require.NotContains(t, first, "BANK_MARKER", "iter 1 should NOT include memory bank (lazy)")
+
+	// Iter 2: both present, instructions precede bank.
+	instrIdx := strings.Index(second, "INSTR_MARKER")
+	bankIdx := strings.Index(second, "BANK_MARKER")
+	require.Greater(t, instrIdx, 0, "iter 2 expected AGENTS.md content in system prompt")
+	require.Greater(t, bankIdx, 0, "iter 2 expected memory bank content in system prompt")
+	require.Less(t, instrIdx, bankIdx, "instructions must precede memory bank")
 }
