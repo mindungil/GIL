@@ -146,3 +146,60 @@ mkdir -p $GIL_HOME/data/sessions/$ID
 go run /home/ubuntu/gil/tests/e2e/helpers/setfrozen.go $GIL_HOME/data/sessions.db $ID
 gil run $ID --provider vllm --model qwen3.6-27b
 ```
+
+## Follow-up — Phase 19 Track B (system prompt 다이어트)
+
+원래 문제: 17k tokens/turn 평균 = system prompt + 18 tool schema + AGENTS.md + memory bank + history.
+이 중 system prompt 부분만 떼서 측정 + 50% 컷 목표.
+
+### 측정 도구
+
+`go run ./runner/measure_diet/` (core 모듈에서) — old vs new prompt 토큰 비교.
+
+`GIL_DEBUG_SYSTEM_PROMPT=1 gil run ...` — 실 런타임에서 첫 턴 stderr에 breakdown 한 번 출력.
+
+### 측정 결과 (Before / After)
+
+13 tools, 2 verifier checks, ~1500-char AGENTS.md, 작은 memory bank 기준:
+
+| 시나리오 | system prompt tokens | tool schemas (별도 채널) |
+|---|---:|---:|
+| **OLD (Phase 18)** | ~1,394 | ~1,851 |
+| **NEW iter 2+ (lazy memory off)** | 693 | ~1,851 |
+| **NEW iter 1 (lazy memory)** | 541 | ~1,851 |
+| **NEW + `minimal:true` + `no_memory:true`** | 131 | ~1,851 |
+
+OLD per-call 합계 ~3.2k → NEW per-call 합계 ~2.5k (iter 2+) / ~2.4k (iter 1).
+**System prompt only: 50% 절감 (1394 → 693).**
+극한 다이어트 (`minimal+no_memory`): **91% 절감 (1394 → 131)** — 작은 모델 / 빡빡한 예산용.
+
+### 어디서 토큰을 잘랐나
+
+1. **`Available tools:` 블록 제거** — 13 tools × ~50 tokens/each (이름 + Description) = ~650 tokens 절감. 어차피 Anthropic native tool use 포맷에서는 tool definition을 input_schema로 따로 보내므로 system prompt에 또 박는 건 중복.
+2. **Strategy 4-step 가이드 컷** — "1. Use tools to inspect... 4. If any check fails..." (~120 tokens) 제거. 이미 agent loop의 동작 자체가 그 가이드대로라 모델이 따로 읽지 않아도 됨.
+3. **AGENTS.md 헤더 컴팩트** — "The following content was discovered from..." 한 단락 → "Durable conventions discovered from AGENTS.md / CLAUDE.md / .cursor/rules. Treat as user-supplied persona signals." 한 줄.
+4. **Verification fallback 컴팩트** — "(no checks defined — any non-tool response will be considered done)" → "(no checks — any non-tool response is treated as done)".
+5. **Lazy memory bank** — 1번 iter에선 bank 안 prepend. 첫 턴엔 bank가 비어있다시피 하기 때문.
+
+### 의미가 사라진 부분 (없음)
+
+Tool description 자체는 input_schema에 그대로 남아있음 — provider가 바꿔치는 게 아니라 system prompt 안의 *중복본*만 잘랐음. Edit 도구의 "SEARCH/REPLACE blocks" 같은 사용법 설명은 schema description에 그대로 살아있음. lsp / subagent 같이 호출법이 미묘한 도구도 schema enum + property description으로 충분히 가이드됨 — 50% 컷 후 dogfood에서 모델이 도구 호출 제대로 했는지는 다음 dogfood (Track B 적용 후)에서 재확인.
+
+### Per-spec knob
+
+작은 모델용 극한 다이어트 옵션:
+
+```yaml
+run:
+  systemPrompt:
+    minimal: true     # AGENTS.md / CLAUDE.md 블록 통째로 스킵
+    noMemory: true    # memory bank 절대 안 prepend (memory_load은 여전히 호출 가능)
+```
+
+서버측 wiring 없이 spec.yaml에서 바로 켤 수 있음 — proto에 RunOptions / SystemPromptOptions 추가됨 (`spec.proto`).
+
+### 테스트
+
+- `core/runner/system_prompt_test.go` — breakdown logging, lazy memory, options merge, 800-token ceiling 가드.
+- 기존 `TestAgentLoop_MemoryBankAppearsAfterInstructions` 업데이트 — iter 1엔 bank 없음, iter 2+엔 instructions → bank 순서 보존.
+- `make test` green.
