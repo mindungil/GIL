@@ -40,7 +40,7 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Required to push the homebrew formula to jedutools/homebrew-tap.
+          # Required to push the homebrew formula to mindungil/homebrew-tap.
           # Set this in the repo's Actions secrets; can be a fine-grained
           # PAT scoped to the tap repo.
           HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
