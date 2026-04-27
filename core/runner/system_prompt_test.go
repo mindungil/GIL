@@ -250,6 +250,156 @@ func TestResolveSystemPromptOptions_SpecAndFieldMerge(t *testing.T) {
 	require.True(t, got.NoMemory)
 }
 
+// TestPickVerbosity_Matrix walks every supported provider name and
+// confirms the per-provider Compact default. Phase 20.B regression
+// guard: this matrix is the contract that decides "qwen via vllm gets
+// the verbose tool block, claude via anthropic stays compact". Adding
+// a new provider here without thinking about this default is a
+// review-time decision, not an implementation accident.
+func TestPickVerbosity_Matrix(t *testing.T) {
+	cases := []struct {
+		provider string
+		want     SystemPromptOptions
+	}{
+		{"anthropic", SystemPromptOptions{Compact: true}},
+		{"openai", SystemPromptOptions{Compact: true}},
+		{"openrouter", SystemPromptOptions{Compact: true}},
+		{"vllm", SystemPromptOptions{Compact: false}},
+		{"local", SystemPromptOptions{Compact: false}},
+		{"mock", SystemPromptOptions{Compact: true}},
+		{"", SystemPromptOptions{Compact: false}},               // unknown → verbose (safe)
+		{"some-future-provider", SystemPromptOptions{Compact: false}}, // same
+	}
+	for _, c := range cases {
+		got := pickVerbosity(c.provider, nil)
+		require.Equal(t, c.want, got, "provider=%q", c.provider)
+	}
+}
+
+// TestPickVerbosity_OverrideWins confirms that a non-nil override beats
+// the per-provider default — user explicit > automatic. Both directions
+// (force-compact-on-vllm, force-verbose-on-anthropic) work.
+func TestPickVerbosity_OverrideWins(t *testing.T) {
+	// Force compact on vllm (a user who knows their qwen variant
+	// handles compact prompts).
+	override := &SystemPromptOptions{Compact: true}
+	got := pickVerbosity("vllm", override)
+	require.True(t, got.Compact, "override should force compact on vllm")
+
+	// Force verbose on anthropic (a user debugging a Claude format
+	// regression).
+	override = &SystemPromptOptions{Compact: false}
+	got = pickVerbosity("anthropic", override)
+	require.False(t, got.Compact, "override should force verbose on anthropic")
+
+	// Nil override → fall through to default.
+	got = pickVerbosity("vllm", nil)
+	require.False(t, got.Compact)
+	got = pickVerbosity("anthropic", nil)
+	require.True(t, got.Compact)
+}
+
+// TestAssembleSystemPrompt_VerboseMode_IncludesFormatHints verifies the
+// verbose branch includes the per-tool format-hint block for the
+// trickiest tools (edit, apply_patch). Phase 20.B regression guard:
+// the dogfood Run 3 failure was the agent missing these hints; this
+// test ensures we don't accidentally regress them out.
+func TestAssembleSystemPrompt_VerboseMode_IncludesFormatHints(t *testing.T) {
+	spec := &gilv1.FrozenSpec{Goal: &gilv1.Goal{OneLiner: "g"}, Verification: &gilv1.Verification{}}
+	tools := []tool.Tool{
+		&tool.Edit{WorkingDir: "/tmp"},
+		&tool.ApplyPatch{WorkspaceDir: "/tmp"},
+		&tool.Bash{WorkingDir: "/tmp"},
+	}
+	out, bd := assembleSystemPrompt(SystemPromptInputs{
+		Spec:      spec,
+		Tools:     tools,
+		Iteration: 2,
+		// Compact: false (default) → verbose branch.
+	})
+
+	// Section name pins which branch ran. (We can't use NotContains
+	// for "tool_names" since "tool_names_verbose" contains it as a
+	// prefix — instead, scan the section list for an exact "tool_names"
+	// entry.)
+	require.Contains(t, sectionNames(bd), "tool_names_verbose")
+	require.False(t, hasExactSection(bd, "tool_names"), "verbose mode should not emit the compact tool_names section")
+
+	// "Available tools:" header marks the verbose block start.
+	require.Contains(t, out, "Available tools:")
+
+	// Edit block format hint — the qwen-killer details.
+	require.Contains(t, out, "<<<<<<< SEARCH")
+	require.Contains(t, out, ">>>>>>> REPLACE")
+	require.Contains(t, out, "OWN line BEFORE the SEARCH marker")
+
+	// Apply_patch block format hint — header layout + body line
+	// prefixes.
+	require.Contains(t, out, "*** Begin Patch")
+	require.Contains(t, out, "*** Update File:")
+	require.Contains(t, out, "*** End Patch")
+	require.Contains(t, out, "@@ <optional description>")
+	require.Contains(t, out, "' ' (one space, context)")
+}
+
+// TestAssembleSystemPrompt_CompactMode_DropsVerboseToolBlock verifies
+// the compact branch strips the verbose "Available tools:" block. Tool
+// *names* still appear (the one-line "Tools: bash, edit, ..." menu).
+// Format hints do NOT — strong models read the input_schema.
+func TestAssembleSystemPrompt_CompactMode_DropsVerboseToolBlock(t *testing.T) {
+	spec := &gilv1.FrozenSpec{Goal: &gilv1.Goal{OneLiner: "g"}, Verification: &gilv1.Verification{}}
+	tools := []tool.Tool{
+		&tool.Edit{WorkingDir: "/tmp"},
+		&tool.ApplyPatch{WorkspaceDir: "/tmp"},
+		&tool.Bash{WorkingDir: "/tmp"},
+	}
+	out, bd := assembleSystemPrompt(SystemPromptInputs{
+		Spec:      spec,
+		Tools:     tools,
+		Iteration: 2,
+		Options:   SystemPromptOptions{Compact: true},
+	})
+
+	// Section name pins which branch ran.
+	require.True(t, hasExactSection(bd, "tool_names"), "compact mode should emit the compact tool_names section")
+	require.False(t, hasExactSection(bd, "tool_names_verbose"))
+
+	// Compact: drops the verbose header.
+	require.NotContains(t, out, "Available tools:")
+	// Compact: drops the format hints.
+	require.NotContains(t, out, "OWN line BEFORE the SEARCH marker")
+	require.NotContains(t, out, "@@ <optional description>")
+	// Compact: keeps the one-line tool menu.
+	require.Contains(t, out, "Tools: ")
+	require.Contains(t, out, "edit")
+	require.Contains(t, out, "apply_patch")
+}
+
+// TestResolveSystemPromptOptions_PerProviderDefault confirms the
+// resolution chain: pickVerbosity baseline → SystemPromptOpts override
+// → spec override. The test walks one case per provider and
+// independently verifies each layer.
+func TestResolveSystemPromptOptions_PerProviderDefault(t *testing.T) {
+	// vllm baseline: Compact=false.
+	a := &AgentLoop{ProviderName: "vllm"}
+	require.False(t, a.resolveSystemPromptOptions().Compact)
+
+	// anthropic baseline: Compact=true.
+	a = &AgentLoop{ProviderName: "anthropic"}
+	require.True(t, a.resolveSystemPromptOptions().Compact)
+
+	// vllm + AgentLoop field forces Compact: true.
+	a = &AgentLoop{
+		ProviderName:     "vllm",
+		SystemPromptOpts: SystemPromptOptions{Compact: true},
+	}
+	require.True(t, a.resolveSystemPromptOptions().Compact)
+
+	// Empty ProviderName falls through to "unknown" → Compact=false.
+	a = &AgentLoop{}
+	require.False(t, a.resolveSystemPromptOptions().Compact)
+}
+
 // captureStderr swaps os.Stderr around fn and returns whatever was
 // written. Closes the pipe before returning so the goroutine reading
 // it can finish.
@@ -284,3 +434,14 @@ func sectionNames(bd Breakdown) string {
 	return strings.Join(names, ",")
 }
 
+// hasExactSection scans bd for an exact section-name match. Useful when
+// require.NotContains can't be used because a name is a prefix of
+// another (e.g., "tool_names" inside "tool_names_verbose").
+func hasExactSection(bd Breakdown, name string) bool {
+	for _, s := range bd.Sections {
+		if s.Name == name {
+			return true
+		}
+	}
+	return false
+}
