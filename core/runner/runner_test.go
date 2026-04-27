@@ -1050,6 +1050,102 @@ func TestAgentLoop_MilestoneGate_SkippedWhenBankNil(t *testing.T) {
 	}
 }
 
+// milestoneFailingProvider returns the first turn normally, then errors on the
+// milestone follow-up call (simulates a real network blip mid-milestone or a
+// scripted scenario whose turns are exhausted just as the gate fires).
+type milestoneFailingProvider struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (m *milestoneFailingProvider) Name() string { return "milestone-failing" }
+func (m *milestoneFailingProvider) Complete(_ context.Context, _ provider.Request) (provider.Response, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.calls++
+	if m.calls == 1 {
+		// First call: agent declares done with no tool calls so the verifier
+		// passes and we drop into the milestone gate.
+		return provider.Response{
+			Text:         "done",
+			StopReason:   "end_turn",
+			InputTokens:  10,
+			OutputTokens: 4,
+		}, nil
+	}
+	// Second call (the milestone follow-up): always error.
+	return provider.Response{}, fmt.Errorf("provider unavailable: simulated network blip")
+}
+
+// TestAgentLoop_MilestoneGate_ProviderErrorFallsBack ensures that when the
+// milestone summarizer's provider call errors, the run still completes
+// successfully and we emit a NOTE-kind `memory_milestone_skipped` event
+// (NOT a `*_error` event). This protects the run loop from being poisoned
+// by best-effort summarization failures.
+func TestAgentLoop_MilestoneGate_ProviderErrorFallsBack(t *testing.T) {
+	workspace := t.TempDir()
+	bank := memory.New(filepath.Join(workspace, "memory"))
+	require.NoError(t, bank.Init())
+
+	prov := &milestoneFailingProvider{}
+	spec := &gilv1.FrozenSpec{
+		Goal:         &gilv1.Goal{OneLiner: "test"},
+		Verification: &gilv1.Verification{},
+	}
+	ver := verify.NewRunner(workspace)
+
+	loop := &AgentLoop{
+		Spec:     spec,
+		Provider: prov,
+		Model:    "m",
+		Tools:    []tool.Tool{&tool.MemoryUpdate{Bank: bank}, &tool.MemoryLoad{Bank: bank}},
+		Verifier: ver,
+		Memory:   bank,
+		Events:   event.NewStream(),
+	}
+	sub := loop.Events.Subscribe(256)
+	var collected []event.Event
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for e := range sub.Events() {
+			collected = append(collected, e)
+		}
+	}()
+
+	res, err := loop.Run(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "done", res.Status)
+	sub.Close()
+	<-done
+
+	// Expect: memory_milestone_start fired, then memory_milestone_skipped
+	// (with reason=provider_unavailable), and run_done after. No
+	// memory_milestone_error or any other *_error event should appear.
+	var startSeen, skippedSeen, doneSeen int
+	for _, e := range collected {
+		switch e.Type {
+		case "memory_milestone_start":
+			startSeen++
+		case "memory_milestone_skipped":
+			skippedSeen++
+			var d map[string]any
+			require.NoError(t, json.Unmarshal(e.Data, &d))
+			require.Equal(t, "provider_unavailable", d["reason"])
+			require.Contains(t, d["detail"], "simulated network blip")
+		case "run_done":
+			doneSeen++
+		}
+		require.False(t, strings.HasSuffix(e.Type, "_error"),
+			"no *_error event expected, got %q", e.Type)
+		require.NotEqual(t, "memory_milestone_error", e.Type,
+			"old memory_milestone_error name should not be emitted anymore")
+	}
+	require.Equal(t, 1, startSeen, "memory_milestone_start should fire once")
+	require.Equal(t, 1, skippedSeen, "memory_milestone_skipped should fire once")
+	require.Equal(t, 1, doneSeen, "run_done should fire once")
+}
+
 // recordingProvider records every provider.Request so tests can inspect the
 // system prompt that was passed to each Complete call. It always returns the
 // same tool call (triggering stuck pattern detection).
