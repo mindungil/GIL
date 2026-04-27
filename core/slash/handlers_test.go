@@ -126,12 +126,79 @@ func TestClearHandler_NilClearerSafe(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func TestCompactHandler_StubMessage(t *testing.T) {
-	reg, _, _, _ := newTestEnv(t, "sess-1")
+// fakeRunControl captures the calls slash handlers make against the
+// RunControl interface so tests can both assert what was sent and
+// inject pre-canned responses without standing up a real gRPC client.
+type fakeRunControl struct {
+	compactQueued bool
+	compactReason string
+	compactErr    error
+	compactCalls  []string
+
+	hintPosted bool
+	hintReason string
+	hintErr    error
+	hintCalls  []map[string]string
+
+	diffResult *DiffResult
+	diffErr    error
+	diffCalls  int
+}
+
+func (f *fakeRunControl) RequestCompact(_ context.Context, sessionID string) (bool, string, error) {
+	f.compactCalls = append(f.compactCalls, sessionID)
+	return f.compactQueued, f.compactReason, f.compactErr
+}
+
+func (f *fakeRunControl) PostHint(_ context.Context, _ string, hint map[string]string) (bool, string, error) {
+	cp := make(map[string]string, len(hint))
+	for k, v := range hint {
+		cp[k] = v
+	}
+	f.hintCalls = append(f.hintCalls, cp)
+	return f.hintPosted, f.hintReason, f.hintErr
+}
+
+func (f *fakeRunControl) Diff(_ context.Context, _ string) (*DiffResult, error) {
+	f.diffCalls++
+	return f.diffResult, f.diffErr
+}
+
+func TestCompactHandler_NoSession(t *testing.T) {
+	reg, _, _, _ := newTestEnv(t, "")
+	s, _ := reg.Lookup("compact")
+	_, err := s.Handler(context.Background(), Command{Name: "compact"})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "no session attached")
+}
+
+func TestCompactHandler_NoRunControl(t *testing.T) {
+	reg, env, _, _ := newTestEnv(t, "sess-1")
+	env.Run = nil
 	s, _ := reg.Lookup("compact")
 	out, err := s.Handler(context.Background(), Command{Name: "compact"})
 	require.NoError(t, err)
-	require.Contains(t, strings.ToLower(out), "not yet wired")
+	require.Contains(t, strings.ToLower(out), "no run-control client configured")
+}
+
+func TestCompactHandler_QueuedReportsSuccess(t *testing.T) {
+	reg, env, _, _ := newTestEnv(t, "sess-1")
+	fc := &fakeRunControl{compactQueued: true}
+	env.Run = fc
+	s, _ := reg.Lookup("compact")
+	out, err := s.Handler(context.Background(), Command{Name: "compact"})
+	require.NoError(t, err)
+	require.Contains(t, out, "compact requested for next turn boundary")
+	require.Equal(t, []string{"sess-1"}, fc.compactCalls)
+}
+
+func TestCompactHandler_NotQueuedReportsReason(t *testing.T) {
+	reg, env, _, _ := newTestEnv(t, "sess-1")
+	env.Run = &fakeRunControl{compactQueued: false, compactReason: "no run in flight"}
+	s, _ := reg.Lookup("compact")
+	out, err := s.Handler(context.Background(), Command{Name: "compact"})
+	require.NoError(t, err)
+	require.Contains(t, out, "no run in flight")
 }
 
 func TestModelHandler_RequiresArg(t *testing.T) {
@@ -142,13 +209,36 @@ func TestModelHandler_RequiresArg(t *testing.T) {
 	require.Contains(t, err.Error(), "usage")
 }
 
-func TestModelHandler_QueuesHint(t *testing.T) {
-	reg, _, _, _ := newTestEnv(t, "sess-1")
+func TestModelHandler_PostsHintViaRunControl(t *testing.T) {
+	reg, env, _, _ := newTestEnv(t, "sess-1")
+	fc := &fakeRunControl{hintPosted: true}
+	env.Run = fc
+	s, _ := reg.Lookup("model")
+	out, err := s.Handler(context.Background(), Command{Name: "model", Args: []string{"claude-haiku-4-5"}})
+	require.NoError(t, err)
+	require.Contains(t, out, "claude-haiku-4-5")
+	require.Contains(t, out, "model hint posted")
+	require.Len(t, fc.hintCalls, 1)
+	require.Equal(t, "claude-haiku-4-5", fc.hintCalls[0]["model"])
+}
+
+func TestModelHandler_NotPostedReportsReason(t *testing.T) {
+	reg, env, _, _ := newTestEnv(t, "sess-1")
+	env.Run = &fakeRunControl{hintPosted: false, hintReason: "no run in flight"}
 	s, _ := reg.Lookup("model")
 	out, err := s.Handler(context.Background(), Command{Name: "model", Args: []string{"gpt-4o"}})
 	require.NoError(t, err)
+	require.Contains(t, out, "no run in flight")
 	require.Contains(t, out, "gpt-4o")
-	require.Contains(t, out, "hint queued")
+}
+
+func TestModelHandler_NoRunControlReportsFriendly(t *testing.T) {
+	reg, env, _, _ := newTestEnv(t, "sess-1")
+	env.Run = nil
+	s, _ := reg.Lookup("model")
+	out, err := s.Handler(context.Background(), Command{Name: "model", Args: []string{"gpt-4o"}})
+	require.NoError(t, err)
+	require.Contains(t, strings.ToLower(out), "no run-control client configured")
 }
 
 func TestQuitHandler_ReturnsSentinel(t *testing.T) {
@@ -213,6 +303,55 @@ func TestDiffHandler_NoCheckpoints(t *testing.T) {
 	out, err := s.Handler(context.Background(), Command{Name: "diff"})
 	require.NoError(t, err)
 	require.Contains(t, out, "no checkpoints")
+}
+
+func TestDiffHandler_PrefersRunControlWhenSet(t *testing.T) {
+	reg, env, _, _ := newTestEnv(t, "sess-1")
+	env.Run = &fakeRunControl{
+		diffResult: &DiffResult{
+			UnifiedDiff:   "diff --git a/x b/x\n",
+			FilesChanged:  1,
+			LinesAdded:    3,
+			LinesRemoved:  1,
+			CheckpointSHA: "deadbeefcafebabe",
+		},
+	}
+	// Fetcher intentionally nil to prove the RPC path doesn't touch it.
+	env.Fetcher = nil
+	s, _ := reg.Lookup("diff")
+	out, err := s.Handler(context.Background(), Command{Name: "diff"})
+	require.NoError(t, err)
+	require.Contains(t, out, "diff vs checkpoint deadbeef")
+	require.Contains(t, out, "1 files, +3/-1")
+	require.Contains(t, out, "diff --git a/x b/x")
+}
+
+func TestDiffHandler_RPCNoCheckpointsRendersNote(t *testing.T) {
+	reg, env, _, _ := newTestEnv(t, "sess-1")
+	env.Run = &fakeRunControl{diffResult: &DiffResult{Note: "no checkpoints yet for this session"}}
+	s, _ := reg.Lookup("diff")
+	out, err := s.Handler(context.Background(), Command{Name: "diff"})
+	require.NoError(t, err)
+	require.Contains(t, out, "no checkpoints")
+}
+
+func TestDiffHandler_RPCTruncatedHeader(t *testing.T) {
+	reg, env, _, _ := newTestEnv(t, "sess-1")
+	env.Run = &fakeRunControl{
+		diffResult: &DiffResult{
+			UnifiedDiff:    "...",
+			FilesChanged:   2,
+			LinesAdded:     200,
+			LinesRemoved:   50,
+			Truncated:      true,
+			TruncatedBytes: 4096,
+			CheckpointSHA:  "abcdef0123456789",
+		},
+	}
+	s, _ := reg.Lookup("diff")
+	out, err := s.Handler(context.Background(), Command{Name: "diff"})
+	require.NoError(t, err)
+	require.Contains(t, out, "truncated 4096 bytes")
 }
 
 func TestDiffHandler_DetectsWorkspaceChange(t *testing.T) {

@@ -66,10 +66,58 @@ func initSlashState(client *sdk.Client) *slashState {
 				CurrentTokens:    s.CurrentTokens,
 			}, nil
 		},
+		Run: newRunControl(client),
 	}
 	reg := slash.NewRegistry()
 	slash.RegisterDefaults(reg, env)
 	return &slashState{registry: reg, env: env}
+}
+
+// newRunControl returns the slash.RunControl adapter the registry uses
+// for /compact, /model, /diff. Returns nil when the client is also nil
+// (mock-mode TUI startup) so the handlers print a friendly "no
+// run-control client configured" rather than NPE'ing on a method call.
+func newRunControl(client *sdk.Client) slash.RunControl {
+	if client == nil {
+		return nil
+	}
+	return &sdkRunControl{client: client}
+}
+
+// sdkRunControl bridges slash.RunControl to *sdk.Client. The sole
+// purpose of the wrapper is to keep core/slash free of a gRPC import —
+// same pattern as the SessionFetcher closure above.
+type sdkRunControl struct{ client *sdk.Client }
+
+func (a *sdkRunControl) RequestCompact(ctx context.Context, sessionID string) (bool, string, error) {
+	cctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	return a.client.RequestCompact(cctx, sessionID)
+}
+
+func (a *sdkRunControl) PostHint(ctx context.Context, sessionID string, hint map[string]string) (bool, string, error) {
+	cctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	return a.client.PostHint(cctx, sessionID, hint)
+}
+
+func (a *sdkRunControl) Diff(ctx context.Context, sessionID string) (*slash.DiffResult, error) {
+	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	res, err := a.client.Diff(cctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	return &slash.DiffResult{
+		UnifiedDiff:    res.UnifiedDiff,
+		FilesChanged:   res.FilesChanged,
+		LinesAdded:     res.LinesAdded,
+		LinesRemoved:   res.LinesRemoved,
+		Truncated:      res.Truncated,
+		TruncatedBytes: res.TruncatedBytes,
+		CheckpointSHA:  res.CheckpointSHA,
+		Note:           res.Note,
+	}, nil
 }
 
 // attachSession refreshes env.SessionID + LocalState before each

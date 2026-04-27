@@ -12,6 +12,43 @@ import (
 	"github.com/mindungil/gil/sdk"
 )
 
+// stubRunControl is a slash.RunControl that records what the surface
+// sent and returns canned responses. Used by /model, /compact, /diff
+// tests to drive the new RunService-backed slash paths without
+// standing up gild.
+type stubRunControl struct {
+	compactQueued bool
+	compactReason string
+	compactErr    error
+	compactCalls  []string
+
+	hintPosted bool
+	hintReason string
+	hintErr    error
+	hintCalls  []map[string]string
+
+	diffResult *slash.DiffResult
+	diffErr    error
+}
+
+func (s *stubRunControl) RequestCompact(_ context.Context, sessionID string) (bool, string, error) {
+	s.compactCalls = append(s.compactCalls, sessionID)
+	return s.compactQueued, s.compactReason, s.compactErr
+}
+
+func (s *stubRunControl) PostHint(_ context.Context, _ string, hint map[string]string) (bool, string, error) {
+	cp := make(map[string]string, len(hint))
+	for k, v := range hint {
+		cp[k] = v
+	}
+	s.hintCalls = append(s.hintCalls, cp)
+	return s.hintPosted, s.hintReason, s.hintErr
+}
+
+func (s *stubRunControl) Diff(_ context.Context, _ string) (*slash.DiffResult, error) {
+	return s.diffResult, s.diffErr
+}
+
 // stubSlashState builds a slashState that's wired to an in-memory fetcher
 // instead of a real gRPC client, so we can drive the TUI Update loop in
 // tests without standing up gild.
@@ -149,25 +186,58 @@ func TestSlash_UnknownCommandReportsError(t *testing.T) {
 	require.Contains(t, out.output, "unknown command")
 }
 
-// TestSlash_ModelHandlerStubbed reflects the ground-rule that /model is a
-// suggestion, never a forced switch.
-func TestSlash_ModelHandlerStubbed(t *testing.T) {
+// TestSlash_ModelHandlerForwardsHint exercises the RunControl-backed
+// /model path: the surface adapter routes the hint through the
+// PostHint RPC and reports the agent will consider it. Ground-rule
+// preserved: a hint is a suggestion, never a forced switch.
+func TestSlash_ModelHandlerForwardsHint(t *testing.T) {
 	m := newTestModelWithSlash([]*sdk.Session{{ID: "s1", Status: "RUNNING"}})
+	rc := &stubRunControl{hintPosted: true}
+	m.slash.env.Run = rc
 	cmd := dispatchSlashCmd(m, "/model gpt-4o")
 	msg := cmd()
 	out := msg.(slashResultMsg)
 	require.Contains(t, out.output, "gpt-4o")
-	require.Contains(t, strings.ToLower(out.output), "hint queued")
+	require.Contains(t, strings.ToLower(out.output), "model hint posted")
+	require.Len(t, rc.hintCalls, 1)
+	require.Equal(t, "gpt-4o", rc.hintCalls[0]["model"])
 }
 
-// TestSlash_CompactStubbed covers the "compact via slash is opt-in only"
-// rule for now.
-func TestSlash_CompactStubbed(t *testing.T) {
+// TestSlash_ModelHandlerNoRunInFlight asserts the friendly fallback
+// when the daemon reports posted=false (e.g. no run is active).
+func TestSlash_ModelHandlerNoRunInFlight(t *testing.T) {
 	m := newTestModelWithSlash([]*sdk.Session{{ID: "s1", Status: "RUNNING"}})
+	m.slash.env.Run = &stubRunControl{hintPosted: false, hintReason: "no run in flight"}
+	cmd := dispatchSlashCmd(m, "/model haiku")
+	msg := cmd()
+	out := msg.(slashResultMsg)
+	require.Contains(t, out.output, "no run in flight")
+}
+
+// TestSlash_CompactQueued covers the happy path: RequestCompact
+// reports queued=true and the surface tells the user the next turn
+// boundary will compact.
+func TestSlash_CompactQueued(t *testing.T) {
+	m := newTestModelWithSlash([]*sdk.Session{{ID: "s1", Status: "RUNNING"}})
+	rc := &stubRunControl{compactQueued: true}
+	m.slash.env.Run = rc
 	cmd := dispatchSlashCmd(m, "/compact")
 	msg := cmd()
 	out := msg.(slashResultMsg)
-	require.Contains(t, strings.ToLower(out.output), "not yet wired")
+	require.Contains(t, out.output, "compact requested for next turn boundary")
+	require.Equal(t, []string{"s1"}, rc.compactCalls)
+}
+
+// TestSlash_CompactNoRunInFlight covers the falls-back-to-reason path
+// — the slash command must not crash when no run is active, just
+// surface the daemon's "no run in flight" reason.
+func TestSlash_CompactNoRunInFlight(t *testing.T) {
+	m := newTestModelWithSlash([]*sdk.Session{{ID: "s1", Status: "RUNNING"}})
+	m.slash.env.Run = &stubRunControl{compactQueued: false, compactReason: "no run in flight"}
+	cmd := dispatchSlashCmd(m, "/compact")
+	msg := cmd()
+	out := msg.(slashResultMsg)
+	require.Contains(t, out.output, "no run in flight")
 }
 
 // TestSlash_AgentsHandlerNoFile keeps the no-AGENTS path safe.

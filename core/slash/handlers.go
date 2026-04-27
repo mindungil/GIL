@@ -38,6 +38,34 @@ type SessionInfo struct {
 // cached.
 type SessionFetcher func(ctx context.Context, sessionID string) (*SessionInfo, error)
 
+// DiffResult mirrors sdk.DiffResult without the core→sdk dependency.
+// The handler renders Note when non-empty (e.g. "no checkpoints yet")
+// or the unified diff plus stats otherwise.
+type DiffResult struct {
+	UnifiedDiff    string
+	FilesChanged   int32
+	LinesAdded     int32
+	LinesRemoved   int32
+	Truncated      bool
+	TruncatedBytes int32
+	CheckpointSHA  string
+	Note           string
+}
+
+// RunControl is the slim subset of sdk.Client the slash handlers need
+// for the RPC-backed commands (/compact, /model, /diff). Surfaces wrap
+// their gRPC client behind this so the slash package stays free of a
+// gRPC import — same pattern as SessionFetcher.
+//
+// Implementations should apply their own short timeouts via the passed
+// ctx; handlers do not deadline themselves so a surface that wants a
+// pager-style /diff can still stream a long response.
+type RunControl interface {
+	RequestCompact(ctx context.Context, sessionID string) (queued bool, reason string, err error)
+	PostHint(ctx context.Context, sessionID string, hint map[string]string) (posted bool, reason string, err error)
+	Diff(ctx context.Context, sessionID string) (*DiffResult, error)
+}
+
 // LocalState is the surface-side mutable state slice that handlers may
 // touch directly: today only the local event ring buffer (cleared by
 // /clear). Its sole purpose is to keep "/clear is local-only" enforced
@@ -70,6 +98,13 @@ type HandlerEnv struct {
 	// Fetcher fetches Session info on demand (used by /status, /cost).
 	// May be nil in tests; commands that need it return a friendly error.
 	Fetcher SessionFetcher
+
+	// Run carries the RPC-backed handlers for /compact, /model, /diff.
+	// Optional: tests and the headless CLI may leave it nil, in which
+	// case the affected handlers return a "no client configured" message
+	// rather than crashing. Production surfaces (TUI, gil
+	// run --interactive) wire their sdk.Client adapter here.
+	Run RunControl
 
 	// Local groups surface-local mutators (currently just /clear). nil-safe.
 	Local LocalState
@@ -240,12 +275,23 @@ func handleClear(env *HandlerEnv) Handler {
 
 func handleCompact(env *HandlerEnv) Handler {
 	return func(ctx context.Context, _ Command) (string, error) {
-		// Phase 12 Track C scope: no RunService.RequestCompact RPC yet. The
-		// agent already initiates compaction autonomously when its history
-		// budget runs out, so deferring the manual trigger does not block
-		// any current workflow. When the RPC lands we'll swap this body
-		// for a one-shot client.RequestCompact(env.SessionID).
-		return "/compact: not yet wired in this version (agent still compacts autonomously)", nil
+		if env.SessionID == "" {
+			return "", fmt.Errorf("no session attached")
+		}
+		if env.Run == nil {
+			return "/compact: no run-control client configured", nil
+		}
+		queued, reason, err := env.Run.RequestCompact(ctx, env.SessionID)
+		if err != nil {
+			return "", fmt.Errorf("compact: %w", err)
+		}
+		if !queued {
+			if reason == "" {
+				reason = "not queued"
+			}
+			return fmt.Sprintf("/compact: %s", reason), nil
+		}
+		return "compact requested for next turn boundary", nil
 	}
 }
 
@@ -254,11 +300,27 @@ func handleModel(env *HandlerEnv) Handler {
 		if len(cmd.Args) == 0 {
 			return "", fmt.Errorf("usage: /model <name>")
 		}
-		// Hint posting requires an EventService.PostHint RPC that does not
-		// yet exist (Phase 12 Track C scope). The hint would be a non-
-		// blocking suggestion the agent may consider next turn — never a
-		// forced switch.
-		return fmt.Sprintf("/model %s: hint queued (not yet wired — RPC arrives in Phase 13)", cmd.Args[0]), nil
+		name := strings.TrimSpace(cmd.Args[0])
+		if name == "" {
+			return "", fmt.Errorf("usage: /model <name>")
+		}
+		if env.SessionID == "" {
+			return "", fmt.Errorf("no session attached")
+		}
+		if env.Run == nil {
+			return fmt.Sprintf("/model %s: no run-control client configured", name), nil
+		}
+		posted, reason, err := env.Run.PostHint(ctx, env.SessionID, map[string]string{"model": name})
+		if err != nil {
+			return "", fmt.Errorf("model: %w", err)
+		}
+		if !posted {
+			if reason == "" {
+				reason = "hint not posted"
+			}
+			return fmt.Sprintf("/model %s: %s", name, reason), nil
+		}
+		return fmt.Sprintf("model hint posted: %s (agent will consider it next turn)", name), nil
 	}
 }
 
@@ -335,6 +397,22 @@ func handleDiff(env *HandlerEnv) Handler {
 		if env.SessionID == "" {
 			return "", fmt.Errorf("no session attached")
 		}
+		// Preferred path: ask the daemon over the Diff RPC. The daemon
+		// resolves workspace + spec + shadow-git in one place, applies
+		// the truncation cap, and reports stable checkpoint SHAs even
+		// when the surface is mid-render.
+		if env.Run != nil {
+			res, err := env.Run.Diff(ctx, env.SessionID)
+			if err != nil {
+				return "", fmt.Errorf("diff: %w", err)
+			}
+			return formatDiffResult(res), nil
+		}
+		// Legacy path: when no RunControl is wired (e.g. tests, or the
+		// CLI before its main wires the SDK), fall back to reading the
+		// shadow-git directly from the surface side. Behaviour matches
+		// the Phase 12 implementation exactly so downstream tests keep
+		// passing.
 		if env.Fetcher == nil {
 			return "", fmt.Errorf("diff: no session fetcher configured")
 		}
@@ -347,9 +425,6 @@ func handleDiff(env *HandlerEnv) Handler {
 		}
 		shadowBase := filepath.Join(env.Layout.SessionsDir(), env.SessionID, "shadow")
 		sg := checkpoint.New(info.WorkingDir, shadowBase)
-		// If the shadow git directory doesn't exist yet, the session has
-		// never produced a checkpoint — surface that explicitly so the
-		// user doesn't see a confusing "fatal: not a git repository".
 		if _, statErr := os.Stat(filepath.Join(sg.GitDir, "HEAD")); os.IsNotExist(statErr) {
 			return "diff: no checkpoints yet for this session", nil
 		}
@@ -361,9 +436,6 @@ func handleDiff(env *HandlerEnv) Handler {
 			return "diff: no checkpoints yet for this session", nil
 		}
 		head := commits[0].SHA
-		// Use raw git here — checkpoint.ShadowGit only exposes Commit /
-		// Restore today; reaching for `git diff` is a single-shot read so
-		// we don't bother adding a new method to the package.
 		gitDir := sg.GitDir
 		args := []string{
 			"--git-dir=" + gitDir,
@@ -383,6 +455,36 @@ func handleDiff(env *HandlerEnv) Handler {
 		}
 		return fmt.Sprintf("diff vs checkpoint %s:\n%s", head[:8], out), nil
 	}
+}
+
+// formatDiffResult renders the SDK DiffResult into the human-readable
+// blob the surfaces (TUI panel, CLI run --interactive line) display.
+// Note short-circuits the body when the session has no checkpoints; an
+// empty body with no note means "workspace matches the checkpoint".
+func formatDiffResult(r *DiffResult) string {
+	if r == nil {
+		return "diff: empty response"
+	}
+	if r.Note != "" {
+		return "diff: " + r.Note
+	}
+	if r.UnifiedDiff == "" {
+		short := r.CheckpointSHA
+		if len(short) > 8 {
+			short = short[:8]
+		}
+		return fmt.Sprintf("diff: workspace matches checkpoint %s (no changes)", short)
+	}
+	short := r.CheckpointSHA
+	if len(short) > 8 {
+		short = short[:8]
+	}
+	header := fmt.Sprintf("diff vs checkpoint %s — %d files, +%d/-%d",
+		short, r.FilesChanged, r.LinesAdded, r.LinesRemoved)
+	if r.Truncated {
+		header += fmt.Sprintf(" (truncated %d bytes)", r.TruncatedBytes)
+	}
+	return header + ":\n" + r.UnifiedDiff
 }
 
 func handleQuit() Handler {

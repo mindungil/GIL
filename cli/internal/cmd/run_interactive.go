@@ -107,6 +107,7 @@ func buildInteractiveSlash(cli *sdk.Client, sessionID string) (*slash.Registry, 
 				CurrentTokens:    s.CurrentTokens,
 			}, nil
 		},
+		Run: cliRunControl{cli: cli},
 		// /clear is a no-op in the CLI — there's no surface buffer to
 		// wipe, and the help text already calls this out.
 		Local:  slash.LocalState{ClearEvents: func() {}},
@@ -115,4 +116,49 @@ func buildInteractiveSlash(cli *sdk.Client, sessionID string) (*slash.Registry, 
 	reg := slash.NewRegistry()
 	slash.RegisterDefaults(reg, env)
 	return reg, env
+}
+
+// cliRunControl bridges slash.RunControl to *sdk.Client for the
+// interactive CLI loop. Mirrors the TUI sdkRunControl adapter; we keep
+// them separate because the CLI's go.mod doesn't import the TUI module.
+type cliRunControl struct{ cli *sdk.Client }
+
+func (a cliRunControl) RequestCompact(ctx context.Context, sessionID string) (bool, string, error) {
+	if a.cli == nil {
+		return false, "no gRPC client", nil
+	}
+	cctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	return a.cli.RequestCompact(cctx, sessionID)
+}
+
+func (a cliRunControl) PostHint(ctx context.Context, sessionID string, hint map[string]string) (bool, string, error) {
+	if a.cli == nil {
+		return false, "no gRPC client", nil
+	}
+	cctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	return a.cli.PostHint(cctx, sessionID, hint)
+}
+
+func (a cliRunControl) Diff(ctx context.Context, sessionID string) (*slash.DiffResult, error) {
+	if a.cli == nil {
+		return nil, errors.New("no gRPC client")
+	}
+	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	res, err := a.cli.Diff(cctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	return &slash.DiffResult{
+		UnifiedDiff:    res.UnifiedDiff,
+		FilesChanged:   res.FilesChanged,
+		LinesAdded:     res.LinesAdded,
+		LinesRemoved:   res.LinesRemoved,
+		Truncated:      res.Truncated,
+		TruncatedBytes: res.TruncatedBytes,
+		CheckpointSHA:  res.CheckpointSHA,
+		Note:           res.Note,
+	}, nil
 }
