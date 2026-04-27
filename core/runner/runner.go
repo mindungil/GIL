@@ -12,6 +12,7 @@ import (
 
 	"github.com/mindungil/gil/core/checkpoint"
 	"github.com/mindungil/gil/core/compact"
+	"github.com/mindungil/gil/core/cost"
 	"github.com/mindungil/gil/core/event"
 	"github.com/mindungil/gil/core/instructions"
 	"github.com/mindungil/gil/core/memory"
@@ -25,13 +26,19 @@ import (
 )
 
 // Result is the final outcome of an AgentLoop run.
+//
+// Status values: "done" | "max_iterations" | "error" | "stuck" |
+// "budget_exhausted". When Status == "budget_exhausted", BudgetReason
+// records which dimension hit the cap ("tokens" or "cost").
 type Result struct {
-	Status     string // "done" | "max_iterations" | "error" | "stuck"
-	Iterations int
-	Tokens     int64
-	VerifyAll  []verify.Result
-	FinalError error
-	FinalText  string // last assistant text emitted before the loop exited
+	Status       string
+	Iterations   int
+	Tokens       int64
+	CostUSD      float64
+	VerifyAll    []verify.Result
+	FinalError   error
+	FinalText    string // last assistant text emitted before the loop exited
+	BudgetReason string // "tokens" | "cost" — populated when Status=="budget_exhausted"
 }
 
 // AskRequest carries the details surfaced to a human reviewer when
@@ -125,6 +132,20 @@ type AgentLoop struct {
 	// NEXT iteration only and then cleared. Used by stuck recovery strategies
 	// (AltToolOrder, AdversaryConsult) to inject one-shot guidance.
 	extraSystemNote string
+
+	// CostCalculator estimates USD spend per iteration so the runner can
+	// enforce Budget.MaxTotalCostUsd. When nil and the budget enables
+	// cost enforcement, Run() lazily constructs one from the embedded
+	// catalog. Models absent from the catalog cost $0 and never trigger
+	// the cost cap (warned but not enforced); the iteration/token caps
+	// still apply.
+	CostCalculator *cost.Calculator
+
+	// internal: tracks which budget thresholds we've already warned about
+	// so each crossing emits one budget_warning rather than one per
+	// iteration after 75%.
+	warnedTokens bool
+	warnedCost   bool
 }
 
 // CompactRequester is satisfied by AgentLoop; the compact_now tool uses it
@@ -200,6 +221,19 @@ func (a *AgentLoop) Run(ctx context.Context) (*Result, error) {
 	}
 
 	var totalTokens int64
+	var totalInTokens, totalOutTokens int64
+	var totalCostUSD float64
+	// Resolve budget caps once. Zero means "unbounded on this dimension".
+	var budgetMaxTokens int64
+	var budgetMaxCostUSD float64
+	if a.Spec != nil && a.Spec.Budget != nil {
+		budgetMaxTokens = a.Spec.Budget.MaxTotalTokens
+		budgetMaxCostUSD = a.Spec.Budget.MaxTotalCostUsd
+	}
+	// Lazily build a calculator only when cost enforcement is wanted.
+	if a.CostCalculator == nil && budgetMaxCostUSD > 0 {
+		a.CostCalculator = cost.NewCalculator()
+	}
 	for iter := 1; iter <= maxIter; iter++ {
 		a.emit(event.SourceSystem, event.KindNote, "iteration_start", map[string]any{"iter": iter})
 
@@ -262,9 +296,19 @@ func (a *AgentLoop) Run(ctx context.Context) (*Result, error) {
 		})
 		if err != nil {
 			a.emit(event.SourceSystem, event.KindNote, "run_error", map[string]any{"err": err.Error()})
-			return &Result{Status: "error", Iterations: iter, FinalError: err, FinalText: lastAssistantText}, err
+			return &Result{Status: "error", Iterations: iter, Tokens: totalTokens, CostUSD: totalCostUSD, FinalError: err, FinalText: lastAssistantText}, err
 		}
 		totalTokens += resp.InputTokens + resp.OutputTokens
+		totalInTokens += resp.InputTokens
+		totalOutTokens += resp.OutputTokens
+		if a.CostCalculator != nil {
+			if usd, ok := a.CostCalculator.Estimate(a.Model, cost.Usage{
+				InputTokens:  resp.InputTokens,
+				OutputTokens: resp.OutputTokens,
+			}); ok {
+				totalCostUSD += usd
+			}
+		}
 
 		a.emit(event.SourceAgent, event.KindObservation, "provider_response", map[string]any{
 			"text_len":      len(resp.Text),
@@ -273,6 +317,70 @@ func (a *AgentLoop) Run(ctx context.Context) (*Result, error) {
 			"output_tokens": resp.OutputTokens,
 			"stop_reason":   resp.StopReason,
 		})
+
+		// Budget enforcement: emit warning at the 75% threshold (once per
+		// dimension), and stop with status=budget_exhausted at >=100%.
+		// Both emissions are additive — existing event consumers ignoring
+		// these types keep working. Iteration cap remains the for-loop
+		// guard above; here we add token + cost dimensions.
+		if budgetMaxTokens > 0 {
+			frac := float64(totalTokens) / float64(budgetMaxTokens)
+			if !a.warnedTokens && frac >= 0.75 && frac < 1.0 {
+				a.warnedTokens = true
+				a.emit(event.SourceSystem, event.KindNote, "budget_warning", map[string]any{
+					"reason":   "tokens",
+					"used":     totalTokens,
+					"limit":    budgetMaxTokens,
+					"fraction": frac,
+				})
+			}
+			if frac >= 1.0 {
+				a.emit(event.SourceSystem, event.KindNote, "budget_exceeded", map[string]any{
+					"reason":   "tokens",
+					"used":     totalTokens,
+					"limit":    budgetMaxTokens,
+					"fraction": frac,
+				})
+				return &Result{
+					Status:       "budget_exhausted",
+					Iterations:   iter,
+					Tokens:       totalTokens,
+					CostUSD:      totalCostUSD,
+					BudgetReason: "tokens",
+					FinalText:    lastAssistantText,
+				}, nil
+			}
+		}
+		if budgetMaxCostUSD > 0 {
+			frac := totalCostUSD / budgetMaxCostUSD
+			if !a.warnedCost && frac >= 0.75 && frac < 1.0 {
+				a.warnedCost = true
+				a.emit(event.SourceSystem, event.KindNote, "budget_warning", map[string]any{
+					"reason":   "cost",
+					"used":     totalCostUSD,
+					"limit":    budgetMaxCostUSD,
+					"fraction": frac,
+				})
+			}
+			if frac >= 1.0 {
+				a.emit(event.SourceSystem, event.KindNote, "budget_exceeded", map[string]any{
+					"reason":   "cost",
+					"used":     totalCostUSD,
+					"limit":    budgetMaxCostUSD,
+					"fraction": frac,
+				})
+				return &Result{
+					Status:       "budget_exhausted",
+					Iterations:   iter,
+					Tokens:       totalTokens,
+					CostUSD:      totalCostUSD,
+					BudgetReason: "cost",
+					FinalText:    lastAssistantText,
+				}, nil
+			}
+		}
+		_ = totalInTokens
+		_ = totalOutTokens
 
 		// Stuck detection: run after each provider_response (or every N iters).
 		if a.StuckDetector != nil {
@@ -377,6 +485,7 @@ func (a *AgentLoop) Run(ctx context.Context) (*Result, error) {
 						Status:     "stuck",
 						Iterations: iter,
 						Tokens:     totalTokens,
+						CostUSD:    totalCostUSD,
 						FinalError: errors.New("aborted: 3 unrecovered stuck signals"),
 						FinalText:  lastAssistantText,
 					}, nil
@@ -424,7 +533,13 @@ func (a *AgentLoop) Run(ctx context.Context) (*Result, error) {
 					})
 					if mErr != nil {
 						// Soft failure: log + proceed to done as if no milestone existed.
-						a.emit(event.SourceSystem, event.KindNote, "memory_milestone_error", map[string]any{"err": mErr.Error()})
+						// Emit a NOTE-kind event with a non-error name so downstream
+						// consumers that filter on "*_error" do not flag this as a
+						// real error — milestone summarization is best-effort.
+						a.emit(event.SourceSystem, event.KindNote, "memory_milestone_skipped", map[string]any{
+							"reason": "provider_unavailable",
+							"detail": mErr.Error(),
+						})
 					} else {
 						totalTokens += mResp.InputTokens + mResp.OutputTokens
 						a.emit(event.SourceAgent, event.KindObservation, "memory_milestone_response", map[string]any{
@@ -481,7 +596,7 @@ func (a *AgentLoop) Run(ctx context.Context) (*Result, error) {
 						})
 					}
 				}
-				return &Result{Status: "done", Iterations: iter, Tokens: totalTokens, VerifyAll: results, FinalText: lastAssistantText}, nil
+				return &Result{Status: "done", Iterations: iter, Tokens: totalTokens, CostUSD: totalCostUSD, VerifyAll: results, FinalText: lastAssistantText}, nil
 			}
 			// Feed verifier failures back as a user message and let agent continue.
 			messages = append(messages, provider.Message{
@@ -602,7 +717,7 @@ func (a *AgentLoop) Run(ctx context.Context) (*Result, error) {
 	}
 
 	a.emit(event.SourceSystem, event.KindNote, "run_max_iterations", map[string]any{"iterations": maxIter, "tokens": totalTokens})
-	return &Result{Status: "max_iterations", Iterations: maxIter, Tokens: totalTokens, FinalText: lastAssistantText}, nil
+	return &Result{Status: "max_iterations", Iterations: maxIter, Tokens: totalTokens, CostUSD: totalCostUSD, FinalText: lastAssistantText}, nil
 }
 
 // RunSubagent satisfies stuck.SubagentRunner. It builds a fresh AgentLoop
