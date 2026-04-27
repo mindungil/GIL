@@ -23,6 +23,9 @@ const (
 	RunService_Tail_FullMethodName             = "/gil.v1.RunService/Tail"
 	RunService_Restore_FullMethodName          = "/gil.v1.RunService/Restore"
 	RunService_AnswerPermission_FullMethodName = "/gil.v1.RunService/AnswerPermission"
+	RunService_RequestCompact_FullMethodName   = "/gil.v1.RunService/RequestCompact"
+	RunService_PostHint_FullMethodName         = "/gil.v1.RunService/PostHint"
+	RunService_Diff_FullMethodName             = "/gil.v1.RunService/Diff"
 )
 
 // RunServiceClient is the client API for RunService service.
@@ -43,6 +46,22 @@ type RunServiceClient interface {
 	// AnswerPermission delivers a yes/no response to a pending permission_ask.
 	// delivered=false means the request_id wasn't pending (timed out or unknown).
 	AnswerPermission(ctx context.Context, in *AnswerPermissionRequest, opts ...grpc.CallOption) (*AnswerPermissionResponse, error)
+	// RequestCompact queues a compaction to run at the next turn boundary
+	// for the given session. No-op when no run is in flight (queued=false,
+	// reason set so the surface can render a friendly message). Never
+	// preempts an in-flight tool call — the runner observes the flag at the
+	// top of the next iteration.
+	RequestCompact(ctx context.Context, in *RequestCompactRequest, opts ...grpc.CallOption) (*RequestCompactResponse, error)
+	// PostHint emits a hint event the agent may read on its next turn.
+	// The hint shape is opaque key/value (e.g. {"model": "claude-haiku-4-5"}).
+	// The agent decides whether to honor it — the server only stages the
+	// hint as an extraSystemNote so the next iteration's system prompt
+	// includes it once. posted=false when no run is in flight.
+	PostHint(ctx context.Context, in *PostHintRequest, opts ...grpc.CallOption) (*PostHintResponse, error)
+	// Diff returns the unified diff between the latest shadow-git checkpoint
+	// and the current workspace state. For inspection only — does not modify
+	// the workspace or the shadow git.
+	Diff(ctx context.Context, in *DiffRequest, opts ...grpc.CallOption) (*DiffResponse, error)
 }
 
 type runServiceClient struct {
@@ -102,6 +121,36 @@ func (c *runServiceClient) AnswerPermission(ctx context.Context, in *AnswerPermi
 	return out, nil
 }
 
+func (c *runServiceClient) RequestCompact(ctx context.Context, in *RequestCompactRequest, opts ...grpc.CallOption) (*RequestCompactResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RequestCompactResponse)
+	err := c.cc.Invoke(ctx, RunService_RequestCompact_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *runServiceClient) PostHint(ctx context.Context, in *PostHintRequest, opts ...grpc.CallOption) (*PostHintResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PostHintResponse)
+	err := c.cc.Invoke(ctx, RunService_PostHint_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *runServiceClient) Diff(ctx context.Context, in *DiffRequest, opts ...grpc.CallOption) (*DiffResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DiffResponse)
+	err := c.cc.Invoke(ctx, RunService_Diff_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // RunServiceServer is the server API for RunService service.
 // All implementations should embed UnimplementedRunServiceServer
 // for forward compatibility.
@@ -120,6 +169,22 @@ type RunServiceServer interface {
 	// AnswerPermission delivers a yes/no response to a pending permission_ask.
 	// delivered=false means the request_id wasn't pending (timed out or unknown).
 	AnswerPermission(context.Context, *AnswerPermissionRequest) (*AnswerPermissionResponse, error)
+	// RequestCompact queues a compaction to run at the next turn boundary
+	// for the given session. No-op when no run is in flight (queued=false,
+	// reason set so the surface can render a friendly message). Never
+	// preempts an in-flight tool call — the runner observes the flag at the
+	// top of the next iteration.
+	RequestCompact(context.Context, *RequestCompactRequest) (*RequestCompactResponse, error)
+	// PostHint emits a hint event the agent may read on its next turn.
+	// The hint shape is opaque key/value (e.g. {"model": "claude-haiku-4-5"}).
+	// The agent decides whether to honor it — the server only stages the
+	// hint as an extraSystemNote so the next iteration's system prompt
+	// includes it once. posted=false when no run is in flight.
+	PostHint(context.Context, *PostHintRequest) (*PostHintResponse, error)
+	// Diff returns the unified diff between the latest shadow-git checkpoint
+	// and the current workspace state. For inspection only — does not modify
+	// the workspace or the shadow git.
+	Diff(context.Context, *DiffRequest) (*DiffResponse, error)
 }
 
 // UnimplementedRunServiceServer should be embedded to have
@@ -140,6 +205,15 @@ func (UnimplementedRunServiceServer) Restore(context.Context, *RestoreRequest) (
 }
 func (UnimplementedRunServiceServer) AnswerPermission(context.Context, *AnswerPermissionRequest) (*AnswerPermissionResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method AnswerPermission not implemented")
+}
+func (UnimplementedRunServiceServer) RequestCompact(context.Context, *RequestCompactRequest) (*RequestCompactResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RequestCompact not implemented")
+}
+func (UnimplementedRunServiceServer) PostHint(context.Context, *PostHintRequest) (*PostHintResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method PostHint not implemented")
+}
+func (UnimplementedRunServiceServer) Diff(context.Context, *DiffRequest) (*DiffResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Diff not implemented")
 }
 func (UnimplementedRunServiceServer) testEmbeddedByValue() {}
 
@@ -226,6 +300,60 @@ func _RunService_AnswerPermission_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _RunService_RequestCompact_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RequestCompactRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunServiceServer).RequestCompact(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RunService_RequestCompact_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunServiceServer).RequestCompact(ctx, req.(*RequestCompactRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RunService_PostHint_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PostHintRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunServiceServer).PostHint(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RunService_PostHint_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunServiceServer).PostHint(ctx, req.(*PostHintRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RunService_Diff_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DiffRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunServiceServer).Diff(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RunService_Diff_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunServiceServer).Diff(ctx, req.(*DiffRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // RunService_ServiceDesc is the grpc.ServiceDesc for RunService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -244,6 +372,18 @@ var RunService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "AnswerPermission",
 			Handler:    _RunService_AnswerPermission_Handler,
+		},
+		{
+			MethodName: "RequestCompact",
+			Handler:    _RunService_RequestCompact_Handler,
+		},
+		{
+			MethodName: "PostHint",
+			Handler:    _RunService_PostHint_Handler,
+		},
+		{
+			MethodName: "Diff",
+			Handler:    _RunService_Diff_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

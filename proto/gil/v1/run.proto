@@ -44,6 +44,39 @@ service RunService {
       body: "*"
     };
   }
+
+  // RequestCompact queues a compaction to run at the next turn boundary
+  // for the given session. No-op when no run is in flight (queued=false,
+  // reason set so the surface can render a friendly message). Never
+  // preempts an in-flight tool call — the runner observes the flag at the
+  // top of the next iteration.
+  rpc RequestCompact(RequestCompactRequest) returns (RequestCompactResponse) {
+    option (google.api.http) = {
+      post: "/v1/sessions/{session_id}/request_compact"
+      body: "*"
+    };
+  }
+
+  // PostHint emits a hint event the agent may read on its next turn.
+  // The hint shape is opaque key/value (e.g. {"model": "claude-haiku-4-5"}).
+  // The agent decides whether to honor it — the server only stages the
+  // hint as an extraSystemNote so the next iteration's system prompt
+  // includes it once. posted=false when no run is in flight.
+  rpc PostHint(PostHintRequest) returns (PostHintResponse) {
+    option (google.api.http) = {
+      post: "/v1/sessions/{session_id}/hint"
+      body: "*"
+    };
+  }
+
+  // Diff returns the unified diff between the latest shadow-git checkpoint
+  // and the current workspace state. For inspection only — does not modify
+  // the workspace or the shadow git.
+  rpc Diff(DiffRequest) returns (DiffResponse) {
+    option (google.api.http) = {
+      get: "/v1/sessions/{session_id}/diff"
+    };
+  }
 }
 
 message StartRunRequest {
@@ -116,4 +149,56 @@ message AnswerPermissionRequest {
 
 message AnswerPermissionResponse {
   bool delivered = 1;  // false when no pending request matches the id (e.g., already timed out)
+}
+
+// RequestCompactRequest targets a single session by id.
+message RequestCompactRequest {
+  string session_id = 1;
+}
+
+// RequestCompactResponse reports whether the request was queued for the
+// next turn boundary. queued=false carries `reason` (e.g., "no run in
+// flight") so the surface can render a friendly message rather than a
+// generic error.
+message RequestCompactResponse {
+  bool   queued = 1;
+  string reason = 2;
+}
+
+// PostHintRequest carries an opaque key/value hint for the agent's next
+// turn. Common keys today: "model" (suggest a model switch). Surfaces and
+// agents may add more keys without a wire change.
+message PostHintRequest {
+  string session_id = 1;
+  map<string, string> hint = 2;
+}
+
+// PostHintResponse reports whether the hint was staged. posted=false when
+// no run is in flight (the hint has nowhere to land).
+message PostHintResponse {
+  bool   posted = 1;
+  string reason = 2;
+}
+
+// DiffRequest asks for the diff between the latest shadow-git checkpoint
+// and the current workspace state. Future fields (from_step / to_step)
+// can extend the comparison to arbitrary commit pairs.
+message DiffRequest {
+  string session_id = 1;
+}
+
+// DiffResponse carries the unified diff body plus summary counts. The
+// body is truncated to ~16 KB; when truncated, `truncated=true` and
+// `truncated_bytes` reports the number of bytes the server dropped from
+// the tail. `note` is a free-form message used when the session has no
+// checkpoints yet (the body is then empty and the counts are zero).
+message DiffResponse {
+  string unified_diff    = 1;
+  int32  files_changed   = 2;
+  int32  lines_added     = 3;
+  int32  lines_removed   = 4;
+  bool   truncated       = 5;
+  int32  truncated_bytes = 6;
+  string note            = 7;
+  string checkpoint_sha  = 8;
 }

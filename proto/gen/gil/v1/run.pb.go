@@ -591,6 +591,368 @@ func (x *AnswerPermissionResponse) GetDelivered() bool {
 	return false
 }
 
+// RequestCompactRequest targets a single session by id.
+type RequestCompactRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SessionId     string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RequestCompactRequest) Reset() {
+	*x = RequestCompactRequest{}
+	mi := &file_gil_v1_run_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RequestCompactRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RequestCompactRequest) ProtoMessage() {}
+
+func (x *RequestCompactRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_gil_v1_run_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RequestCompactRequest.ProtoReflect.Descriptor instead.
+func (*RequestCompactRequest) Descriptor() ([]byte, []int) {
+	return file_gil_v1_run_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *RequestCompactRequest) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
+// RequestCompactResponse reports whether the request was queued for the
+// next turn boundary. queued=false carries `reason` (e.g., "no run in
+// flight") so the surface can render a friendly message rather than a
+// generic error.
+type RequestCompactResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Queued        bool                   `protobuf:"varint,1,opt,name=queued,proto3" json:"queued,omitempty"`
+	Reason        string                 `protobuf:"bytes,2,opt,name=reason,proto3" json:"reason,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RequestCompactResponse) Reset() {
+	*x = RequestCompactResponse{}
+	mi := &file_gil_v1_run_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RequestCompactResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RequestCompactResponse) ProtoMessage() {}
+
+func (x *RequestCompactResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_gil_v1_run_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RequestCompactResponse.ProtoReflect.Descriptor instead.
+func (*RequestCompactResponse) Descriptor() ([]byte, []int) {
+	return file_gil_v1_run_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *RequestCompactResponse) GetQueued() bool {
+	if x != nil {
+		return x.Queued
+	}
+	return false
+}
+
+func (x *RequestCompactResponse) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
+// PostHintRequest carries an opaque key/value hint for the agent's next
+// turn. Common keys today: "model" (suggest a model switch). Surfaces and
+// agents may add more keys without a wire change.
+type PostHintRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SessionId     string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	Hint          map[string]string      `protobuf:"bytes,2,rep,name=hint,proto3" json:"hint,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PostHintRequest) Reset() {
+	*x = PostHintRequest{}
+	mi := &file_gil_v1_run_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PostHintRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PostHintRequest) ProtoMessage() {}
+
+func (x *PostHintRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_gil_v1_run_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PostHintRequest.ProtoReflect.Descriptor instead.
+func (*PostHintRequest) Descriptor() ([]byte, []int) {
+	return file_gil_v1_run_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *PostHintRequest) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
+func (x *PostHintRequest) GetHint() map[string]string {
+	if x != nil {
+		return x.Hint
+	}
+	return nil
+}
+
+// PostHintResponse reports whether the hint was staged. posted=false when
+// no run is in flight (the hint has nowhere to land).
+type PostHintResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Posted        bool                   `protobuf:"varint,1,opt,name=posted,proto3" json:"posted,omitempty"`
+	Reason        string                 `protobuf:"bytes,2,opt,name=reason,proto3" json:"reason,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PostHintResponse) Reset() {
+	*x = PostHintResponse{}
+	mi := &file_gil_v1_run_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PostHintResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PostHintResponse) ProtoMessage() {}
+
+func (x *PostHintResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_gil_v1_run_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PostHintResponse.ProtoReflect.Descriptor instead.
+func (*PostHintResponse) Descriptor() ([]byte, []int) {
+	return file_gil_v1_run_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *PostHintResponse) GetPosted() bool {
+	if x != nil {
+		return x.Posted
+	}
+	return false
+}
+
+func (x *PostHintResponse) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
+// DiffRequest asks for the diff between the latest shadow-git checkpoint
+// and the current workspace state. Future fields (from_step / to_step)
+// can extend the comparison to arbitrary commit pairs.
+type DiffRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SessionId     string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DiffRequest) Reset() {
+	*x = DiffRequest{}
+	mi := &file_gil_v1_run_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DiffRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DiffRequest) ProtoMessage() {}
+
+func (x *DiffRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_gil_v1_run_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DiffRequest.ProtoReflect.Descriptor instead.
+func (*DiffRequest) Descriptor() ([]byte, []int) {
+	return file_gil_v1_run_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *DiffRequest) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
+// DiffResponse carries the unified diff body plus summary counts. The
+// body is truncated to ~16 KB; when truncated, `truncated=true` and
+// `truncated_bytes` reports the number of bytes the server dropped from
+// the tail. `note` is a free-form message used when the session has no
+// checkpoints yet (the body is then empty and the counts are zero).
+type DiffResponse struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	UnifiedDiff    string                 `protobuf:"bytes,1,opt,name=unified_diff,json=unifiedDiff,proto3" json:"unified_diff,omitempty"`
+	FilesChanged   int32                  `protobuf:"varint,2,opt,name=files_changed,json=filesChanged,proto3" json:"files_changed,omitempty"`
+	LinesAdded     int32                  `protobuf:"varint,3,opt,name=lines_added,json=linesAdded,proto3" json:"lines_added,omitempty"`
+	LinesRemoved   int32                  `protobuf:"varint,4,opt,name=lines_removed,json=linesRemoved,proto3" json:"lines_removed,omitempty"`
+	Truncated      bool                   `protobuf:"varint,5,opt,name=truncated,proto3" json:"truncated,omitempty"`
+	TruncatedBytes int32                  `protobuf:"varint,6,opt,name=truncated_bytes,json=truncatedBytes,proto3" json:"truncated_bytes,omitempty"`
+	Note           string                 `protobuf:"bytes,7,opt,name=note,proto3" json:"note,omitempty"`
+	CheckpointSha  string                 `protobuf:"bytes,8,opt,name=checkpoint_sha,json=checkpointSha,proto3" json:"checkpoint_sha,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *DiffResponse) Reset() {
+	*x = DiffResponse{}
+	mi := &file_gil_v1_run_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DiffResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DiffResponse) ProtoMessage() {}
+
+func (x *DiffResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_gil_v1_run_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DiffResponse.ProtoReflect.Descriptor instead.
+func (*DiffResponse) Descriptor() ([]byte, []int) {
+	return file_gil_v1_run_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *DiffResponse) GetUnifiedDiff() string {
+	if x != nil {
+		return x.UnifiedDiff
+	}
+	return ""
+}
+
+func (x *DiffResponse) GetFilesChanged() int32 {
+	if x != nil {
+		return x.FilesChanged
+	}
+	return 0
+}
+
+func (x *DiffResponse) GetLinesAdded() int32 {
+	if x != nil {
+		return x.LinesAdded
+	}
+	return 0
+}
+
+func (x *DiffResponse) GetLinesRemoved() int32 {
+	if x != nil {
+		return x.LinesRemoved
+	}
+	return 0
+}
+
+func (x *DiffResponse) GetTruncated() bool {
+	if x != nil {
+		return x.Truncated
+	}
+	return false
+}
+
+func (x *DiffResponse) GetTruncatedBytes() int32 {
+	if x != nil {
+		return x.TruncatedBytes
+	}
+	return 0
+}
+
+func (x *DiffResponse) GetNote() string {
+	if x != nil {
+		return x.Note
+	}
+	return ""
+}
+
+func (x *DiffResponse) GetCheckpointSha() string {
+	if x != nil {
+		return x.CheckpointSha
+	}
+	return ""
+}
+
 var File_gil_v1_run_proto protoreflect.FileDescriptor
 
 const file_gil_v1_run_proto_rawDesc = "" +
@@ -637,7 +999,36 @@ const file_gil_v1_run_proto_rawDesc = "" +
 	"\x05allow\x18\x03 \x01(\bR\x05allow\x126\n" +
 	"\bdecision\x18\x04 \x01(\x0e2\x1a.gil.v1.PermissionDecisionR\bdecision\"8\n" +
 	"\x18AnswerPermissionResponse\x12\x1c\n" +
-	"\tdelivered\x18\x01 \x01(\bR\tdelivered*\x98\x02\n" +
+	"\tdelivered\x18\x01 \x01(\bR\tdelivered\"6\n" +
+	"\x15RequestCompactRequest\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x01 \x01(\tR\tsessionId\"H\n" +
+	"\x16RequestCompactResponse\x12\x16\n" +
+	"\x06queued\x18\x01 \x01(\bR\x06queued\x12\x16\n" +
+	"\x06reason\x18\x02 \x01(\tR\x06reason\"\xa0\x01\n" +
+	"\x0fPostHintRequest\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x01 \x01(\tR\tsessionId\x125\n" +
+	"\x04hint\x18\x02 \x03(\v2!.gil.v1.PostHintRequest.HintEntryR\x04hint\x1a7\n" +
+	"\tHintEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"B\n" +
+	"\x10PostHintResponse\x12\x16\n" +
+	"\x06posted\x18\x01 \x01(\bR\x06posted\x12\x16\n" +
+	"\x06reason\x18\x02 \x01(\tR\x06reason\",\n" +
+	"\vDiffRequest\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x01 \x01(\tR\tsessionId\"\x9e\x02\n" +
+	"\fDiffResponse\x12!\n" +
+	"\funified_diff\x18\x01 \x01(\tR\vunifiedDiff\x12#\n" +
+	"\rfiles_changed\x18\x02 \x01(\x05R\ffilesChanged\x12\x1f\n" +
+	"\vlines_added\x18\x03 \x01(\x05R\n" +
+	"linesAdded\x12#\n" +
+	"\rlines_removed\x18\x04 \x01(\x05R\flinesRemoved\x12\x1c\n" +
+	"\ttruncated\x18\x05 \x01(\bR\ttruncated\x12'\n" +
+	"\x0ftruncated_bytes\x18\x06 \x01(\x05R\x0etruncatedBytes\x12\x12\n" +
+	"\x04note\x18\a \x01(\tR\x04note\x12%\n" +
+	"\x0echeckpoint_sha\x18\b \x01(\tR\rcheckpointSha*\x98\x02\n" +
 	"\x12PermissionDecision\x12#\n" +
 	"\x1fPERMISSION_DECISION_UNSPECIFIED\x10\x00\x12\"\n" +
 	"\x1ePERMISSION_DECISION_ALLOW_ONCE\x10\x01\x12%\n" +
@@ -645,13 +1036,16 @@ const file_gil_v1_run_proto_rawDesc = "" +
 	" PERMISSION_DECISION_ALLOW_ALWAYS\x10\x03\x12!\n" +
 	"\x1dPERMISSION_DECISION_DENY_ONCE\x10\x04\x12$\n" +
 	" PERMISSION_DECISION_DENY_SESSION\x10\x05\x12#\n" +
-	"\x1fPERMISSION_DECISION_DENY_ALWAYS\x10\x062\xc4\x03\n" +
+	"\x1fPERMISSION_DECISION_DENY_ALWAYS\x10\x062\x91\x06\n" +
 	"\n" +
 	"RunService\x12d\n" +
 	"\x05Start\x12\x17.gil.v1.StartRunRequest\x1a\x18.gil.v1.StartRunResponse\"(\x82\xd3\xe4\x93\x02\":\x01*\"\x1d/v1/sessions/{session_id}/run\x12V\n" +
 	"\x04Tail\x12\x13.gil.v1.TailRequest\x1a\r.gil.v1.Event\"(\x82\xd3\xe4\x93\x02\"\x12 /v1/sessions/{session_id}/events0\x01\x12h\n" +
 	"\aRestore\x12\x16.gil.v1.RestoreRequest\x1a\x17.gil.v1.RestoreResponse\",\x82\xd3\xe4\x93\x02&:\x01*\"!/v1/sessions/{session_id}/restore\x12\x8d\x01\n" +
-	"\x10AnswerPermission\x12\x1f.gil.v1.AnswerPermissionRequest\x1a .gil.v1.AnswerPermissionResponse\"6\x82\xd3\xe4\x93\x020:\x01*\"+/v1/sessions/{session_id}/answer_permissionB1Z/github.com/mindungil/gil/proto/gen/gil/v1;gilv1b\x06proto3"
+	"\x10AnswerPermission\x12\x1f.gil.v1.AnswerPermissionRequest\x1a .gil.v1.AnswerPermissionResponse\"6\x82\xd3\xe4\x93\x020:\x01*\"+/v1/sessions/{session_id}/answer_permission\x12\x85\x01\n" +
+	"\x0eRequestCompact\x12\x1d.gil.v1.RequestCompactRequest\x1a\x1e.gil.v1.RequestCompactResponse\"4\x82\xd3\xe4\x93\x02.:\x01*\")/v1/sessions/{session_id}/request_compact\x12h\n" +
+	"\bPostHint\x12\x17.gil.v1.PostHintRequest\x1a\x18.gil.v1.PostHintResponse\")\x82\xd3\xe4\x93\x02#:\x01*\"\x1e/v1/sessions/{session_id}/hint\x12Y\n" +
+	"\x04Diff\x12\x13.gil.v1.DiffRequest\x1a\x14.gil.v1.DiffResponse\"&\x82\xd3\xe4\x93\x02 \x12\x1e/v1/sessions/{session_id}/diffB1Z/github.com/mindungil/gil/proto/gen/gil/v1;gilv1b\x06proto3"
 
 var (
 	file_gil_v1_run_proto_rawDescOnce sync.Once
@@ -666,7 +1060,7 @@ func file_gil_v1_run_proto_rawDescGZIP() []byte {
 }
 
 var file_gil_v1_run_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_gil_v1_run_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
+var file_gil_v1_run_proto_msgTypes = make([]protoimpl.MessageInfo, 15)
 var file_gil_v1_run_proto_goTypes = []any{
 	(PermissionDecision)(0),          // 0: gil.v1.PermissionDecision
 	(*StartRunRequest)(nil),          // 1: gil.v1.StartRunRequest
@@ -677,24 +1071,38 @@ var file_gil_v1_run_proto_goTypes = []any{
 	(*RestoreResponse)(nil),          // 6: gil.v1.RestoreResponse
 	(*AnswerPermissionRequest)(nil),  // 7: gil.v1.AnswerPermissionRequest
 	(*AnswerPermissionResponse)(nil), // 8: gil.v1.AnswerPermissionResponse
-	(*Event)(nil),                    // 9: gil.v1.Event
+	(*RequestCompactRequest)(nil),    // 9: gil.v1.RequestCompactRequest
+	(*RequestCompactResponse)(nil),   // 10: gil.v1.RequestCompactResponse
+	(*PostHintRequest)(nil),          // 11: gil.v1.PostHintRequest
+	(*PostHintResponse)(nil),         // 12: gil.v1.PostHintResponse
+	(*DiffRequest)(nil),              // 13: gil.v1.DiffRequest
+	(*DiffResponse)(nil),             // 14: gil.v1.DiffResponse
+	nil,                              // 15: gil.v1.PostHintRequest.HintEntry
+	(*Event)(nil),                    // 16: gil.v1.Event
 }
 var file_gil_v1_run_proto_depIdxs = []int32{
-	3, // 0: gil.v1.StartRunResponse.verify_results:type_name -> gil.v1.VerifyResult
-	0, // 1: gil.v1.AnswerPermissionRequest.decision:type_name -> gil.v1.PermissionDecision
-	1, // 2: gil.v1.RunService.Start:input_type -> gil.v1.StartRunRequest
-	4, // 3: gil.v1.RunService.Tail:input_type -> gil.v1.TailRequest
-	5, // 4: gil.v1.RunService.Restore:input_type -> gil.v1.RestoreRequest
-	7, // 5: gil.v1.RunService.AnswerPermission:input_type -> gil.v1.AnswerPermissionRequest
-	2, // 6: gil.v1.RunService.Start:output_type -> gil.v1.StartRunResponse
-	9, // 7: gil.v1.RunService.Tail:output_type -> gil.v1.Event
-	6, // 8: gil.v1.RunService.Restore:output_type -> gil.v1.RestoreResponse
-	8, // 9: gil.v1.RunService.AnswerPermission:output_type -> gil.v1.AnswerPermissionResponse
-	6, // [6:10] is the sub-list for method output_type
-	2, // [2:6] is the sub-list for method input_type
-	2, // [2:2] is the sub-list for extension type_name
-	2, // [2:2] is the sub-list for extension extendee
-	0, // [0:2] is the sub-list for field type_name
+	3,  // 0: gil.v1.StartRunResponse.verify_results:type_name -> gil.v1.VerifyResult
+	0,  // 1: gil.v1.AnswerPermissionRequest.decision:type_name -> gil.v1.PermissionDecision
+	15, // 2: gil.v1.PostHintRequest.hint:type_name -> gil.v1.PostHintRequest.HintEntry
+	1,  // 3: gil.v1.RunService.Start:input_type -> gil.v1.StartRunRequest
+	4,  // 4: gil.v1.RunService.Tail:input_type -> gil.v1.TailRequest
+	5,  // 5: gil.v1.RunService.Restore:input_type -> gil.v1.RestoreRequest
+	7,  // 6: gil.v1.RunService.AnswerPermission:input_type -> gil.v1.AnswerPermissionRequest
+	9,  // 7: gil.v1.RunService.RequestCompact:input_type -> gil.v1.RequestCompactRequest
+	11, // 8: gil.v1.RunService.PostHint:input_type -> gil.v1.PostHintRequest
+	13, // 9: gil.v1.RunService.Diff:input_type -> gil.v1.DiffRequest
+	2,  // 10: gil.v1.RunService.Start:output_type -> gil.v1.StartRunResponse
+	16, // 11: gil.v1.RunService.Tail:output_type -> gil.v1.Event
+	6,  // 12: gil.v1.RunService.Restore:output_type -> gil.v1.RestoreResponse
+	8,  // 13: gil.v1.RunService.AnswerPermission:output_type -> gil.v1.AnswerPermissionResponse
+	10, // 14: gil.v1.RunService.RequestCompact:output_type -> gil.v1.RequestCompactResponse
+	12, // 15: gil.v1.RunService.PostHint:output_type -> gil.v1.PostHintResponse
+	14, // 16: gil.v1.RunService.Diff:output_type -> gil.v1.DiffResponse
+	10, // [10:17] is the sub-list for method output_type
+	3,  // [3:10] is the sub-list for method input_type
+	3,  // [3:3] is the sub-list for extension type_name
+	3,  // [3:3] is the sub-list for extension extendee
+	0,  // [0:3] is the sub-list for field type_name
 }
 
 func init() { file_gil_v1_run_proto_init() }
@@ -709,7 +1117,7 @@ func file_gil_v1_run_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_gil_v1_run_proto_rawDesc), len(file_gil_v1_run_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   8,
+			NumMessages:   15,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
