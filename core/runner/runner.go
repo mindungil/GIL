@@ -28,9 +28,27 @@ import (
 
 // Result is the final outcome of an AgentLoop run.
 //
-// Status values: "done" | "max_iterations" | "error" | "stuck" |
-// "budget_exhausted". When Status == "budget_exhausted", BudgetReason
-// records which dimension hit the cap ("tokens" or "cost").
+// Status values:
+//   - "done" — agent emitted end_turn AND final verify passed.
+//   - "verify_failed" — agent emitted end_turn but final verify failed
+//     (only emitted when the loop exits on agent end_turn with a failing
+//     verify; the in-loop retry path that feeds the failure back to the
+//     agent and continues remains unchanged).
+//   - "max_iterations" — hit the iteration cap. VerifyAll is still
+//     populated by the post-loop best-effort verify run.
+//   - "stuck" — stuck-recovery exhausted. VerifyAll populated.
+//   - "error" — unrecoverable provider/runtime error mid-run.
+//   - "budget_exhausted" — hit the token/cost cap (or its reserve guard)
+//     before the agent declared done AND final verify failed (kept as a
+//     legacy default so older callers keep matching).
+//   - "budget_exhausted_verify_passed" — hit the budget cap, but the
+//     post-loop verify came back green anyway (agent's prior edits were
+//     enough). Caller should treat this almost like "done".
+//   - "budget_exhausted_verify_failed" — hit the budget cap and verify
+//     also failed. Caller usually wants to report the failure detail.
+//
+// When Status starts with "budget_exhausted", BudgetReason records which
+// dimension hit the cap ("tokens" or "cost").
 type Result struct {
 	Status       string
 	Iterations   int
@@ -39,8 +57,32 @@ type Result struct {
 	VerifyAll    []verify.Result
 	FinalError   error
 	FinalText    string // last assistant text emitted before the loop exited
-	BudgetReason string // "tokens" | "cost" — populated when Status=="budget_exhausted"
+	BudgetReason string // "tokens" | "cost" — populated when Status starts with "budget_exhausted"
+	// ByRole breaks the run's spend down by classifyTurn role
+	// ("planner", "editor", "main"). Empty when the run never used the
+	// architect/coder split (single-provider configs leave only "main"
+	// populated — and even then the entry is omitted when zero).
+	// Surfaced through `gil cost --by-role` and `gil stats`.
+	ByRole map[string]RoleUsage
 }
+
+// RoleUsage is the per-role slice of a run's spend, mirroring cost.Usage
+// but indexed by classifyTurn role rather than model. Aggregated across
+// iterations: each provider response increments the role that drove that
+// Complete() call.
+type RoleUsage struct {
+	Calls        int     // number of provider.Complete invocations charged to this role
+	InputTokens  int64
+	OutputTokens int64
+	CostUSD      float64
+}
+
+// defaultBudgetReserveTokens is held back from the effective max-total-tokens
+// budget so the post-loop verify check + the closing assistant turn can still
+// run when the cap fires. Sensible across modern LLMs (8k handles a final
+// "I'm done" summary on Sonnet/Haiku/Qwen alike). Overridden by
+// Spec.Budget.ReserveTokens or AgentLoop.BudgetReserveTokens (>0).
+const defaultBudgetReserveTokens int64 = 8000
 
 // AskRequest carries the details surfaced to a human reviewer when
 // Permission returns DecisionAsk and AskCallback is non-nil.
@@ -48,6 +90,14 @@ type AskRequest struct {
 	Tool string
 	Key  string
 }
+
+// Role names recognised by classifyTurn. Kept as exported constants so
+// surface code (server, TUI, tests) refers to them without typo risk.
+const (
+	RolePlanner = "planner"
+	RoleEditor  = "editor"
+	RoleMain    = "main"
+)
 
 // AgentLoop drives Spec to completion.
 type AgentLoop struct {
@@ -57,6 +107,21 @@ type AgentLoop struct {
 	Tools    []tool.Tool
 	Verifier *verify.Runner
 	Events   *event.Stream // optional; if nil, no events emitted
+
+	// Providers + Models implement the architect/coder split (Phase 19
+	// Track C). When a role is missing from either map, the runner falls
+	// back to .Provider / .Model — so single-provider runs (the legacy
+	// shape) keep working unchanged.
+	//
+	// Keys: "planner", "editor", "main". The classifyTurn helper picks
+	// one per iteration based on iteration index + the previous response's
+	// tool-call shape. RunService.executeRun is responsible for
+	// constructing these from Spec.Models, sharing one Provider instance
+	// when multiple roles point at the same (provider,model) pair so we
+	// don't pay the construction cost (or the connection-pool slot) more
+	// than once per unique target.
+	Providers map[string]provider.Provider
+	Models    map[string]string
 
 	// Checkpoint is optional; if non-nil, committed after each tool-using iteration.
 	Checkpoint *checkpoint.ShadowGit
@@ -151,11 +216,32 @@ type AgentLoop struct {
 	// still apply.
 	CostCalculator *cost.Calculator
 
+	// BudgetReserveTokens overrides Spec.Budget.ReserveTokens. When > 0,
+	// the runner subtracts this value from the effective max-total-tokens
+	// cap so the loop trips its "stop now" guard at
+	// (max_total_tokens - reserve). The held-back tokens cover the final
+	// verifier run + a closing assistant turn that wraps things up. When
+	// zero, falls back to Spec.Budget.ReserveTokens, then to
+	// defaultBudgetReserveTokens (8000). Has no effect when
+	// max_total_tokens is unset (no cap to reserve from).
+	BudgetReserveTokens int64
+
+	// SystemPromptOpts overrides Spec.Run.SystemPrompt at runtime. Used
+	// by tests + by callers that build a loop programmatically and want
+	// to flip the diet without going through a frozen spec. Zero value
+	// means "fall back to spec"; if both are zero, defaults apply
+	// (memory bank prepended after iter 1, AGENTS.md included).
+	SystemPromptOpts SystemPromptOptions
+
 	// internal: tracks which budget thresholds we've already warned about
 	// so each crossing emits one budget_warning rather than one per
 	// iteration after 75%.
 	warnedTokens bool
 	warnedCost   bool
+
+	// internal: set once Run() prints the system-prompt breakdown so
+	// later iterations don't spam stderr with the same numbers.
+	breakdownLogged bool
 }
 
 // CompactRequester is satisfied by AgentLoop; the compact_now tool uses it
@@ -198,7 +284,9 @@ func (a *AgentLoop) Run(ctx context.Context) (*Result, error) {
 	// the run — important so the cache prefix stays stable across
 	// iterations on prompt-caching providers (Anthropic system block).
 	a.loadInstructions()
-	system := buildSystemPrompt(a.Spec, a.Tools, a.Memory, a.instructionsRendered)
+	// Resolve effective SystemPromptOptions: explicit AgentLoop field
+	// wins, otherwise fall back to spec.run.system_prompt.
+	promptOpts := a.resolveSystemPromptOptions()
 	tools := make([]provider.ToolDef, 0, len(a.Tools))
 	toolByName := map[string]tool.Tool{}
 	for _, t := range a.Tools {
@@ -220,6 +308,21 @@ func (a *AgentLoop) Run(ctx context.Context) (*Result, error) {
 	}}
 	var lastAssistantText string
 
+	// Per-role usage aggregation (Phase 19 Track C). Populated as each
+	// iteration's classifyTurn pick rolls in; the resulting map flows into
+	// Result.ByRole so `gil cost --by-role` and `gil stats` can break the
+	// run's spend down by planner/editor/main.
+	byRole := map[string]RoleUsage{}
+	// Tracks the previous iteration's (response, role) for two reasons:
+	//   1) classifyTurn(iter, lastResponse) needs the prior response shape
+	//      to decide whether to keep planning or hand off to the editor.
+	//   2) we emit a model_switched event on EVERY transition between
+	//      consecutive iterations, so observers (TUI/CLI/event consumers)
+	//      see the architect/coder split in action without reverse-
+	//      engineering it from provider_request payloads.
+	var lastResponse *provider.Response
+	var lastRole string
+
 	if a.Checkpoint != nil {
 		if err := a.Checkpoint.Init(ctx); err != nil {
 			a.emit(event.SourceSystem, event.KindNote, "checkpoint_init_error", map[string]any{"err": err.Error()})
@@ -236,14 +339,68 @@ func (a *AgentLoop) Run(ctx context.Context) (*Result, error) {
 	// Resolve budget caps once. Zero means "unbounded on this dimension".
 	var budgetMaxTokens int64
 	var budgetMaxCostUSD float64
+	var budgetReserveTokens int64
 	if a.Spec != nil && a.Spec.Budget != nil {
 		budgetMaxTokens = a.Spec.Budget.MaxTotalTokens
 		budgetMaxCostUSD = a.Spec.Budget.MaxTotalCostUsd
+		budgetReserveTokens = a.Spec.Budget.ReserveTokens
+	}
+	// Caller override beats spec value. Negative override means "no
+	// reserve at all" (legacy escape hatch for callers that explicitly
+	// want pre-Phase-19 semantics).
+	if a.BudgetReserveTokens != 0 {
+		budgetReserveTokens = a.BudgetReserveTokens
+	}
+	if budgetReserveTokens == 0 {
+		// Default policy: 8000 tokens or 10% of the cap, whichever is
+		// smaller. The smaller-is-better cap keeps the default safe for
+		// tiny budgets (sub-loops with 5_000 tokens, integration tests
+		// with 100-token caps) where a flat 8k would dominate the cap
+		// and trip the reserve guard before any real work could run.
+		budgetReserveTokens = defaultBudgetReserveTokens
+		if budgetMaxTokens > 0 && budgetMaxTokens/10 < budgetReserveTokens {
+			budgetReserveTokens = budgetMaxTokens / 10
+		}
+	}
+	if budgetReserveTokens < 0 {
+		budgetReserveTokens = 0
+	}
+	// Effective cap = max - reserve. The reserve is held back so the post-loop
+	// final verify + a closing "I'm done" turn can still run when the cap
+	// fires. When reserve >= max (misconfiguration), clamp to a near-zero
+	// effective cap so the very first iteration trips the guard, leaving the
+	// reserve intact for the final verify.
+	effectiveMaxTokens := budgetMaxTokens - budgetReserveTokens
+	if budgetMaxTokens > 0 && effectiveMaxTokens <= 0 {
+		effectiveMaxTokens = 1
 	}
 	// Lazily build a calculator only when cost enforcement is wanted.
 	if a.CostCalculator == nil && budgetMaxCostUSD > 0 {
 		a.CostCalculator = cost.NewCalculator()
 	}
+
+	// Exit reason captured by the loop body. After the for-loop exits we
+	// run a single best-effort verify pass (when no inline verify already
+	// fired and a Verifier is wired) and map (exit reason, verify result)
+	// onto a final Result. This is the Phase 19 fix for the dogfood bug
+	// where budget exhaustion fired before the loop's inline verify could
+	// run, leaving the user with no signal as to whether the work was
+	// actually green.
+	type exitState struct {
+		// reason is the why we left the loop:
+		//   "done"           — agent end_turn + inline verify passed (early return preserved)
+		//   "budget_tokens"  — token reserve guard tripped
+		//   "budget_cost"    — cost cap hit
+		//   "stuck"          — stuck-recovery exhausted
+		//   "max_iter"       — for-loop counter reached cap
+		//   "verify_failed"  — inline verify failed and we exited (only when no retry was possible — current code retries, so this is reserved for future use)
+		reason     string
+		iterations int
+		err        error
+	}
+	var exit exitState
+
+loop:
 	for iter := 1; iter <= maxIter; iter++ {
 		a.emit(event.SourceSystem, event.KindNote, "iteration_start", map[string]any{"iter": iter})
 
@@ -282,16 +439,60 @@ func (a *AgentLoop) Run(ctx context.Context) (*Result, error) {
 			}
 		}
 
+		// Phase 19 Track C: pick the model role for this iteration BEFORE
+		// the provider_request event so observers see the resolved model
+		// rather than the AgentLoop default. classifyTurn is pure — no
+		// AgentLoop side effects — so the routing decision is reproducible
+		// from the iteration index and the previous response.
+		role := classifyTurn(iter-1, lastResponse)
+		iterProvider := a.pickProvider(role)
+		iterModel := a.pickModel(role)
+		// Emit a model_switched event whenever the role flips between
+		// consecutive iterations. The very first iteration also emits
+		// (lastRole == "") so a TUI subscriber that opens the stream after
+		// iter 1 still sees which role drove the opener.
+		if role != lastRole {
+			a.emit(event.SourceSystem, event.KindNote, "model_switched", map[string]any{
+				"from":     lastRole,
+				"to":       role,
+				"model":    iterModel,
+				"iter":     iter,
+				"reason":   modelSwitchReason(iter-1, lastResponse, role),
+			})
+		}
+
 		a.emit(event.SourceAgent, event.KindAction, "provider_request", map[string]any{
-			"model":   a.Model,
+			"model":   iterModel,
+			"role":    role,
 			"msgs":    len(messages),
 			"tools":   len(tools),
 		})
 
-		// Build the effective system prompt for this iteration. When
-		// extraSystemNote is set (injected by a stuck-recovery strategy),
-		// append it as an URGENT NOTE and then clear it (single-shot).
-		iterSystem := system
+		// Build the effective system prompt for this iteration via the
+		// dedicated assembler (system_prompt.go). Two reasons we
+		// rebuild every turn rather than once-and-cache:
+		//   (1) lazy memory bank — iter 1 should NOT include it, iter 2+
+		//       should, and the bank's contents may also have churned
+		//       (memory_update tool calls).
+		//   (2) breakdown logging — we want one print per Run, but the
+		//       assembly itself is cheap (in-memory string ops).
+		// Cache prefix invariance still holds: base/instructions/tools
+		// are deterministic functions of inputs that don't change once
+		// the loop starts, so the leading bytes match across iterations
+		// 2..N (the only churn is memory_bank tail + plan prepend +
+		// urgent-note suffix, all by design).
+		iterSystem, breakdown := assembleSystemPrompt(SystemPromptInputs{
+			Spec:                 a.Spec,
+			Tools:                a.Tools,
+			Bank:                 a.Memory,
+			InstructionsRendered: a.instructionsRendered,
+			Iteration:            iter,
+			Options:              promptOpts,
+		})
+		if !a.breakdownLogged {
+			debugLogBreakdown(breakdown)
+			a.breakdownLogged = true
+		}
 		// Plan prepend (Phase 18): when the agent has populated a plan
 		// for this session, include a short summary at the top of the
 		// system prompt so the model carries it across iterations and
@@ -309,8 +510,8 @@ func (a *AgentLoop) Run(ctx context.Context) (*Result, error) {
 			a.extraSystemNote = "" // single-shot: clear after one use
 		}
 
-		resp, err := a.Provider.Complete(ctx, provider.Request{
-			Model:     a.Model,
+		resp, err := iterProvider.Complete(ctx, provider.Request{
+			Model:     iterModel,
 			System:    iterSystem,
 			Messages:  messages,
 			Tools:     tools,
@@ -318,19 +519,38 @@ func (a *AgentLoop) Run(ctx context.Context) (*Result, error) {
 		})
 		if err != nil {
 			a.emit(event.SourceSystem, event.KindNote, "run_error", map[string]any{"err": err.Error()})
-			return &Result{Status: "error", Iterations: iter, Tokens: totalTokens, CostUSD: totalCostUSD, FinalError: err, FinalText: lastAssistantText}, err
+			// Provider errors short-circuit the post-loop verify (we don't
+			// know if the workspace is in a coherent state) and return
+			// directly the same way the original code did.
+			return &Result{Status: "error", Iterations: iter, Tokens: totalTokens, CostUSD: totalCostUSD, FinalError: err, FinalText: lastAssistantText, ByRole: byRole}, err
 		}
 		totalTokens += resp.InputTokens + resp.OutputTokens
 		totalInTokens += resp.InputTokens
 		totalOutTokens += resp.OutputTokens
+		var iterCostUSD float64
 		if a.CostCalculator != nil {
-			if usd, ok := a.CostCalculator.Estimate(a.Model, cost.Usage{
+			if usd, ok := a.CostCalculator.Estimate(iterModel, cost.Usage{
 				InputTokens:  resp.InputTokens,
 				OutputTokens: resp.OutputTokens,
 			}); ok {
+				iterCostUSD = usd
 				totalCostUSD += usd
 			}
 		}
+		// Aggregate per-role usage for Result.ByRole. Even when CostCalculator
+		// is nil (typical for cost-uncapped runs), the token counters still
+		// flow through so users get a tokens-by-role view; cost stays 0
+		// until they configure cost enforcement (or hit `gil cost`, which
+		// re-runs the calculator over the persisted events).
+		byRole = recordRoleUsage(byRole, role, resp, iterCostUSD)
+		// Capture for next iteration's classifyTurn input. We snapshot a
+		// COPY of the ToolCalls slice because the dispatcher below will
+		// keep iterating over resp.ToolCalls and we don't want the next
+		// turn's classify to see a half-mutated list (resp.ToolCalls is
+		// not mutated today, but future-proofing keeps this honest).
+		copyResp := resp
+		lastResponse = &copyResp
+		lastRole = role
 
 		a.emit(event.SourceAgent, event.KindObservation, "provider_response", map[string]any{
 			"text_len":      len(resp.Text),
@@ -340,12 +560,29 @@ func (a *AgentLoop) Run(ctx context.Context) (*Result, error) {
 			"stop_reason":   resp.StopReason,
 		})
 
+		// Capture the agent's text BEFORE the budget check so that even
+		// when the loop exits via the reserve guard on this iteration, the
+		// returned Result.FinalText carries the agent's most recent
+		// summary (callers — esp. the subagent shim — surface this to the
+		// user as Summary). Without the early capture, a budget hit on
+		// the same turn the agent finally said end_turn would land with
+		// FinalText="".
+		if resp.Text != "" {
+			lastAssistantText = resp.Text
+		}
+
 		// Budget enforcement: emit warning at the 75% threshold (once per
-		// dimension), and stop with status=budget_exhausted at >=100%.
-		// Both emissions are additive — existing event consumers ignoring
-		// these types keep working. Iteration cap remains the for-loop
-		// guard above; here we add token + cost dimensions.
+		// dimension), and stop with status=budget_exhausted at >=100% of
+		// the EFFECTIVE cap (max - reserve). The reserve is held back so
+		// the post-loop verify + closing summary turn still has room to
+		// run. The 75% warning + budget_exceeded event semantics are
+		// preserved verbatim — only the threshold value moves down by the
+		// reserve. The exit path used to early-return; now we record the
+		// reason in `exit` and break out of the loop so the post-loop
+		// verifier check fires.
 		if budgetMaxTokens > 0 {
+			// Warning still tracks the user's stated limit so meters in
+			// the TUI line up with the displayed cap.
 			frac := float64(totalTokens) / float64(budgetMaxTokens)
 			if !a.warnedTokens && frac >= 0.75 && frac < 1.0 {
 				a.warnedTokens = true
@@ -356,21 +593,19 @@ func (a *AgentLoop) Run(ctx context.Context) (*Result, error) {
 					"fraction": frac,
 				})
 			}
-			if frac >= 1.0 {
+			// The "stop now" trigger uses the EFFECTIVE cap so the
+			// reserve survives for the post-loop verify pass.
+			if totalTokens >= effectiveMaxTokens {
 				a.emit(event.SourceSystem, event.KindNote, "budget_exceeded", map[string]any{
-					"reason":   "tokens",
-					"used":     totalTokens,
-					"limit":    budgetMaxTokens,
-					"fraction": frac,
+					"reason":             "tokens",
+					"used":               totalTokens,
+					"limit":              budgetMaxTokens,
+					"effective_limit":    effectiveMaxTokens,
+					"reserve":            budgetReserveTokens,
+					"fraction":           frac,
 				})
-				return &Result{
-					Status:       "budget_exhausted",
-					Iterations:   iter,
-					Tokens:       totalTokens,
-					CostUSD:      totalCostUSD,
-					BudgetReason: "tokens",
-					FinalText:    lastAssistantText,
-				}, nil
+				exit = exitState{reason: "budget_tokens", iterations: iter}
+				break loop
 			}
 		}
 		if budgetMaxCostUSD > 0 {
@@ -391,14 +626,8 @@ func (a *AgentLoop) Run(ctx context.Context) (*Result, error) {
 					"limit":    budgetMaxCostUSD,
 					"fraction": frac,
 				})
-				return &Result{
-					Status:       "budget_exhausted",
-					Iterations:   iter,
-					Tokens:       totalTokens,
-					CostUSD:      totalCostUSD,
-					BudgetReason: "cost",
-					FinalText:    lastAssistantText,
-				}, nil
+				exit = exitState{reason: "budget_cost", iterations: iter}
+				break loop
 			}
 		}
 		_ = totalInTokens
@@ -503,14 +732,12 @@ func (a *AgentLoop) Run(ctx context.Context) (*Result, error) {
 						"threshold":  threshold,
 						"iterations": iter,
 					})
-					return &Result{
-						Status:     "stuck",
-						Iterations: iter,
-						Tokens:     totalTokens,
-						CostUSD:    totalCostUSD,
-						FinalError: errors.New("aborted: 3 unrecovered stuck signals"),
-						FinalText:  lastAssistantText,
-					}, nil
+					exit = exitState{
+						reason:     "stuck",
+						iterations: iter,
+						err:        errors.New("aborted: 3 unrecovered stuck signals"),
+					}
+					break loop
 				}
 			}
 		}
@@ -546,9 +773,16 @@ func (a *AgentLoop) Run(ctx context.Context) (*Result, error) {
 						Content: "Verification passed. Before declaring done, review the memory bank: is there anything from this run worth recording for future sessions? If yes, call memory_update once or twice now. If no, just reply with 'no update'.",
 					}
 					milestoneMsgs := append(messages[:len(messages):len(messages)], nudge)
-					mResp, mErr := a.Provider.Complete(ctx, provider.Request{
-						Model:     a.Model,
-						System:    system,
+					// Milestone is a one-off "any closing memory updates?"
+					// summary turn — route via RoleMain so it lands on the
+					// generalist default rather than the planner/editor
+					// specialists. Falls back to a.Provider/a.Model when no
+					// architect/coder split is wired.
+					milestoneProv := a.pickProvider(RoleMain)
+					milestoneModel := a.pickModel(RoleMain)
+					mResp, mErr := milestoneProv.Complete(ctx, provider.Request{
+						Model:     milestoneModel,
+						System:    iterSystem,
 						Messages:  milestoneMsgs,
 						Tools:     tools,
 						MaxTokens: 1024,
@@ -564,6 +798,20 @@ func (a *AgentLoop) Run(ctx context.Context) (*Result, error) {
 						})
 					} else {
 						totalTokens += mResp.InputTokens + mResp.OutputTokens
+						// Charge milestone tokens to the main role so
+						// Result.ByRole stays consistent with the global
+						// totalTokens / totalCostUSD counters.
+						var milestoneCostUSD float64
+						if a.CostCalculator != nil {
+							if usd, ok := a.CostCalculator.Estimate(milestoneModel, cost.Usage{
+								InputTokens:  mResp.InputTokens,
+								OutputTokens: mResp.OutputTokens,
+							}); ok {
+								milestoneCostUSD = usd
+								totalCostUSD += usd
+							}
+						}
+						byRole = recordRoleUsage(byRole, RoleMain, mResp, milestoneCostUSD)
 						a.emit(event.SourceAgent, event.KindObservation, "memory_milestone_response", map[string]any{
 							"tool_calls":  len(mResp.ToolCalls),
 							"stop_reason": mResp.StopReason,
@@ -618,7 +866,7 @@ func (a *AgentLoop) Run(ctx context.Context) (*Result, error) {
 						})
 					}
 				}
-				return &Result{Status: "done", Iterations: iter, Tokens: totalTokens, CostUSD: totalCostUSD, VerifyAll: results, FinalText: lastAssistantText}, nil
+				return &Result{Status: "done", Iterations: iter, Tokens: totalTokens, CostUSD: totalCostUSD, VerifyAll: results, FinalText: lastAssistantText, ByRole: byRole}, nil
 			}
 			// Feed verifier failures back as a user message and let agent continue.
 			messages = append(messages, provider.Message{
@@ -738,8 +986,95 @@ func (a *AgentLoop) Run(ctx context.Context) (*Result, error) {
 		}
 	}
 
-	a.emit(event.SourceSystem, event.KindNote, "run_max_iterations", map[string]any{"iterations": maxIter, "tokens": totalTokens})
-	return &Result{Status: "max_iterations", Iterations: maxIter, Tokens: totalTokens, CostUSD: totalCostUSD, FinalText: lastAssistantText}, nil
+	// Loop exited without an early-return done. If `exit.reason` is empty
+	// the for-counter ran out; otherwise it carries the reason set inside
+	// the loop body. Run a single best-effort verify pass so callers
+	// always see what state the workspace is in, then map (reason, verify)
+	// onto a final Result.
+	if exit.reason == "" {
+		exit = exitState{reason: "max_iter", iterations: maxIter}
+		a.emit(event.SourceSystem, event.KindNote, "run_max_iterations", map[string]any{"iterations": maxIter, "tokens": totalTokens})
+	}
+
+	// Always run a final verify pass on exit (Phase 19 fix). This covers
+	// the dogfood bug where budget exhaustion fired before any verify
+	// could run, leaving the user blind to whether the work was actually
+	// green. The verifier itself is shell-only (no LLM cost), and the
+	// reserve we held back from the budget is what makes this safe.
+	verifyResults, verifyAllPass := a.runFinalVerify(ctx)
+
+	finalStatus := ""
+	finalErr := exit.err
+	switch exit.reason {
+	case "budget_tokens", "budget_cost":
+		// New three-way classification:
+		//   - verify pass after budget hit  → budget_exhausted_verify_passed
+		//     (best-effort: agent's prior edits already satisfied checks)
+		//   - verify fail after budget hit  → budget_exhausted_verify_failed
+		//   - no verifier checks at all     → keep legacy "budget_exhausted"
+		//     so older test fixtures + dashboards keep matching.
+		if len(verifyResults) == 0 {
+			finalStatus = "budget_exhausted"
+		} else if verifyAllPass {
+			finalStatus = "budget_exhausted_verify_passed"
+		} else {
+			finalStatus = "budget_exhausted_verify_failed"
+		}
+	case "stuck":
+		finalStatus = "stuck"
+	case "max_iter":
+		finalStatus = "max_iterations"
+	default:
+		finalStatus = exit.reason
+	}
+
+	budgetReason := ""
+	switch exit.reason {
+	case "budget_tokens":
+		budgetReason = "tokens"
+	case "budget_cost":
+		budgetReason = "cost"
+	}
+
+	return &Result{
+		Status:       finalStatus,
+		Iterations:   exit.iterations,
+		Tokens:       totalTokens,
+		CostUSD:      totalCostUSD,
+		VerifyAll:    verifyResults,
+		FinalError:   finalErr,
+		FinalText:    lastAssistantText,
+		BudgetReason: budgetReason,
+		ByRole:       byRole,
+	}, nil
+}
+
+// runFinalVerify runs the spec's verifier checks once on exit and emits
+// verify_run + per-result events. Returns nil + true when there's no
+// verifier wired or when there are no checks defined (vacuously pass —
+// nothing to verify, so status mapping treats it the same as "no
+// verifier signal" and falls back to the legacy budget_exhausted /
+// max_iterations status). Errors from individual checks become
+// non-passing entries; we don't surface a Go error from this helper.
+func (a *AgentLoop) runFinalVerify(ctx context.Context) ([]verify.Result, bool) {
+	if a.Verifier == nil {
+		return nil, true
+	}
+	checks := a.Spec.GetVerification().GetChecks()
+	if len(checks) == 0 {
+		return nil, true
+	}
+	a.emit(event.SourceSystem, event.KindAction, "verify_run", map[string]any{"final": true})
+	results, allPass := a.Verifier.RunAll(ctx, checks)
+	for _, vr := range results {
+		a.emit(event.SourceEnvironment, event.KindObservation, "verify_result", map[string]any{
+			"name":      vr.Name,
+			"passed":    vr.Passed,
+			"exit_code": vr.ExitCode,
+			"final":     true,
+		})
+	}
+	return results, allPass
 }
 
 // SubagentConfig parameterises a sub-loop spawn. Used by both stuck-recovery
@@ -984,64 +1319,39 @@ func (s *subagentRunnerAdapter) RunSubagentWithConfig(ctx context.Context, cfg t
 	return out, err
 }
 
+// buildSystemPrompt is a thin compatibility shim around assembleSystemPrompt
+// preserved for tests that predate the dedicated SystemPromptInputs struct.
+// New call sites should use assembleSystemPrompt directly. Iteration=0
+// signals "act as late-iter" so the memory bank is included (the lazy-mem
+// rule only applies inside Run()'s actual loop).
 func buildSystemPrompt(spec *gilv1.FrozenSpec, tools []tool.Tool, bank *memory.Bank, instructionsSection string) string {
-	goal := "(no goal specified)"
-	if spec != nil && spec.Goal != nil {
-		goal = spec.Goal.OneLiner
-	}
+	out, _ := assembleSystemPrompt(SystemPromptInputs{
+		Spec:                 spec,
+		Tools:                tools,
+		Bank:                 bank,
+		InstructionsRendered: instructionsSection,
+		Iteration:            0,
+	})
+	return out
+}
 
-	var toolList string
-	for _, t := range tools {
-		toolList += fmt.Sprintf("- %s: %s\n", t.Name(), t.Description())
-	}
-
-	var checkList string
-	if spec != nil && spec.Verification != nil {
-		for _, c := range spec.Verification.Checks {
-			checkList += fmt.Sprintf("- %s: `%s`\n", c.Name, c.Command)
+// resolveSystemPromptOptions merges the AgentLoop's runtime override
+// (a.SystemPromptOpts) with the spec's run.system_prompt table. Field
+// semantics: any true on either side wins. We don't need a tri-state
+// here because both knobs are diet flags — turning them on can never
+// hurt correctness, and a "force-off" override would be surprising.
+func (a *AgentLoop) resolveSystemPromptOptions() SystemPromptOptions {
+	out := a.SystemPromptOpts
+	if a.Spec != nil && a.Spec.Run != nil && a.Spec.Run.SystemPrompt != nil {
+		sp := a.Spec.Run.SystemPrompt
+		if sp.Minimal {
+			out.Minimal = true
+		}
+		if sp.NoMemory {
+			out.NoMemory = true
 		}
 	}
-	if checkList == "" {
-		checkList = "(no checks defined — any non-tool response will be considered done)\n"
-	}
-
-	base := fmt.Sprintf(`You are an autonomous coding agent. Your job is to make all verification checks pass.
-
-Goal: %s
-
-Verification checks (all must pass):
-%s
-Available tools:
-%s
-Strategy:
-1. Use tools to inspect, write, or run code.
-2. Verify your work matches the check commands above before stopping.
-3. When you believe all checks will pass, stop calling tools — the system will run the checks.
-4. If any check fails, you'll receive the output and should fix the issue.
-
-Be decisive. Don't ask the user — they're not present. Make reasonable assumptions and act.`, goal, checkList, toolList)
-
-	// Order is fixed: base → instructions (AGENTS.md/CLAUDE.md/cursor)
-	// → memory bank. Instructions sit between base and bank because
-	// they're persistent project context (model should read them once
-	// per run, never per-iteration), whereas the bank can churn between
-	// iterations as the agent updates progress.md.
-	out := base
-	if instructionsSection != "" {
-		out += "\n\n## Project Instructions\n\nThe following content was discovered from AGENTS.md, CLAUDE.md, and/or .cursor/rules/*.mdc files in this workspace and its ancestors. Treat it as durable project conventions and persona signals from the user.\n\n" + instructionsSection
-	}
-	if bank == nil {
-		return out
-	}
-	bankSection, err := buildMemoryBankSection(bank)
-	if err != nil {
-		// Soft failure: skip prepend, log nothing here (caller may emit event)
-		return out
-	}
-	if bankSection == "" {
-		return out
-	}
-	return out + "\n\n" + bankSection
+	return out
 }
 
 // loadInstructions populates a.instructionsRendered exactly once per
@@ -1376,4 +1686,156 @@ func estimateMessagesTokens(msgs []provider.Message) int64 {
 		}
 	}
 	return total
+}
+
+// execToolNames is the set of tool names we treat as "execution" calls
+// for classifyTurn. A response whose tool calls are 100% drawn from this
+// set is routed to RoleEditor — the cheap+fast "coder" model in aider's
+// architect/coder pair. Anything that isn't an execution tool (subagent,
+// repomap, plan, web_search, lsp, etc.) keeps the turn on RoleMain so
+// the model that gets to think doesn't suddenly switch mid-investigation.
+var execToolNames = map[string]bool{
+	"bash":          true,
+	"edit":          true,
+	"write_file":    true,
+	"apply_patch":   true,
+	"read_file":     true, // read_file is read-only but called as part of edit loops
+	"memory_update": true,
+}
+
+// classifyTurn picks the model role for the next iteration. Inputs:
+//
+//   - iterIdx: the upcoming iteration number, 0-indexed (turn 1 == 0).
+//   - lastResponse: the previous iteration's provider response, or nil
+//     when iterIdx == 0.
+//
+// Rules (highest priority first):
+//
+//  1. iterIdx == 0  → RolePlanner. The very first turn always plans
+//     before any tool fires.
+//  2. lastResponse called the `plan` tool → RolePlanner. The agent is
+//     still iterating on its plan, keep it on the strong model.
+//  3. lastResponse called ONLY tools in execToolNames → RoleEditor.
+//     Tool-heavy execution turns hand off to the cheap+fast model.
+//  4. Otherwise (mixed text+tools, no tools, or non-exec tools) →
+//     RoleMain. The "ambiguous" bucket — keeps the run on the default
+//     model until classification is unambiguous again.
+//
+// The function is pure (no AgentLoop reference); it's exported so tests
+// can verify routing in isolation. When AgentLoop.Providers/Models is
+// empty for the picked role, the runner falls back to .Provider/.Model
+// — see pickProvider / pickModel below.
+func classifyTurn(iterIdx int, lastResponse *provider.Response) string {
+	if iterIdx == 0 {
+		return RolePlanner
+	}
+	if lastResponse == nil {
+		return RoleMain
+	}
+	if hasPlanToolCall(lastResponse) {
+		return RolePlanner
+	}
+	if hasOnlyExecTools(lastResponse) {
+		return RoleEditor
+	}
+	return RoleMain
+}
+
+// hasPlanToolCall returns true when any tool call in the response is the
+// `plan` tool. The plan tool is the agent-visible TODO checklist; any
+// invocation signals "still planning, not yet executing".
+func hasPlanToolCall(resp *provider.Response) bool {
+	if resp == nil {
+		return false
+	}
+	for _, tc := range resp.ToolCalls {
+		if tc.Name == "plan" {
+			return true
+		}
+	}
+	return false
+}
+
+// hasOnlyExecTools returns true when ALL tool calls in the response come
+// from execToolNames AND there is at least one tool call. An empty
+// tool-call list returns false (a no-tool response is the verifier-trigger
+// path, not an "execution" turn).
+func hasOnlyExecTools(resp *provider.Response) bool {
+	if resp == nil || len(resp.ToolCalls) == 0 {
+		return false
+	}
+	for _, tc := range resp.ToolCalls {
+		if !execToolNames[tc.Name] {
+			return false
+		}
+	}
+	return true
+}
+
+// pickProvider returns the provider for the given role, falling back to
+// a.Provider when the role isn't wired in a.Providers. nil is never
+// returned for a sane AgentLoop (a.Provider is required) — but we still
+// double-check so a misconfigured map doesn't panic mid-iteration.
+func (a *AgentLoop) pickProvider(role string) provider.Provider {
+	if a.Providers != nil {
+		if p, ok := a.Providers[role]; ok && p != nil {
+			return p
+		}
+	}
+	return a.Provider
+}
+
+// pickModel returns the model id for the given role, falling back to
+// a.Model when not set in a.Models. Empty role string → a.Model.
+func (a *AgentLoop) pickModel(role string) string {
+	if a.Models != nil {
+		if m, ok := a.Models[role]; ok && m != "" {
+			return m
+		}
+	}
+	return a.Model
+}
+
+// recordRoleUsage adds the given provider response to the per-role
+// counters in byRole, allocating the map on first use. The caller is
+// responsible for resolving the per-role costUSD via the same Calculator
+// the global budget uses (so role aggregates and the global total stay
+// consistent).
+func recordRoleUsage(byRole map[string]RoleUsage, role string, resp provider.Response, costUSD float64) map[string]RoleUsage {
+	if byRole == nil {
+		byRole = map[string]RoleUsage{}
+	}
+	cur := byRole[role]
+	cur.Calls++
+	cur.InputTokens += resp.InputTokens
+	cur.OutputTokens += resp.OutputTokens
+	cur.CostUSD += costUSD
+	byRole[role] = cur
+	return byRole
+}
+
+// modelSwitchReason produces the human-readable explanation that ships
+// in the model_switched event payload. Useful for TUI breadcrumbs and
+// post-hoc debugging — "why did we suddenly switch to qwen for turn 7?".
+//
+// The string is intentionally short (no period) and stable across runs
+// so log-grep tooling can rely on the wording.
+func modelSwitchReason(iterIdx int, lastResponse *provider.Response, role string) string {
+	if iterIdx == 0 {
+		return "first_turn"
+	}
+	if hasPlanToolCall(lastResponse) {
+		return "plan_tool_call"
+	}
+	if hasOnlyExecTools(lastResponse) {
+		return "tool_heavy"
+	}
+	switch role {
+	case RolePlanner:
+		return "planner_default"
+	case RoleEditor:
+		return "editor_default"
+	default:
+		return "ambiguous_turn"
+	}
 }
