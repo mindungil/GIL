@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -204,6 +205,163 @@ func newServer(dbPath, sockPath, sessionsBase, authFile string, authMW *auth.Mid
 						}},
 						StopReason: "tool_use",
 					},
+				}), "mock-model", nil
+			case "run-webfetch":
+				// Phase 18 Track B e2e: agent calls web_fetch on a URL
+				// passed via GIL_MOCK_WEBFETCH_URL (set by
+				// phase18_webfetch_test.sh to point at a local Python
+				// http.server), inspects the result, then ends the
+				// turn. Verifier just passes — assertions live in the
+				// bash script which greps the event log for tool_result
+				// content matching the fixture's title and converted
+				// markdown.
+				url := os.Getenv("GIL_MOCK_WEBFETCH_URL")
+				if url == "" {
+					url = "http://127.0.0.1:0/missing"
+				}
+				input, _ := json.Marshal(map[string]any{"url": url})
+				return provider.NewMockToolProvider([]provider.MockTurn{
+					{
+						Text: "Fetching the docs page.",
+						ToolCalls: []provider.ToolCall{{
+							ID: "wf1", Name: "web_fetch", Input: input,
+						}},
+						StopReason: "tool_use",
+					},
+					{
+						Text:       "Docs read; nothing else needed.",
+						StopReason: "end_turn",
+					},
+				}), "mock-model", nil
+			case "run-lsp":
+				// Phase 18 Track C e2e: agent calls the lsp tool with the
+				// four operations the smoke test exercises (definition,
+				// references, hover, document_symbols). The file +
+				// line/column come from env vars set by the e2e script
+				// (which knows where the fixture file's symbols live).
+				// Verifier just passes — assertions live in the bash
+				// script which greps the event log for tool_result
+				// content matching the fixture's definition/reference
+				// targets.
+				file := os.Getenv("GIL_MOCK_LSP_FILE")
+				if file == "" {
+					file = "use.go"
+				}
+				line := 3
+				col := 28
+				if v, err := strconv.Atoi(os.Getenv("GIL_MOCK_LSP_LINE")); err == nil && v > 0 {
+					line = v
+				}
+				if v, err := strconv.Atoi(os.Getenv("GIL_MOCK_LSP_COL")); err == nil && v > 0 {
+					col = v
+				}
+				defInput, _ := json.Marshal(map[string]any{"operation": "definition", "file": file, "line": line, "column": col})
+				refInput, _ := json.Marshal(map[string]any{"operation": "references", "file": file, "line": line, "column": col})
+				hoverInput, _ := json.Marshal(map[string]any{"operation": "hover", "file": file, "line": line, "column": col})
+				docInput, _ := json.Marshal(map[string]any{"operation": "document_symbols", "file": file})
+				return provider.NewMockToolProvider([]provider.MockTurn{
+					{
+						Text:       "Looking up the definition.",
+						ToolCalls:  []provider.ToolCall{{ID: "lsp1", Name: "lsp", Input: defInput}},
+						StopReason: "tool_use",
+					},
+					{
+						Text:       "Finding references.",
+						ToolCalls:  []provider.ToolCall{{ID: "lsp2", Name: "lsp", Input: refInput}},
+						StopReason: "tool_use",
+					},
+					{
+						Text:       "Reading hover docs.",
+						ToolCalls:  []provider.ToolCall{{ID: "lsp3", Name: "lsp", Input: hoverInput}},
+						StopReason: "tool_use",
+					},
+					{
+						Text:       "Listing symbols.",
+						ToolCalls:  []provider.ToolCall{{ID: "lsp4", Name: "lsp", Input: docInput}},
+						StopReason: "tool_use",
+					},
+					{
+						Text:       "Done.",
+						StopReason: "end_turn",
+					},
+				}), "mock-model", nil
+			case "run-plan":
+				// Phase 18 Track A e2e: scripted plan-tool flow. The
+				// agent (1) sets a 3-item plan, (2) does some work and
+				// marks items completed via update_item, (3) ends.
+				return provider.NewMockToolProvider([]provider.MockTurn{
+					// Turn 1: write the plan.
+					{
+						Text: "Writing initial plan.",
+						ToolCalls: []provider.ToolCall{{
+							ID: "p1", Name: "plan",
+							Input: json.RawMessage(`{
+                                "operation":"set",
+                                "items":[
+                                    {"text":"create plan-step-1.txt","status":"pending"},
+                                    {"text":"create plan-step-2.txt","status":"pending"},
+                                    {"text":"create plan-step-3.txt","status":"pending"}
+                                ]
+                            }`),
+						}},
+						StopReason: "tool_use",
+					},
+					// Turn 2: start step 1 (mark in_progress).
+					{
+						Text: "Starting step 1.",
+						ToolCalls: []provider.ToolCall{{
+							ID: "p2", Name: "plan",
+							Input: json.RawMessage(`{"operation":"update_item","id":"i1","status":"in_progress"}`),
+						}},
+						StopReason: "tool_use",
+					},
+					// Turn 3: do step 1 (write the file).
+					{
+						Text: "Creating plan-step-1.txt",
+						ToolCalls: []provider.ToolCall{{
+							ID: "w1", Name: "write_file",
+							Input: json.RawMessage(`{"path":"plan-step-1.txt","content":"step 1 done\n"}`),
+						}},
+						StopReason: "tool_use",
+					},
+					// Turn 4: mark step 1 done; start step 2.
+					{
+						Text: "Step 1 done; starting step 2.",
+						ToolCalls: []provider.ToolCall{
+							{ID: "p3", Name: "plan", Input: json.RawMessage(`{"operation":"update_item","id":"i1","status":"completed"}`)},
+							{ID: "p4", Name: "plan", Input: json.RawMessage(`{"operation":"update_item","id":"i2","status":"in_progress"}`)},
+						},
+						StopReason: "tool_use",
+					},
+					// Turn 5: do step 2.
+					{
+						Text: "Creating plan-step-2.txt",
+						ToolCalls: []provider.ToolCall{{
+							ID: "w2", Name: "write_file",
+							Input: json.RawMessage(`{"path":"plan-step-2.txt","content":"step 2 done\n"}`),
+						}},
+						StopReason: "tool_use",
+					},
+					// Turn 6: mark step 2 done; do step 3 directly.
+					{
+						Text: "Step 2 done; finishing step 3.",
+						ToolCalls: []provider.ToolCall{
+							{ID: "p5", Name: "plan", Input: json.RawMessage(`{"operation":"update_item","id":"i2","status":"completed"}`)},
+							{ID: "w3", Name: "write_file", Input: json.RawMessage(`{"path":"plan-step-3.txt","content":"step 3 done\n"}`)},
+						},
+						StopReason: "tool_use",
+					},
+					// Turn 7: mark step 3 completed and stop.
+					{
+						Text: "All done.",
+						ToolCalls: []provider.ToolCall{{
+							ID: "p6", Name: "plan",
+							Input: json.RawMessage(`{"operation":"update_item","id":"i3","status":"completed"}`),
+						}},
+						StopReason: "tool_use",
+					},
+					// Turn 8: end.
+					{Text: "Plan complete.", StopReason: "end_turn"},
 				}), "mock-model", nil
 			default:
 				// Text-only Mock for InterviewService scenarios
