@@ -2,6 +2,7 @@ package stuck
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/mindungil/gil/core/event"
@@ -264,11 +265,246 @@ func TestPattern_String(t *testing.T) {
 		{PatternMonologue, "Monologue"},
 		{PatternPingPong, "PingPong"},
 		{PatternContextWindowError, "ContextWindowError"},
+		{PatternNoProgress, "NoProgress"},
 	}
 	for _, c := range cases {
 		if got := c.p.String(); got != c.want {
 			t.Errorf("Pattern(%d).String() = %q, want %q", c.p, got, c.want)
 		}
+	}
+}
+
+// --------------------------------------------------------------------------
+// PatternNoProgress
+// --------------------------------------------------------------------------
+
+// iterStart is a small helper for NoProgress tests that emits an
+// iteration_start event with the given iter number.
+func iterStart(iter int) event.Event {
+	return ev("iteration_start", map[string]any{"iter": iter})
+}
+
+// verifyRun emits a verify_run event followed by N verify_result events
+// where the first `passing` results have passed=true and the rest are
+// failed. The detector reads the boundary as: verify_run starts a verify
+// span, and any verify_result before the next non-verify event counts.
+func verifyRun(passing, total int) []event.Event {
+	out := []event.Event{ev("verify_run", nil)}
+	for i := 0; i < total; i++ {
+		out = append(out, ev("verify_result", map[string]any{
+			"name":   "check" + itoa(i),
+			"passed": i < passing,
+		}))
+	}
+	return out
+}
+
+// TestDetector_NoProgress_Fires_NoFilesModified covers the canonical Run 8
+// scenario: 4 iterations, identical verifier passing count, zero successful
+// edits — the pattern fires.
+func TestDetector_NoProgress_Fires_NoFilesModified(t *testing.T) {
+	d := &Detector{}
+	var events []event.Event
+	for i := 1; i <= 4; i++ {
+		events = append(events, iterStart(i))
+		// Vary the actions: read_file with different paths each iter so
+		// existing patterns (RepeatedAction*, PingPong) don't fire.
+		events = append(events, toolCall("read_file", `{"path":"a`+itoa(i)+`.txt"}`))
+		events = append(events, toolResult("read_file", "ok", false))
+		events = append(events, verifyRun(0, 2)...)
+	}
+	sigs := d.Check(events)
+	if !hasPattern(sigs, PatternNoProgress) {
+		t.Fatalf("expected NoProgress, got %v", sigs)
+	}
+}
+
+// TestDetector_NoProgress_Fires_FileChurn covers the second trigger arm:
+// same file edited K times across the window with no verifier improvement.
+func TestDetector_NoProgress_Fires_FileChurn(t *testing.T) {
+	d := &Detector{}
+	var events []event.Event
+	for i := 1; i <= 4; i++ {
+		events = append(events, iterStart(i))
+		events = append(events, toolCall("write_file", `{"path":"main.go","content":"v`+itoa(i)+`"}`))
+		events = append(events, toolResult("write_file", "wrote main.go", false))
+		events = append(events, verifyRun(0, 2)...)
+	}
+	sigs := d.Check(events)
+	if !hasPattern(sigs, PatternNoProgress) {
+		t.Fatalf("expected NoProgress (churn), got %v", sigs)
+	}
+	for _, s := range sigs {
+		if s.Pattern == PatternNoProgress {
+			if !strings.Contains(s.Detail, "main.go") {
+				t.Errorf("expected detail to mention main.go, got %q", s.Detail)
+			}
+			if s.Count != 4 {
+				t.Errorf("expected Count=4, got %d", s.Count)
+			}
+		}
+	}
+}
+
+// TestDetector_NoProgress_DoesNotFire_VerifyImproving asserts that strict
+// improvement in passing-check count suppresses the signal even when the
+// other conditions would match.
+func TestDetector_NoProgress_DoesNotFire_VerifyImproving(t *testing.T) {
+	d := &Detector{}
+	var events []event.Event
+	for i := 1; i <= 4; i++ {
+		events = append(events, iterStart(i))
+		events = append(events, toolCall("write_file", `{"path":"x.go","content":"v"}`))
+		events = append(events, toolResult("write_file", "wrote x.go", false))
+		// Improving by one each iter: 0,1,2,3 out of 5
+		events = append(events, verifyRun(i-1, 5)...)
+	}
+	sigs := d.Check(events)
+	if hasPattern(sigs, PatternNoProgress) {
+		t.Fatalf("expected NO NoProgress when verify is improving, got %v", sigs)
+	}
+}
+
+// TestDetector_NoProgress_Abstains_NoVerifyEvents asserts that the
+// detector keeps quiet when no verify_run has fired at all in the window.
+// This is the early-iter safety: we cannot claim "no progress" without a
+// progress signal to compare.
+func TestDetector_NoProgress_Abstains_NoVerifyEvents(t *testing.T) {
+	d := &Detector{}
+	var events []event.Event
+	for i := 1; i <= 4; i++ {
+		events = append(events, iterStart(i))
+		// Vary the actions and DO modify a file each iter; no verify_run.
+		events = append(events, toolCall("write_file", `{"path":"y.go","content":"v"}`))
+		events = append(events, toolResult("write_file", "wrote y.go", false))
+	}
+	sigs := d.Check(events)
+	if hasPattern(sigs, PatternNoProgress) {
+		t.Fatalf("expected NO NoProgress when no verify events, got %v", sigs)
+	}
+}
+
+// TestDetector_NoProgress_BelowThreshold asserts 3 iters (< default 4)
+// does not fire even when all other conditions hold.
+func TestDetector_NoProgress_BelowThreshold(t *testing.T) {
+	d := &Detector{}
+	var events []event.Event
+	for i := 1; i <= 3; i++ {
+		events = append(events, iterStart(i))
+		events = append(events, toolCall("write_file", `{"path":"z.go","content":"v"}`))
+		events = append(events, toolResult("write_file", "wrote z.go", false))
+		events = append(events, verifyRun(0, 2)...)
+	}
+	sigs := d.Check(events)
+	if hasPattern(sigs, PatternNoProgress) {
+		t.Fatalf("expected NO NoProgress for 3 iters (below threshold), got %v", sigs)
+	}
+}
+
+// TestDetector_NoProgress_CustomThreshold verifies the configurable knob.
+func TestDetector_NoProgress_CustomThreshold(t *testing.T) {
+	// With Threshold=6, four iters should NOT fire, but six should.
+	d := &Detector{NoProgressThreshold: 6, Window: 200}
+	var events []event.Event
+	for i := 1; i <= 4; i++ {
+		events = append(events, iterStart(i))
+		events = append(events, toolCall("read_file", `{"path":"a`+itoa(i)+`.txt"}`))
+		events = append(events, toolResult("read_file", "ok", false))
+		events = append(events, verifyRun(0, 2)...)
+	}
+	if hasPattern(d.Check(events), PatternNoProgress) {
+		t.Fatalf("expected no fire with Threshold=6 and 4 iters")
+	}
+	for i := 5; i <= 6; i++ {
+		events = append(events, iterStart(i))
+		events = append(events, toolCall("read_file", `{"path":"a`+itoa(i)+`.txt"}`))
+		events = append(events, toolResult("read_file", "ok", false))
+		events = append(events, verifyRun(0, 2)...)
+	}
+	if !hasPattern(d.Check(events), PatternNoProgress) {
+		t.Fatalf("expected NoProgress with Threshold=6 and 6 iters, got %v", d.Check(events))
+	}
+}
+
+// TestDetector_NoProgress_Run8Reproduction reproduces the self-dogfood
+// Run 8 scenario: agent makes varied tool calls (read_file → bash →
+// permission-denied delete → another bash → ...) across 12 iterations,
+// verifier never improves (impossible task). Ensures NoProgress fires
+// well before iteration 12.
+func TestDetector_NoProgress_Run8Reproduction(t *testing.T) {
+	d := &Detector{Window: 500}
+	// Build a window with 12 iters of varied futile actions. Every iter
+	// emits a verify_run with the same passing count (0/3) to simulate
+	// "agent thinks it's done after each turn but verifier never passes
+	// any check".
+	varied := []func(int) []event.Event{
+		func(i int) []event.Event {
+			return []event.Event{
+				toolCall("read_file", `{"path":"file`+itoa(i)+`.txt"}`),
+				toolResult("read_file", "contents", false),
+			}
+		},
+		func(i int) []event.Event {
+			return []event.Event{
+				toolCall("bash", `{"command":"ls -la /tmp/`+itoa(i)+`"}`),
+				toolResult("bash", "ok", false),
+			}
+		},
+		func(i int) []event.Event {
+			return []event.Event{
+				toolCall("bash", `{"command":"rm /etc/passwd-`+itoa(i)+`"}`),
+				toolResult("bash", "permission denied", true),
+			}
+		},
+		func(i int) []event.Event {
+			return []event.Event{
+				toolCall("bash", `{"command":"go build ./internal/`+itoa(i)+`"}`),
+				toolResult("bash", "build failed", true),
+			}
+		},
+	}
+
+	var events []event.Event
+	for i := 1; i <= 12; i++ {
+		events = append(events, iterStart(i))
+		events = append(events, varied[i%len(varied)](i)...)
+		// verify never improves — 0 out of 3 passing every iter
+		events = append(events, verifyRun(0, 3)...)
+	}
+
+	sigs := d.Check(events)
+	if !hasPattern(sigs, PatternNoProgress) {
+		t.Fatalf("expected NoProgress on Run 8 reproduction, got %v", sigs)
+	}
+	// Sanity: existing patterns should NOT fire (varied actions, no churn,
+	// no monologue, no ping-pong).
+	for _, s := range sigs {
+		switch s.Pattern {
+		case PatternRepeatedActionObservation, PatternPingPong:
+			t.Errorf("Run 8 should not trigger %s (varied actions), got: %v", s.Pattern, s)
+		}
+	}
+}
+
+// TestDetector_NoProgress_FailedEditsDontCount asserts that an edit which
+// returned is_error=true does not contribute to the files-modified set.
+// The agent attempting and failing the same edit looks like RepeatedActionError;
+// NoProgress should focus on "real" successful changes.
+func TestDetector_NoProgress_FailedEditsDontCount(t *testing.T) {
+	d := &Detector{}
+	var events []event.Event
+	for i := 1; i <= 4; i++ {
+		events = append(events, iterStart(i))
+		// Failed edit each iter — different paths so RepeatedActionError doesn't fire.
+		events = append(events, toolCall("write_file", `{"path":"f`+itoa(i)+`.go","content":"v"}`))
+		events = append(events, toolResult("write_file", "permission denied", true))
+		events = append(events, verifyRun(0, 2)...)
+	}
+	sigs := d.Check(events)
+	// All edits failed → files set is empty → NoProgress fires (the
+	// "varied futile actions" case).
+	if !hasPattern(sigs, PatternNoProgress) {
+		t.Fatalf("expected NoProgress with failed edits (empty files set), got %v", sigs)
 	}
 }
 

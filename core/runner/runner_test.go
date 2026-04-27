@@ -2166,3 +2166,130 @@ func TestAgentLoop_MemoryBankAppearsAfterInstructions(t *testing.T) {
 	require.Greater(t, bankIdx, 0, "iter 2 expected memory bank content in system prompt")
 	require.Less(t, instrIdx, bankIdx, "instructions must precede memory bank")
 }
+
+// TestAgentLoop_NoProgress_FiresOnVariedFutileWork reproduces self-dogfood
+// Run 8: an agent that varies its actions every iteration but cannot make
+// progress on an impossible verification check. Each scripted turn ends
+// with end_turn so the verifier runs and emits verify_run/verify_result —
+// giving the NoProgress detector the per-iter signal it needs to compare
+// across iterations. The verifier never improves (single check that always
+// fails), and no successful file edits land, so NoProgress should fire and
+// the loop aborts via stuck_unrecovered before exhausting MaxIterations.
+func TestAgentLoop_NoProgress_FiresOnVariedFutileWork(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	dir := t.TempDir()
+
+	// Build a sequence of varied turns: each one ends with end_turn (no
+	// tool calls) so the verifier runs every iteration. The verifier
+	// always fails (passing=0), and no edit ever lands, so the agent's
+	// state never improves. Mix in some failed bash calls + reads so the
+	// existing repetition detectors stay quiet.
+	turns := []provider.MockTurn{}
+	for i := 0; i < 8; i++ {
+		// Iter Ai: a tool-use turn (varied), then iter Ai+1: an end_turn
+		// turn that lets the verifier fire.
+		turns = append(turns, provider.MockTurn{
+			Text: "trying approach " + fmt.Sprintf("%d", i),
+			ToolCalls: []provider.ToolCall{{
+				ID:    fmt.Sprintf("c%d", i),
+				Name:  "bash",
+				Input: json.RawMessage(fmt.Sprintf(`{"command":"echo attempt%d"}`, i)),
+			}},
+			StopReason: "tool_use",
+		})
+		turns = append(turns, provider.MockTurn{
+			Text:       "I think I'm done.",
+			StopReason: "end_turn",
+		})
+	}
+
+	mock := provider.NewMockToolProvider(turns)
+
+	spec := &gilv1.FrozenSpec{
+		Goal: &gilv1.Goal{OneLiner: "impossible task"},
+		Verification: &gilv1.Verification{
+			Checks: []*gilv1.Check{{
+				Name:             "never_passes",
+				Kind:             gilv1.CheckKind_SHELL,
+				Command:          "false",
+				ExpectedExitCode: 0,
+			}},
+		},
+		Budget: &gilv1.Budget{MaxIterations: 16},
+	}
+
+	tools := []tool.Tool{&tool.Bash{WorkingDir: dir}}
+
+	stream := event.NewStream()
+	sub := stream.Subscribe(512)
+	defer sub.Close()
+
+	loop := &AgentLoop{
+		Spec:           spec,
+		Provider:       mock,
+		Model:          "m",
+		Tools:          tools,
+		Verifier:       verify.NewRunner(dir),
+		Events:         stream,
+		StuckDetector:  &stuck.Detector{Window: 500},
+		StuckThreshold: 3,
+		// No StuckStrategy → every detection counts as unrecovered, so we
+		// abort fast when NoProgress hits the threshold.
+	}
+
+	var mu sync.Mutex
+	var collected []event.Event
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case e, ok := <-sub.Events():
+				if !ok {
+					return
+				}
+				mu.Lock()
+				collected = append(collected, e)
+				mu.Unlock()
+				if e.Type == "stuck_unrecovered" || e.Type == "run_done" || e.Type == "run_max_iterations" {
+					return
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	res, err := loop.Run(ctx)
+	require.NoError(t, err)
+	// Loop should abort via stuck (NoProgress), not via max_iterations.
+	require.Equal(t, "stuck", res.Status,
+		"expected stuck abort from NoProgress, got status=%s after %d iters", res.Status, res.Iterations)
+	require.Less(t, res.Iterations, 16, "expected early abort, got %d iters", res.Iterations)
+
+	select {
+	case <-done:
+	case <-time.After(1 * time.Second):
+	}
+
+	mu.Lock()
+	evs := collected
+	mu.Unlock()
+
+	// At least one stuck_detected with pattern=NoProgress must appear.
+	var noProgressDetections int
+	for _, e := range evs {
+		if e.Type != "stuck_detected" {
+			continue
+		}
+		var d map[string]any
+		require.NoError(t, json.Unmarshal(e.Data, &d))
+		if d["pattern"] == "NoProgress" {
+			noProgressDetections++
+		}
+	}
+	require.Greater(t, noProgressDetections, 0,
+		"expected at least one stuck_detected with pattern=NoProgress, events: %v", evs)
+}
