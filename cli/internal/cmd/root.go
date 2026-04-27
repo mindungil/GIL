@@ -151,6 +151,7 @@ func Root() *cobra.Command {
 	root.AddCommand(statsCmd())
 	root.AddCommand(mcpCmd())
 	root.AddCommand(permissionsCmd())
+	root.AddCommand(clarifyCmd())
 	root.AddCommand(updateCmd())
 	root.AddCommand(newCompletionCmd(root))
 	return root
