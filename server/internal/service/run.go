@@ -761,6 +761,12 @@ func (s *RunService) executeRun(
 	loop := runner.NewAgentLoop(spec, prov, model, tools, ver)
 	loop.Events = stream
 	loop.Memory = bank
+	// Tell the runner where the user's project lives so it can run the
+	// AGENTS.md / CLAUDE.md / .cursor/rules tree-walk and inject the
+	// resulting context into the system prompt. Empty workspaceDir leaves
+	// loadInstructions a no-op (the runner will not default to cwd, which
+	// would otherwise leak whatever directory gild was launched from).
+	loop.Workspace = workspaceDir
 
 	// Wire compact_now tool: must be added after loop is created so we can pass
 	// the loop itself as the CompactRequester. Appended last so it appears in
