@@ -209,14 +209,14 @@ func TestRenderSummary_NoPlan_OmitsPlanCell(t *testing.T) {
 // that summaryRowFromSession uses to populate PlanCompleted/PlanTotal.
 func TestLoadSessionPlanCounts_RoundTrip(t *testing.T) {
 	tmp := t.TempDir()
-	t.Setenv("XDG_DATA_HOME", tmp)
-	t.Setenv("XDG_CONFIG_HOME", tmp)
-	t.Setenv("XDG_STATE_HOME", tmp)
+	// FromEnv() checks GIL_HOME first; setting it pins the Data root
+	// to our tmp dir regardless of any global GIL_HOME in the env.
+	t.Setenv("GIL_HOME", tmp)
 
 	// Build a plan.json directly — we don't need the plan package here
 	// (the CLI must be tolerant of any conformant JSON shape).
 	id := "01TESTSESSION"
-	dir := filepath.Join(tmp, "gil", "sessions", id)
+	dir := filepath.Join(tmp, "data", "sessions", id)
 	require.NoError(t, os.MkdirAll(dir, 0o755))
 	planPath := filepath.Join(dir, "plan.json")
 	body := []byte(`{

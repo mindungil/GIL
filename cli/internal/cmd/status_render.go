@@ -37,6 +37,12 @@ func writeStatusVisual(w io.Writer, list []*sdk.Session, ascii bool) error {
 		return nil
 	}
 
+	total := len(list)
+	const maxRows = 10
+	if total > maxRows {
+		list = list[:maxRows]
+	}
+
 	fmt.Fprintln(w)
 	for _, s := range list {
 		if s == nil {
@@ -44,6 +50,12 @@ func writeStatusVisual(w io.Writer, list []*sdk.Session, ascii bool) error {
 		}
 		writeStatusCard(w, g, p, s)
 	}
+
+	if total > len(list) {
+		extra := total - len(list)
+		fmt.Fprintf(w, "   %s\n", p.Dim(fmt.Sprintf("›  + %d more", extra)))
+	}
+
 	fmt.Fprintln(w)
 	return nil
 }
