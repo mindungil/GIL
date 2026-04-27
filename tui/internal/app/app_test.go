@@ -62,6 +62,12 @@ func TestModel_View_EmptySessions(t *testing.T) {
 }
 
 func TestTruncate(t *testing.T) {
+	// Pin to Unicode so the canonical "…" ellipsis is exercised; ASCII
+	// mode is covered separately in glyph_test.go.
+	prev := IsAsciiMode()
+	SetAsciiMode(false)
+	defer SetAsciiMode(prev)
+
 	require.Equal(t, "abc", truncate("abc", 10))
 	require.Equal(t, "abcdefghi…", truncate("abcdefghijk", 10))
 	require.Equal(t, "abc", truncate("abcdef", 3))
