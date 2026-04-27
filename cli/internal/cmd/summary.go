@@ -2,14 +2,17 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"os/user"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/mindungil/gil/cli/internal/cmd/uistyle"
+	"github.com/mindungil/gil/core/paths"
 	"github.com/mindungil/gil/core/version"
 	"github.com/mindungil/gil/sdk"
 )
@@ -101,11 +104,18 @@ type summaryRow struct {
 	CostBudget     float64
 	BudgetExceeded bool
 	Goal           string
-	StuckNote      string  // "RepeatedAction (2/3)" or empty
+	StuckNote      string // "RepeatedAction (2/3)" or empty
+
+	// PlanCompleted / PlanTotal: when PlanTotal > 0 the iter cell
+	// is augmented with "plan C/T" so the user sees plan progress
+	// alongside the iter count. PlanTotal == 0 means "no plan yet"
+	// and the cell renders as before.
+	PlanCompleted int
+	PlanTotal     int
 }
 
 func summaryRowFromSession(s *sdk.Session) summaryRow {
-	return summaryRow{
+	row := summaryRow{
 		ID:             s.ID,
 		Status:         s.Status,
 		Iter:           s.CurrentIteration,
@@ -117,6 +127,14 @@ func summaryRowFromSession(s *sdk.Session) summaryRow {
 		BudgetExceeded: s.BudgetExceeded,
 		Goal:           s.GoalHint,
 	}
+	// Best-effort plan progress: read <SessionsDir>/<id>/plan.json
+	// directly. Failure or missing file → leave PlanTotal=0 so the
+	// renderer falls back to plain iter display.
+	if comp, total, ok := loadSessionPlanCounts(s.ID); ok {
+		row.PlanCompleted = comp
+		row.PlanTotal = total
+	}
+	return row
 }
 
 // renderSummary is the full no-arg layout. Any change here must be
@@ -257,11 +275,105 @@ func colourMarker(p uistyle.Palette, glyph, role string) string {
 // iterDisplay formats the iter column. RUNNING shows "iter/max"; DONE
 // shows just the final iter (max not meaningful post-finish). Matches
 // the spec mockup column alignment.
+//
+// Phase 18: when the row has a plan (PlanTotal > 0), append "plan C/T"
+// after the iter so a glance picks up "iter 23/100  plan 1/3". The
+// suffix is omitted when there's no plan, keeping the legacy column
+// width for plan-less sessions.
 func iterDisplay(r summaryRow) string {
+	base := fmt.Sprintf("%d", r.Iter)
 	if strings.EqualFold(r.Status, "RUNNING") {
-		return fmt.Sprintf("%d/%d", r.Iter, r.MaxIter)
+		base = fmt.Sprintf("%d/%d", r.Iter, r.MaxIter)
 	}
-	return fmt.Sprintf("%d", r.Iter)
+	if r.PlanTotal > 0 {
+		return fmt.Sprintf("%s  plan %d/%d", base, r.PlanCompleted, r.PlanTotal)
+	}
+	return base
+}
+
+// loadSessionPlanCounts reads <SessionsDir>/<sessionID>/plan.json and
+// returns (completed, total, ok). ok=false on any failure (missing
+// file, malformed JSON, no items) so callers can fall back to the
+// no-plan rendering. Sub-items count toward the totals — they're
+// independently checkable steps from the agent's perspective.
+func loadSessionPlanCounts(sessionID string) (completed, total int, ok bool) {
+	if sessionID == "" {
+		return 0, 0, false
+	}
+	layout, err := paths.FromEnv()
+	if err != nil {
+		return 0, 0, false
+	}
+	body, err := os.ReadFile(filepath.Join(layout.SessionsDir(), sessionID, "plan.json"))
+	if err != nil {
+		return 0, 0, false
+	}
+	var d struct {
+		Items []struct {
+			Status string `json:"status"`
+			Sub    []struct {
+				Status string `json:"status"`
+			} `json:"sub"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(body, &d); err != nil {
+		return 0, 0, false
+	}
+	if len(d.Items) == 0 {
+		return 0, 0, false
+	}
+	for _, it := range d.Items {
+		total++
+		if it.Status == "completed" {
+			completed++
+		}
+		for _, sub := range it.Sub {
+			total++
+			if sub.Status == "completed" {
+				completed++
+			}
+		}
+	}
+	return completed, total, true
+}
+
+// loadSessionPlanNext returns the text of the first non-completed
+// item in the plan (in_progress preferred over pending). Returns ""
+// when the plan is missing, malformed, or fully completed. Used by
+// `gil watch` to show "next:" alongside the plan progress ratio.
+func loadSessionPlanNext(sessionID string) string {
+	if sessionID == "" {
+		return ""
+	}
+	layout, err := paths.FromEnv()
+	if err != nil {
+		return ""
+	}
+	body, err := os.ReadFile(filepath.Join(layout.SessionsDir(), sessionID, "plan.json"))
+	if err != nil {
+		return ""
+	}
+	var d struct {
+		Items []struct {
+			Text   string `json:"text"`
+			Status string `json:"status"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(body, &d); err != nil {
+		return ""
+	}
+	// Prefer in_progress; fall back to first pending.
+	for _, it := range d.Items {
+		if it.Status == "in_progress" {
+			return it.Text
+		}
+	}
+	for _, it := range d.Items {
+		if it.Status != "completed" {
+			return it.Text
+		}
+	}
+	return ""
 }
 
 // shortID returns the first 6 chars of the ULID lowercased — enough

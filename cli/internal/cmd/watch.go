@@ -265,6 +265,19 @@ func (r *watchRenderer) render(sess *sdk.Session, evts []watchEvent, frame int) 
 	}
 	fmt.Fprintf(r.out, "   %s      %s\n", p.Bold("Stuck"), stuckStr)
 
+	// Plan row — only printed when the agent has populated a plan.
+	// The summary is "<C>/<T> done · <next pending text>" so a glance
+	// shows progress + what's coming up. No plan → row omitted (keeps
+	// legacy layout for sessions that never use plan).
+	if comp, total, ok := loadSessionPlanCounts(sess.ID); ok && total > 0 {
+		next := loadSessionPlanNext(sess.ID)
+		body := fmt.Sprintf("%d/%d done", comp, total)
+		if next != "" {
+			body += "  " + p.Dim(g.LightHRule+"  next: "+truncRune(next, 36))
+		}
+		fmt.Fprintf(r.out, "   %s       %s\n", p.Bold("Plan"), p.Surface(body))
+	}
+
 	fmt.Fprintln(r.out)
 
 	// --- Activity tail (last 5, newest first) ----------------------------
