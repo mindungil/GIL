@@ -88,10 +88,30 @@ message RestoreResponse {
   int32  total_checkpoints = 3;
 }
 
+// PermissionDecision encodes the user's full answer to a permission_ask,
+// including persistence intent. The legacy `allow` bool on
+// AnswerPermissionRequest carries only the once-tier outcome; clients that
+// support persistence (TUI modal) populate `decision` instead so the server
+// can record the rule in the per-session list (SESSION) or the on-disk
+// PersistentStore (ALWAYS).
+//
+// When `decision` is UNSPECIFIED the server falls back to `allow` for
+// backwards compatibility (existing CLI / e2e clients keep working).
+enum PermissionDecision {
+  PERMISSION_DECISION_UNSPECIFIED  = 0;
+  PERMISSION_DECISION_ALLOW_ONCE   = 1;
+  PERMISSION_DECISION_ALLOW_SESSION = 2;
+  PERMISSION_DECISION_ALLOW_ALWAYS = 3;
+  PERMISSION_DECISION_DENY_ONCE    = 4;
+  PERMISSION_DECISION_DENY_SESSION = 5;
+  PERMISSION_DECISION_DENY_ALWAYS  = 6;
+}
+
 message AnswerPermissionRequest {
   string session_id  = 1;
   string request_id  = 2;
-  bool   allow       = 3;
+  bool   allow       = 3;  // legacy: ONCE semantics; ignored when `decision` is set
+  PermissionDecision decision = 4;  // when non-UNSPECIFIED, takes priority over `allow`
 }
 
 message AnswerPermissionResponse {

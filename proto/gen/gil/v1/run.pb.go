@@ -22,6 +22,76 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+// PermissionDecision encodes the user's full answer to a permission_ask,
+// including persistence intent. The legacy `allow` bool on
+// AnswerPermissionRequest carries only the once-tier outcome; clients that
+// support persistence (TUI modal) populate `decision` instead so the server
+// can record the rule in the per-session list (SESSION) or the on-disk
+// PersistentStore (ALWAYS).
+//
+// When `decision` is UNSPECIFIED the server falls back to `allow` for
+// backwards compatibility (existing CLI / e2e clients keep working).
+type PermissionDecision int32
+
+const (
+	PermissionDecision_PERMISSION_DECISION_UNSPECIFIED   PermissionDecision = 0
+	PermissionDecision_PERMISSION_DECISION_ALLOW_ONCE    PermissionDecision = 1
+	PermissionDecision_PERMISSION_DECISION_ALLOW_SESSION PermissionDecision = 2
+	PermissionDecision_PERMISSION_DECISION_ALLOW_ALWAYS  PermissionDecision = 3
+	PermissionDecision_PERMISSION_DECISION_DENY_ONCE     PermissionDecision = 4
+	PermissionDecision_PERMISSION_DECISION_DENY_SESSION  PermissionDecision = 5
+	PermissionDecision_PERMISSION_DECISION_DENY_ALWAYS   PermissionDecision = 6
+)
+
+// Enum value maps for PermissionDecision.
+var (
+	PermissionDecision_name = map[int32]string{
+		0: "PERMISSION_DECISION_UNSPECIFIED",
+		1: "PERMISSION_DECISION_ALLOW_ONCE",
+		2: "PERMISSION_DECISION_ALLOW_SESSION",
+		3: "PERMISSION_DECISION_ALLOW_ALWAYS",
+		4: "PERMISSION_DECISION_DENY_ONCE",
+		5: "PERMISSION_DECISION_DENY_SESSION",
+		6: "PERMISSION_DECISION_DENY_ALWAYS",
+	}
+	PermissionDecision_value = map[string]int32{
+		"PERMISSION_DECISION_UNSPECIFIED":   0,
+		"PERMISSION_DECISION_ALLOW_ONCE":    1,
+		"PERMISSION_DECISION_ALLOW_SESSION": 2,
+		"PERMISSION_DECISION_ALLOW_ALWAYS":  3,
+		"PERMISSION_DECISION_DENY_ONCE":     4,
+		"PERMISSION_DECISION_DENY_SESSION":  5,
+		"PERMISSION_DECISION_DENY_ALWAYS":   6,
+	}
+)
+
+func (x PermissionDecision) Enum() *PermissionDecision {
+	p := new(PermissionDecision)
+	*p = x
+	return p
+}
+
+func (x PermissionDecision) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (PermissionDecision) Descriptor() protoreflect.EnumDescriptor {
+	return file_gil_v1_run_proto_enumTypes[0].Descriptor()
+}
+
+func (PermissionDecision) Type() protoreflect.EnumType {
+	return &file_gil_v1_run_proto_enumTypes[0]
+}
+
+func (x PermissionDecision) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use PermissionDecision.Descriptor instead.
+func (PermissionDecision) EnumDescriptor() ([]byte, []int) {
+	return file_gil_v1_run_proto_rawDescGZIP(), []int{0}
+}
+
 type StartRunRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	SessionId     string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
@@ -413,7 +483,8 @@ type AnswerPermissionRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	SessionId     string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
 	RequestId     string                 `protobuf:"bytes,2,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
-	Allow         bool                   `protobuf:"varint,3,opt,name=allow,proto3" json:"allow,omitempty"`
+	Allow         bool                   `protobuf:"varint,3,opt,name=allow,proto3" json:"allow,omitempty"`                                      // legacy: ONCE semantics; ignored when `decision` is set
+	Decision      PermissionDecision     `protobuf:"varint,4,opt,name=decision,proto3,enum=gil.v1.PermissionDecision" json:"decision,omitempty"` // when non-UNSPECIFIED, takes priority over `allow`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -467,6 +538,13 @@ func (x *AnswerPermissionRequest) GetAllow() bool {
 		return x.Allow
 	}
 	return false
+}
+
+func (x *AnswerPermissionRequest) GetDecision() PermissionDecision {
+	if x != nil {
+		return x.Decision
+	}
+	return PermissionDecision_PERMISSION_DECISION_UNSPECIFIED
 }
 
 type AnswerPermissionResponse struct {
@@ -550,15 +628,24 @@ const file_gil_v1_run_proto_rawDesc = "" +
 	"\n" +
 	"commit_sha\x18\x01 \x01(\tR\tcommitSha\x12%\n" +
 	"\x0ecommit_message\x18\x02 \x01(\tR\rcommitMessage\x12+\n" +
-	"\x11total_checkpoints\x18\x03 \x01(\x05R\x10totalCheckpoints\"m\n" +
+	"\x11total_checkpoints\x18\x03 \x01(\x05R\x10totalCheckpoints\"\xa5\x01\n" +
 	"\x17AnswerPermissionRequest\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x02 \x01(\tR\trequestId\x12\x14\n" +
-	"\x05allow\x18\x03 \x01(\bR\x05allow\"8\n" +
+	"\x05allow\x18\x03 \x01(\bR\x05allow\x126\n" +
+	"\bdecision\x18\x04 \x01(\x0e2\x1a.gil.v1.PermissionDecisionR\bdecision\"8\n" +
 	"\x18AnswerPermissionResponse\x12\x1c\n" +
-	"\tdelivered\x18\x01 \x01(\bR\tdelivered2\xc4\x03\n" +
+	"\tdelivered\x18\x01 \x01(\bR\tdelivered*\x98\x02\n" +
+	"\x12PermissionDecision\x12#\n" +
+	"\x1fPERMISSION_DECISION_UNSPECIFIED\x10\x00\x12\"\n" +
+	"\x1ePERMISSION_DECISION_ALLOW_ONCE\x10\x01\x12%\n" +
+	"!PERMISSION_DECISION_ALLOW_SESSION\x10\x02\x12$\n" +
+	" PERMISSION_DECISION_ALLOW_ALWAYS\x10\x03\x12!\n" +
+	"\x1dPERMISSION_DECISION_DENY_ONCE\x10\x04\x12$\n" +
+	" PERMISSION_DECISION_DENY_SESSION\x10\x05\x12#\n" +
+	"\x1fPERMISSION_DECISION_DENY_ALWAYS\x10\x062\xc4\x03\n" +
 	"\n" +
 	"RunService\x12d\n" +
 	"\x05Start\x12\x17.gil.v1.StartRunRequest\x1a\x18.gil.v1.StartRunResponse\"(\x82\xd3\xe4\x93\x02\":\x01*\"\x1d/v1/sessions/{session_id}/run\x12V\n" +
@@ -578,33 +665,36 @@ func file_gil_v1_run_proto_rawDescGZIP() []byte {
 	return file_gil_v1_run_proto_rawDescData
 }
 
+var file_gil_v1_run_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
 var file_gil_v1_run_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
 var file_gil_v1_run_proto_goTypes = []any{
-	(*StartRunRequest)(nil),          // 0: gil.v1.StartRunRequest
-	(*StartRunResponse)(nil),         // 1: gil.v1.StartRunResponse
-	(*VerifyResult)(nil),             // 2: gil.v1.VerifyResult
-	(*TailRequest)(nil),              // 3: gil.v1.TailRequest
-	(*RestoreRequest)(nil),           // 4: gil.v1.RestoreRequest
-	(*RestoreResponse)(nil),          // 5: gil.v1.RestoreResponse
-	(*AnswerPermissionRequest)(nil),  // 6: gil.v1.AnswerPermissionRequest
-	(*AnswerPermissionResponse)(nil), // 7: gil.v1.AnswerPermissionResponse
-	(*Event)(nil),                    // 8: gil.v1.Event
+	(PermissionDecision)(0),          // 0: gil.v1.PermissionDecision
+	(*StartRunRequest)(nil),          // 1: gil.v1.StartRunRequest
+	(*StartRunResponse)(nil),         // 2: gil.v1.StartRunResponse
+	(*VerifyResult)(nil),             // 3: gil.v1.VerifyResult
+	(*TailRequest)(nil),              // 4: gil.v1.TailRequest
+	(*RestoreRequest)(nil),           // 5: gil.v1.RestoreRequest
+	(*RestoreResponse)(nil),          // 6: gil.v1.RestoreResponse
+	(*AnswerPermissionRequest)(nil),  // 7: gil.v1.AnswerPermissionRequest
+	(*AnswerPermissionResponse)(nil), // 8: gil.v1.AnswerPermissionResponse
+	(*Event)(nil),                    // 9: gil.v1.Event
 }
 var file_gil_v1_run_proto_depIdxs = []int32{
-	2, // 0: gil.v1.StartRunResponse.verify_results:type_name -> gil.v1.VerifyResult
-	0, // 1: gil.v1.RunService.Start:input_type -> gil.v1.StartRunRequest
-	3, // 2: gil.v1.RunService.Tail:input_type -> gil.v1.TailRequest
-	4, // 3: gil.v1.RunService.Restore:input_type -> gil.v1.RestoreRequest
-	6, // 4: gil.v1.RunService.AnswerPermission:input_type -> gil.v1.AnswerPermissionRequest
-	1, // 5: gil.v1.RunService.Start:output_type -> gil.v1.StartRunResponse
-	8, // 6: gil.v1.RunService.Tail:output_type -> gil.v1.Event
-	5, // 7: gil.v1.RunService.Restore:output_type -> gil.v1.RestoreResponse
-	7, // 8: gil.v1.RunService.AnswerPermission:output_type -> gil.v1.AnswerPermissionResponse
-	5, // [5:9] is the sub-list for method output_type
-	1, // [1:5] is the sub-list for method input_type
-	1, // [1:1] is the sub-list for extension type_name
-	1, // [1:1] is the sub-list for extension extendee
-	0, // [0:1] is the sub-list for field type_name
+	3, // 0: gil.v1.StartRunResponse.verify_results:type_name -> gil.v1.VerifyResult
+	0, // 1: gil.v1.AnswerPermissionRequest.decision:type_name -> gil.v1.PermissionDecision
+	1, // 2: gil.v1.RunService.Start:input_type -> gil.v1.StartRunRequest
+	4, // 3: gil.v1.RunService.Tail:input_type -> gil.v1.TailRequest
+	5, // 4: gil.v1.RunService.Restore:input_type -> gil.v1.RestoreRequest
+	7, // 5: gil.v1.RunService.AnswerPermission:input_type -> gil.v1.AnswerPermissionRequest
+	2, // 6: gil.v1.RunService.Start:output_type -> gil.v1.StartRunResponse
+	9, // 7: gil.v1.RunService.Tail:output_type -> gil.v1.Event
+	6, // 8: gil.v1.RunService.Restore:output_type -> gil.v1.RestoreResponse
+	8, // 9: gil.v1.RunService.AnswerPermission:output_type -> gil.v1.AnswerPermissionResponse
+	6, // [6:10] is the sub-list for method output_type
+	2, // [2:6] is the sub-list for method input_type
+	2, // [2:2] is the sub-list for extension type_name
+	2, // [2:2] is the sub-list for extension extendee
+	0, // [0:2] is the sub-list for field type_name
 }
 
 func init() { file_gil_v1_run_proto_init() }
@@ -618,13 +708,14 @@ func file_gil_v1_run_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_gil_v1_run_proto_rawDesc), len(file_gil_v1_run_proto_rawDesc)),
-			NumEnums:      0,
+			NumEnums:      1,
 			NumMessages:   8,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
 		GoTypes:           file_gil_v1_run_proto_goTypes,
 		DependencyIndexes: file_gil_v1_run_proto_depIdxs,
+		EnumInfos:         file_gil_v1_run_proto_enumTypes,
 		MessageInfos:      file_gil_v1_run_proto_msgTypes,
 	}.Build()
 	File_gil_v1_run_proto = out.File
