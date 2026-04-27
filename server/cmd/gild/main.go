@@ -414,6 +414,33 @@ func newServer(dbPath, sockPath, sessionsBase, authFile string, authMW *auth.Mid
 					// Turn 8: end.
 					{Text: "Plan complete.", StopReason: "end_turn"},
 				}), "mock-model", nil
+			case "run-clarify":
+				// Phase 18 Track D e2e: scripted clarify-tool flow. The
+				// agent (1) calls clarify with two suggestions and
+				// urgency=high, (2) reads the user's answer from the
+				// tool_result, (3) ends the turn. The e2e test answers
+				// the ask via `gil clarify <id> "yes, deploy" --ask-id <id>`
+				// from a side goroutine while the run is paused.
+				return provider.NewMockToolProvider([]provider.MockTurn{
+					{
+						Text: "I need a quick clarification before continuing.",
+						ToolCalls: []provider.ToolCall{{
+							ID:   "cl1",
+							Name: "clarify",
+							Input: json.RawMessage(`{
+                                "question":"Should I deploy now?",
+                                "context":"verifier passed; user did not pre-approve auto-deploy",
+                                "suggestions":["yes, deploy","no, hold"],
+                                "urgency":"high"
+                            }`),
+						}},
+						StopReason: "tool_use",
+					},
+					{
+						Text:       "Acknowledged the user's answer; finishing.",
+						StopReason: "end_turn",
+					},
+				}), "mock-model", nil
 			default:
 				// Text-only Mock for InterviewService scenarios
 				return provider.NewMock([]string{

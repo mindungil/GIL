@@ -78,6 +78,36 @@ Examples:
 				return renderPendingClarifications(cmd.OutOrStdout(), pendings)
 			}
 
+			// Fast-path: when --ask-id is supplied AND we have a literal
+			// answer (no --pick), we can answer without the pendings list
+			// at all. This is the recommended path for scripted callers
+			// (e2e, watchdog daemons) where the caller has already
+			// observed the clarify_requested event over the live tail
+			// and the daemon's bufio'd events.jsonl hasn't flushed yet.
+			if askID != "" && pick == 0 && len(args) >= 2 {
+				answer := strings.Join(args[1:], " ")
+				if err := ensureDaemon(socket, defaultBase()); err != nil {
+					return err
+				}
+				cli, err := sdk.Dial(socket)
+				if err != nil {
+					return fmt.Errorf("dial: %w", err)
+				}
+				defer cli.Close()
+
+				delivered, err := cli.AnswerClarification(ctx, sessionID, askID, answer)
+				if err != nil {
+					return wrapRPCError(err)
+				}
+				if !delivered {
+					return cliutil.New(
+						"answer not delivered (ask is no longer pending)",
+						`the run may have timed out or already been answered; tail the events stream to confirm`)
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "answered ask %s\n", askID)
+				return nil
+			}
+
 			if len(pendings) == 0 {
 				return cliutil.New(
 					"no pending clarification asks for this session",

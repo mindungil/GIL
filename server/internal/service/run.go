@@ -808,13 +808,22 @@ func (s *RunService) executeRun(
 		metrics.SessionsRunning.Dec()
 	}()
 
-	// Persistence subscriber: write every event to disk.
+	// Persistence subscriber: write every event to disk. We force a
+	// Sync on clarify_requested so a pausing run's question becomes
+	// observable on disk immediately — surfaces that read the events
+	// file (the `gil clarify --list` CLI, the e2e suite, watchdog
+	// scripts) can otherwise miss the event because the persister's
+	// bufio.Writer holds < 4 KB of buffered output until flushed at
+	// run end. Other event types stay buffered for throughput.
 	persistSub := stream.Subscribe(256)
 	persistDone := make(chan struct{})
 	go func() {
 		defer close(persistDone)
 		for evt := range persistSub.Events() {
 			_ = persister.Write(evt)
+			if evt.Type == "clarify_requested" {
+				_ = persister.Sync()
+			}
 		}
 	}()
 

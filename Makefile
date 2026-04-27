@@ -1,4 +1,4 @@
-.PHONY: tidy test gen build install install-script clean e2e e2e2 e2e3 e2e4 e2e5 e2e6 e2e7 e2e8 e2e9 e2e10-modal e2e10-daytona e2e10-oidc e2e11-freshinstall e2e12-in-session-ux e2e18-lsp e2e18-webfetch e2e18-subagent e2e-all python-protos python-test release release-host release-check
+.PHONY: tidy test gen build install install-script clean e2e e2e2 e2e3 e2e4 e2e5 e2e6 e2e7 e2e8 e2e9 e2e10-modal e2e10-daytona e2e10-oidc e2e11-freshinstall e2e12-in-session-ux e2e18-lsp e2e18-webfetch e2e18-subagent e2e18-clarify e2e-all python-protos python-test release release-host release-check
 
 tidy:
 	@for m in core runtime proto server cli tui sdk mcp; do \
@@ -119,7 +119,10 @@ e2e18-plan: build
 e2e18-subagent: build
 	@bash tests/e2e/phase18_subagent_test.sh
 
-e2e-all: e2e e2e2 e2e3 e2e4 e2e5 e2e6 e2e7 e2e8 e2e9 e2e10-modal e2e10-daytona e2e10-oidc e2e11-freshinstall e2e12-in-session-ux e2e18-plan e2e18-lsp e2e18-webfetch e2e18-subagent
+e2e18-clarify: build
+	@bash tests/e2e/phase18_clarify_test.sh
+
+e2e-all: e2e e2e2 e2e3 e2e4 e2e5 e2e6 e2e7 e2e8 e2e9 e2e10-modal e2e10-daytona e2e10-oidc e2e11-freshinstall e2e12-in-session-ux e2e18-plan e2e18-lsp e2e18-webfetch e2e18-subagent e2e18-clarify
 
 # --- release ---------------------------------------------------------------
 # `make release` builds the full 4-binary x 4-platform matrix locally via
