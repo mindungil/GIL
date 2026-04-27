@@ -2,7 +2,7 @@
 
 자율 코딩 하네스. 길고 철저한 인터뷰로 모든 요구사항을 추출한 뒤, 며칠이 걸리더라도 사용자에게 다시 묻지 않고 끝까지 작업을 수행하는 CLI 에이전트.
 
-**상태**: Phase 11 완료. e2e 13 단계 전부 green. fresh install 친화적: `gil init` 한 번으로 디렉토리 + 인증 셋업, `gil doctor` 으로 진단, XDG 표준 준수.
+**상태**: Phase 12 완료. e2e 14 단계 전부 green. AGENTS.md 디스커버리 + MCP registry + 슬래시 명령 + project-local config + permission 영속화 + cost/export. fresh install + in-session UX 모두 충족.
 
 ## 빠른 시작
 
@@ -102,18 +102,29 @@ Desktop, Cline, etc.) can use gil as a backend over JSON-RPC stdio.
 
 | Command | What |
 |---|---|
+| `gil init` | First-time scaffolding (XDG dirs + auth login) |
+| `gil doctor` | 5-group readiness check (Layout/Daemon/Credentials/Sandboxes/Tools) |
+| `gil auth login/list/logout/status` | Provider credentials in `auth.json` |
 | `gil new --working-dir <dir>` | Create session |
 | `gil status` | List sessions |
 | `gil interview <id>` | Run interview to gather requirements |
 | `gil resume <id>` | Resume an in-progress interview |
 | `gil spec <id>` | Show current (or frozen) spec |
 | `gil spec freeze <id>` | Freeze spec to lock in requirements |
-| `gil run <id> [--detach]` | Run autonomously; --detach returns immediately |
+| `gil run <id> [--detach] [--interactive]` | Run autonomously; --detach returns immediately, --interactive enables slash commands without TUI |
 | `gil events <id> --tail` | Stream live events |
 | `gil restore <id> <step>` | Roll back via Shadow Git checkpoint |
+| `gil mcp add/list/remove` | Manage MCP server registry (global + project) |
+| `gil cost [<id>]` | USD cost estimate for one session (defaults to latest) |
+| `gil stats [--days N]` | Aggregate token usage + per-model breakdown |
+| `gil export <id> [--format markdown\|json\|jsonl]` | Single-file session dump |
+| `gil import <file.jsonl>` | Replay an exported session (read-only, new id) |
+| `gil completion bash\|zsh\|fish\|powershell` | Shell completion scripts |
 | `gild --foreground [--user X] [--http :8080] [--metrics :9090]` | Start daemon |
-| `giltui` | Interactive TUI |
+| `giltui` | Interactive TUI (9 slash commands) |
 | `gilmcp --socket <path>` | MCP server adapter (stdio) |
+
+Global flag: `--output text|json` on every command above (events/status/mcp list/auth list/cost/stats emit JSON when set).
 
 ## 워크스페이스 백엔드
 

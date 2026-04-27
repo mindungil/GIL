@@ -108,6 +108,82 @@ credstore가 비어 있으면 환경변수 fallback이 적용됩니다 (gild fac
 전체를 한 디렉토리로 모으려면: `export GIL_HOME=/path/to/single-tree` →
 `$GIL_HOME/{config,data,state,cache}` 로 모입니다 (테스트/sandbox/portable install용).
 
+## Phase 12 신규 기능
+
+### AGENTS.md / CLAUDE.md / .cursor/rules
+
+워크스페이스에 `AGENTS.md` 두면 모든 세션의 시스템 프롬프트에 자동 주입됩니다. 추가로 트리워크하여 ancestor 디렉토리들 + global `~/.config/gil/AGENTS.md` 까지 stack됩니다. CLAUDE.md, .cursor/rules/*.mdc도 같은 방식 (`instructions.disable_claude_md = true` 로 CLAUDE.md skip 가능).
+
+8KB 토큰 budget 초과 시 lowest-priority (글로벌 → ancestor → workspace 순서에서 먼 쪽) 부터 떨어뜨립니다. AgentLoop가 시작 시 1회 `instructions.Discover` 호출, system prompt에 base 다음 / memory bank 이전에 주입.
+
+### MCP server registry
+
+```bash
+gil mcp add fs --type stdio -- npx -y @modelcontextprotocol/server-filesystem /workspace
+gil mcp add issues --type http --url https://issues.example.com/mcp --bearer SECRET
+gil mcp list
+gil mcp remove fs
+```
+
+글로벌은 `~/.config/gil/mcp.toml`, 프로젝트는 `<workspace>/.gil/mcp.toml` (`--project` 플래그). RunService가 자동으로 spec.MCP와 merge — spec 충돌 시 우선. 토큰은 inline 저장(`mcp.toml` mode 0600), `gil mcp list`에서는 `(+bearer)` 로만 표시.
+
+### 슬래시 명령 (TUI / `gil run --interactive`)
+
+세션 진행 중 9개 명령 사용 가능:
+
+| 명령 | 무엇 |
+|---|---|
+| `/help` | 사용 가능한 명령 |
+| `/status` | 현재 세션 + iter + tokens |
+| `/cost` | 누적 cost (estimate) |
+| `/clear` | TUI 이벤트 ring buffer reset (RPC 호출 없음) |
+| `/compact` | 강제 compact (Phase 13+ RPC, 현재 stub) |
+| `/model <name>` | 다음 turn 모델 변경 (Phase 13+ RPC, 현재 stub) |
+| `/agents` | `<workspace>/AGENTS.md` $EDITOR로 열기 |
+| `/diff` | 마지막 checkpoint 대비 변경 |
+| `/quit` | 종료 |
+
+**Ground rule**: observation only — agent 결정에 침투하지 않음. mid-tool-call 인터럽트 없음. TUI 안 띄우고도 `gil run <id> --interactive` 로 stdin 슬래시 입력 가능.
+
+### Project-local 설정
+
+`<workspace>/.gil/config.toml` 에 default 박아두면 인터뷰 / RunService.Start이 미리 채웁니다.
+
+```toml
+provider = "anthropic"
+model = "claude-opus-4-7"
+autonomy = "ASK_DESTRUCTIVE_ONLY"
+workspace_backend = "LOCAL_NATIVE"
+ignore_globs = ["dist/**", "node_modules/**"]
+```
+
+Layered config 우선순위: CLI flag > env > project `.gil/config.toml` > global `~/.config/gil/config.toml` > hardcoded defaults. workspace discovery는 `.gil` > `.git` > pkg manifest (package.json/go.mod/Cargo.toml/pyproject.toml) > cwd.
+
+### Permission 영속화 ("always allow")
+
+TUI permission 모달에서 6 옵션 (allow/deny × once/session/always). "Always allow" 선택 시 `~/.local/state/gil/permissions.toml` 에 project-keyed 저장:
+
+```toml
+[project."/home/me/myrepo"]
+always_allow = ["git status", "ls *", "cat README.md"]
+always_deny  = []
+```
+
+같은 프로젝트의 같은 명령은 다음부터 ask 없이 자동 통과. 우선순위: persistent_deny > persistent_allow > session > spec > default.
+
+### Cost / Stats / Export / Import
+
+```bash
+gil cost [<id>]                         # 단일 세션 USD 추정 (없으면 latest)
+gil stats [--days 30]                   # 누적 (per-model breakdown), --days 0 = 전체
+gil export <id> [--format markdown|json|jsonl] [--output file]
+gil import <file.jsonl>                 # replay (read-only, 새 세션 ID)
+```
+
+가격 카탈로그 임베디드 (`core/cost/default_catalog.json` — claude-opus-4-7/4-6, sonnet-4-6, haiku-4-5, gpt-4o, gpt-4o-mini). Cache `models.json` 로 override 가능. 모든 명령이 `--output json` (글로벌) 또는 명령별 `--json` 지원.
+
+import 는 read-only — 워크스페이스 상태는 복원하지 않음 (git 커밋 정보가 JSONL 안에 없음). 새 세션 ID로 events + spec 만 복원해서 `gil events` / `gil export` 로 재조회 가능.
+
 ### 마이그레이션 (legacy `~/.gil/`)
 
 기존에 `~/.gil/` 을 쓰던 사용자: `gil init` 1회 실행하면 자동으로 분산됩니다.
@@ -302,7 +378,7 @@ spec.risk.autonomy = ASK_PER_ACTION이면 거의 모든 tool이 차단됩니다.
 
 ## 검증
 
-전체 e2e (13 phase):
+전체 e2e (14 phase):
 ```bash
 make e2e-all
 ```
@@ -322,6 +398,7 @@ make e2e10-modal          # phase 10: Modal cloud sandbox
 make e2e10-daytona        # phase 10: Daytona REST workspace
 make e2e10-oidc           # phase 10: OIDC bearer-token auth on TCP
 make e2e11-freshinstall   # phase 11: fresh-install onboarding (init/auth/doctor)
+make e2e12-in-session-ux  # phase 12: AGENTS.md / MCP / cost / export / project-local
 ```
 
 unit tests:
