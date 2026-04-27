@@ -102,12 +102,22 @@ func (m *Model) renderBody(narrow bool) string {
 }
 
 // renderMainColumn stacks the three right-side sub-panes (Spec/Progress,
-// Activity, Memory) inside a single column.
+// Activity, and the bottom pane — either Plan or Memory) inside a
+// single column.
+//
+// Bottom-pane policy (Phase 18):
+//   - Plan present (≥1 item) and Memory present → SPLIT 50/50 so the
+//     user sees both at once. The Plan goes first because progress is
+//     the more time-sensitive signal.
+//   - Plan present, Memory empty → Plan only.
+//   - Plan empty, Memory present → Memory only (legacy behaviour).
+//   - Both empty → Memory pane with its "not yet populated" hint.
 func (m *Model) renderMainColumn(width, height int) string {
-	// Allocate height: progress=10, activity=fills, memory=8.
+	// Allocate height: progress=10, activity=fills, bottom=8 (or
+	// 4+4 split when both Plan and Memory have content).
 	progressH := 10
-	memoryH := 8
-	activityH := height - progressH - memoryH
+	bottomH := 8
+	activityH := height - progressH - bottomH
 	if activityH < 4 {
 		activityH = 4
 	}
@@ -133,10 +143,31 @@ func (m *Model) renderMainColumn(width, height int) string {
 	activity := paneBox(activityTitle, width, activityH,
 		renderActivityPane(width-4, activityH-2, rows, m.spinFrame))
 
-	memory := paneBox(memoryPaneTitle(m.memory), width, memoryH,
-		renderMemoryPane(width-4, m.memory))
+	planExists := !m.plan.NotFound && len(m.plan.Items) > 0
+	memoryExists := !m.memory.NotFound && len(m.memory.Lines) > 0
 
-	return lipgloss.JoinVertical(lipgloss.Left, progress, activity, memory)
+	var bottom string
+	switch {
+	case planExists && memoryExists:
+		// Split 50/50. Each gets ~half the bottom height; min 4 each.
+		half := bottomH / 2
+		if half < 4 {
+			half = 4
+		}
+		planBox := paneBox(planPaneTitle(m.plan), width, half,
+			renderPlanPane(width-4, m.plan))
+		memBox := paneBox(memoryPaneTitle(m.memory), width, bottomH-half,
+			renderMemoryPane(width-4, m.memory))
+		bottom = lipgloss.JoinVertical(lipgloss.Left, planBox, memBox)
+	case planExists:
+		bottom = paneBox(planPaneTitle(m.plan), width, bottomH,
+			renderPlanPane(width-4, m.plan))
+	default:
+		bottom = paneBox(memoryPaneTitle(m.memory), width, bottomH,
+			renderMemoryPane(width-4, m.memory))
+	}
+
+	return lipgloss.JoinVertical(lipgloss.Left, progress, activity, bottom)
 }
 
 // renderSessionsPane is the left 25% pane.

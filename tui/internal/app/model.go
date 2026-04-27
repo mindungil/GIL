@@ -36,6 +36,12 @@ type Model struct {
 	// session change, refresh).
 	memory MemoryExcerpt
 
+	// Plan snapshot — rebuilt on event arrival/session change. Read-
+	// only from the TUI's perspective; the agent owns writes via the
+	// `plan` tool. NotFound means "no plan written yet"; the View
+	// degrades to the Memory pane in that case.
+	plan PlanSnapshot
+
 	// Checkpoint modal.
 	checkpoints CheckpointModalState
 
@@ -81,10 +87,12 @@ func (m *Model) startTailingSelected() tea.Cmd {
 func (m *Model) refreshMemoryFromSelection() {
 	if len(m.sessions) == 0 || m.selectedIdx >= len(m.sessions) {
 		m.memory = MemoryExcerpt{NotFound: true}
+		m.plan = PlanSnapshot{NotFound: true}
 		return
 	}
 	s := m.sessions[m.selectedIdx]
 	m.memory = loadMemoryExcerpt(s.ID)
+	m.plan = loadPlanSnapshot(s.ID)
 }
 
 // rebuildProgressFromEvents recomputes the ProgressData view-model from
