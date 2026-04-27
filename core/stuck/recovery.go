@@ -157,7 +157,8 @@ func (s AltToolOrderStrategy) Apply(ctx context.Context, req ApplyRequest) (Deci
 	switch req.Signal.Pattern {
 	case PatternRepeatedActionObservation,
 		PatternRepeatedActionError,
-		PatternPingPong:
+		PatternPingPong,
+		PatternNoProgress:
 		// Build a one-line nudge that the runner will prepend to the next
 		// iteration's system prompt. Keep it terse — Cline's pattern is to
 		// give ONE chance to self-correct before escalating.
@@ -193,9 +194,12 @@ type SubagentBranchStrategy struct {
 func (s SubagentBranchStrategy) Name() string { return "subagent_branch" }
 
 func (s SubagentBranchStrategy) Apply(ctx context.Context, req ApplyRequest) (Decision, error) {
-	// Only fire on action-level repetition (where re-investigation helps).
+	// Only fire on action-level patterns (where re-investigation helps).
+	// NoProgress is included: a fresh read-only sub-agent looking around
+	// is exactly the right tool when the main loop is varying actions but
+	// not making measurable progress (e.g., impossible task as stated).
 	switch req.Signal.Pattern {
-	case PatternRepeatedActionObservation, PatternRepeatedActionError, PatternPingPong:
+	case PatternRepeatedActionObservation, PatternRepeatedActionError, PatternPingPong, PatternNoProgress:
 		// ok
 	default:
 		return Decision{}, ErrNoFallback

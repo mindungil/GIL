@@ -1212,7 +1212,14 @@ func (s *RunService) executeRun(
 	// Wire stuck detector so the long-run soak and production runs can detect
 	// repeated-action patterns and surface them as events. No recovery strategy
 	// here; every signal is unrecovered (counts toward the 3-signal abort).
-	loop.StuckDetector = &stuck.Detector{Window: 50}
+	//
+	// Window=200 keeps the NoProgress detector well-fed: it needs visibility
+	// over Threshold (default 4) full iterations, each ~10-15 events
+	// (iteration_start, provider_request/response, tool_call/tool_result
+	// pairs, verify_run+verify_result*N). A 50-event window can clip the
+	// fourth iter; 200 gives us comfortable headroom for up to ~12 iters
+	// without bloating memory.
+	loop.StuckDetector = &stuck.Detector{Window: 200}
 
 	// Build permission gate from spec.risk.autonomy. Returns nil for FULL.
 	// Wrap the spec evaluator with EvaluatorWithStore so persistent
