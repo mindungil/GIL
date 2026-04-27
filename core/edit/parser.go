@@ -76,8 +76,15 @@ func Parse(content string) ([]Block, error) {
 				filename = currentFilename
 			} else {
 				return blocks, &ParseError{
-					Line:    i + 1,
-					Reason:  "missing filename for SEARCH block",
+					Line: i + 1,
+					Reason: "missing filename for SEARCH block. Format:\n" +
+						"  <filename>\n" +
+						"  <<<<<<< SEARCH\n" +
+						"  <old_lines>\n" +
+						"  =======\n" +
+						"  <new_lines>\n" +
+						"  >>>>>>> REPLACE\n" +
+						"The filename goes on its own line BEFORE the SEARCH marker (not as a 'path:' label inside the block).",
 					Context: lastLines(lines, i+1, 5),
 				}
 			}

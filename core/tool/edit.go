@@ -76,7 +76,15 @@ func (e *Edit) Run(ctx context.Context, argsJSON json.RawMessage) (Result, error
 		if rerr != nil {
 			anyErr = true
 			nFailed++
-			fmt.Fprintf(&summary, "[block %d] %s: read failed: %v\n", i+1, b.File, rerr)
+			// Self-correcting hint: if the parsed filename still looks like
+			// a stray label/prefix (contains ": " or starts with "path:")
+			// we likely picked up garbage that should never have been a
+			// filename — tell the agent how to fix the format.
+			hint := ""
+			if strings.Contains(b.File, ": ") || strings.HasPrefix(strings.ToLower(b.File), "path:") {
+				hint = " — the parsed filename is '" + b.File + "' which looks like a label, not a path. Write the filename on its own line BEFORE '<<<<<<< SEARCH', e.g.:\n  cli/internal/cmd/status_render.go\n  <<<<<<< SEARCH\n  ..."
+			}
+			fmt.Fprintf(&summary, "[block %d] %s: read failed: %v%s\n", i+1, b.File, rerr, hint)
 			continue
 		}
 		updated, mt, merr := eng.Replace(string(original), b.Search, b.Replace)
