@@ -4,7 +4,7 @@
 
 ## 현재 페이즈
 
-**Phase 11: Harness UX foundations** (완료 — 2026-04-26). 다음 → Phase 12 (in-session UX).
+**Phase 12: In-session UX** (완료 — 2026-04-26). 다음 → Phase 13 (배포 + stance 문서).
 
 **Phase 0: 설계** (완료)
 
@@ -279,6 +279,19 @@
 - **gil completion**: cobra 기본 wrapper (bash/zsh/fish/powershell).
 - **검증**: `make e2e-all` 13 phase 모두 통과 (1-9 + phase10-modal/daytona/oidc + phase11-freshinstall).
 - **다음 단계**: Phase 12 — AGENTS.md 디스커버리, MCP add/remove subcommand, TUI/run 슬래시 명령, project-local `.gil/`, permission 영속화, cost/stats, `--output json` global, session export.
+
+## Phase 12 산출물 요약 (2026-04-26)
+
+- **AGENTS.md / CLAUDE.md / .cursor/rules 디스커버리**: `core/instructions.Discover` (워크스페이스 → ancestors → git root → global → home 트리워크). Render는 8KB budget + truncation. AgentLoop가 시작 시 1회 호출, system prompt에 base 다음 / memory bank 이전에 주입 (cache_control 안). RunService.Start이 `loop.Workspace = workspaceDir` wire — 빈 값이면 silent no-op (cwd로 fallback 안 함, 다른 프로젝트 leak 방지). `system_instructions_loaded` 이벤트가 path 목록 노출. Reference lift: codex `agents_md.rs` + opencode `session/instruction.ts`.
+- **MCP server registry**: `core/mcpregistry` TOML (글로벌 + 프로젝트, 프로젝트 우선). `gil mcp add/list/remove` (`--type stdio|http`, `--bearer`, `--global|--project|--auto`). RunService가 spec.MCP와 merge — spec 충돌 시 우선. `mcp_registry_loaded` 이벤트로 server_count + shadowed 노출. Reference lift: codex `mcp_cmd.rs` + opencode `mcp.ts`.
+- **슬래시 명령** (`core/slash` parser + registry): TUI 9개 (`/help /status /cost /clear /compact /model /agents /diff /quit`) + `gil run --interactive` 모드. **Ground rule**: observation only, mid-tool-call 인터럽트 없음 — agent 결정 침범 금지. `/compact`, `/model`은 의도적 stub (RPC 추가는 Phase 13+). Reference lift: codex `slash_command.rs` + cline slash parser.
+- **Project-local `.gil/`**: `core/workspace.Discover` (`.gil` > `.git` > pkg manifest > cwd). Config: TOML, layered defaults (CLI > env > project `.gil/config.toml` > global `$XDG_CONFIG_HOME/gil/config.toml` > hardcoded). RunService.Start이 spec 빈 필드에 적용 (interview는 source-of-truth, layered config는 backstop). TOML lib: BurntSushi/toml v1.6.0.
+- **Permission "always allow" 영속화**: `core/permission.PersistentStore` ($XDG_STATE_HOME/gil/permissions.toml, 0600, project-keyed). EvaluatorWithStore 우선순위: persistent_deny > persistent_allow > session > spec > default. TUI 모달 6 옵션 (allow/deny × once/session/always). proto AnswerPermission.decision enum 추가 (legacy bool 백워드 컴팻 유지). Reference lift: codex `ApprovedForSession` + cline `CommandPermissionController`.
+- **Cost / Stats**: `core/cost` 임베디드 가격 카탈로그 (claude-opus-4-7/4-6/sonnet-4-6/haiku-4-5/gpt-4o/gpt-4o-mini) + Calculator (USD 추정). `gil cost [<id>]`, `gil stats [--days N]` — events.jsonl에서 토큰 합산, per-model breakdown. Cache `models.json`로 카탈로그 override 가능.
+- **Export / Import**: `gil export <id> [--format markdown|json|jsonl]` — 사람용 markdown (header / spec / interview / run trace / final result, tool blob 2KB truncation) / 머신용 typed JSON / 원본 stream JSONL (header line + verbatim event lines). `gil import <file>` — read-only replay (새 ULID, 워크스페이스 복원 안 함; spec.yaml + events.jsonl만 복원). Reference lift: opencode `export.ts`/`import.ts`.
+- **--output json global flag** (T13): cobra persistent flag — events/status/mcp list/auth list/cost/stats가 JSON 모드 지원 (외부 파이프라인 + CI 통합). 명령별 `--json` flag는 백워드 컴팻 유지.
+- **검증**: `make e2e-all` 14 phase 모두 통과 (1-9 + 10-modal/daytona/oidc + 11-freshinstall + 12-in-session-ux). e2e12: AGENTS.md discovery (event grep) + mcp add/list/remove + cost (synthetic events) + stats + export→import 라운드트립 + project config inheritance.
+- **다음 단계**: Phase 13 — 배포 채널 (install.sh + gil update) + SECURITY/PRIVACY/CoC/CONTRIBUTING + CHANGELOG + first release tag prep.
 
 ## 미해결 / 추후 결정
 
