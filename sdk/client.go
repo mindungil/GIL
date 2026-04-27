@@ -52,11 +52,21 @@ type CreateOptions struct {
 }
 
 // Session represents a Gil session.
+//
+// CreatedAt / UpdatedAt are zero-valued when the server didn't fill
+// the proto field (e.g. older daemons). TotalTokens / TotalCostUSD
+// are the persisted rollup; CurrentIteration / CurrentTokens are
+// the live snapshot for RUNNING sessions.
 type Session struct {
 	ID               string
 	Status           string
 	WorkingDir       string
 	GoalHint         string
+	SpecID           string
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
+	TotalTokens      int64
+	TotalCostUSD     float64
 	CurrentIteration int32
 	CurrentTokens    int64
 }
@@ -95,20 +105,43 @@ func (c *Client) ListSessions(ctx context.Context, limit int) ([]*Session, error
 	return out, nil
 }
 
+// DeleteSession removes a session by ID. Returns the number of bytes
+// freed (server-side) for the session's on-disk workspace dir; zero
+// when the session had no artefacts. NotFound and FailedPrecondition
+// (running session) are surfaced as gRPC errors — callers should
+// inspect status.Code(err) to distinguish them.
+func (c *Client) DeleteSession(ctx context.Context, id string) (freedBytes int64, err error) {
+	resp, err := c.sessions.Delete(ctx, &gilv1.DeleteRequest{Id: id})
+	if err != nil {
+		return 0, err
+	}
+	return resp.FreedBytes, nil
+}
+
 // fromProto converts a proto Session to the SDK Session value type.
 // Returns nil if the input is nil.
 func fromProto(s *gilv1.Session) *Session {
 	if s == nil {
 		return nil
 	}
-	return &Session{
+	out := &Session{
 		ID:               s.Id,
 		Status:           s.Status.String(),
 		WorkingDir:       s.WorkingDir,
 		GoalHint:         s.GoalHint,
+		SpecID:           s.SpecId,
+		TotalTokens:      s.TotalTokens,
+		TotalCostUSD:     s.TotalCostUsd,
 		CurrentIteration: s.CurrentIteration,
 		CurrentTokens:    s.CurrentTokens,
 	}
+	if s.CreatedAt != nil {
+		out.CreatedAt = s.CreatedAt.AsTime()
+	}
+	if s.UpdatedAt != nil {
+		out.UpdatedAt = s.UpdatedAt.AsTime()
+	}
+	return out
 }
 
 // InterviewModels lets callers specify per-stage models for an interview.

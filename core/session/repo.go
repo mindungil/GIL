@@ -121,6 +121,29 @@ func (r *Repo) List(ctx context.Context, opts ListOptions) ([]Session, error) {
 	return out, rows.Err()
 }
 
+// Delete removes the session row by id. Returns ErrNotFound when no
+// row matches; the caller can treat that as an idempotent no-op or
+// surface it depending on context (the SessionService.Delete RPC
+// surfaces it so a CLI batch delete can render an accurate count).
+//
+// This is a row-only delete; the per-session workspace directory under
+// SessionsDir/<id> is owned by the gild process and is unlinked
+// separately by SessionService.Delete (the Repo has no path knowledge).
+func (r *Repo) Delete(ctx context.Context, id string) error {
+	res, err := r.db.ExecContext(ctx, `DELETE FROM sessions WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("session.Delete: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("session.Delete rowsAffected: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // UpdateStatus changes the session's status string and bumps updated_at.
 // Returns ErrNotFound if the session does not exist.
 func (r *Repo) UpdateStatus(ctx context.Context, id, status string) error {

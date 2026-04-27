@@ -51,6 +51,18 @@ service SessionService {
       get: "/v1/sessions"
     };
   }
+  // Delete removes a session row and (when on-disk) its per-session
+  // workspace directory under SessionsDir/<id>. Refuses to delete
+  // RUNNING sessions (Aborted / FailedPrecondition) — the caller must
+  // stop the run first. NotFound is returned when the id does not
+  // exist; idempotent removes (delete twice) deliberately surface as
+  // NotFound rather than silently succeeding so the CLI can render an
+  // accurate count when batch-deleting.
+  rpc Delete(DeleteRequest) returns (DeleteResponse) {
+    option (google.api.http) = {
+      delete: "/v1/sessions/{id}"
+    };
+  }
 }
 
 message CreateRequest {
@@ -69,4 +81,15 @@ message ListRequest {
 
 message ListResponse {
   repeated Session sessions = 1;
+}
+
+message DeleteRequest {
+  string id = 1;
+}
+
+message DeleteResponse {
+  // freed_bytes is the size of the per-session directory that was
+  // unlinked (best effort — symlinks/sparse files may be undercounted).
+  // Zero when the session had no on-disk artefacts.
+  int64 freed_bytes = 1;
 }

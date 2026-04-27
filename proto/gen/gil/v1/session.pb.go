@@ -405,6 +405,97 @@ func (x *ListResponse) GetSessions() []*Session {
 	return nil
 }
 
+type DeleteRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeleteRequest) Reset() {
+	*x = DeleteRequest{}
+	mi := &file_gil_v1_session_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeleteRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeleteRequest) ProtoMessage() {}
+
+func (x *DeleteRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_gil_v1_session_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeleteRequest.ProtoReflect.Descriptor instead.
+func (*DeleteRequest) Descriptor() ([]byte, []int) {
+	return file_gil_v1_session_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *DeleteRequest) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+type DeleteResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// freed_bytes is the size of the per-session directory that was
+	// unlinked (best effort — symlinks/sparse files may be undercounted).
+	// Zero when the session had no on-disk artefacts.
+	FreedBytes    int64 `protobuf:"varint,1,opt,name=freed_bytes,json=freedBytes,proto3" json:"freed_bytes,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeleteResponse) Reset() {
+	*x = DeleteResponse{}
+	mi := &file_gil_v1_session_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeleteResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeleteResponse) ProtoMessage() {}
+
+func (x *DeleteResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_gil_v1_session_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeleteResponse.ProtoReflect.Descriptor instead.
+func (*DeleteResponse) Descriptor() ([]byte, []int) {
+	return file_gil_v1_session_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *DeleteResponse) GetFreedBytes() int64 {
+	if x != nil {
+		return x.FreedBytes
+	}
+	return 0
+}
+
 var File_gil_v1_session_proto protoreflect.FileDescriptor
 
 const file_gil_v1_session_proto_rawDesc = "" +
@@ -437,7 +528,12 @@ const file_gil_v1_session_proto_rawDesc = "" +
 	"\x05limit\x18\x01 \x01(\x05R\x05limit\x12#\n" +
 	"\rstatus_filter\x18\x02 \x01(\tR\fstatusFilter\";\n" +
 	"\fListResponse\x12+\n" +
-	"\bsessions\x18\x01 \x03(\v2\x0f.gil.v1.SessionR\bsessions*\x8f\x01\n" +
+	"\bsessions\x18\x01 \x03(\v2\x0f.gil.v1.SessionR\bsessions\"\x1f\n" +
+	"\rDeleteRequest\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\"1\n" +
+	"\x0eDeleteResponse\x12\x1f\n" +
+	"\vfreed_bytes\x18\x01 \x01(\x03R\n" +
+	"freedBytes*\x8f\x01\n" +
 	"\rSessionStatus\x12\x1e\n" +
 	"\x1aSESSION_STATUS_UNSPECIFIED\x10\x00\x12\v\n" +
 	"\aCREATED\x10\x01\x12\x10\n" +
@@ -447,11 +543,12 @@ const file_gil_v1_session_proto_rawDesc = "" +
 	"\aRUNNING\x10\x04\x12\x0f\n" +
 	"\vAUTO_PAUSED\x10\x05\x12\b\n" +
 	"\x04DONE\x10\x06\x12\v\n" +
-	"\aSTOPPED\x10\a2\xeb\x01\n" +
+	"\aSTOPPED\x10\a2\xbf\x02\n" +
 	"\x0eSessionService\x12I\n" +
 	"\x06Create\x12\x15.gil.v1.CreateRequest\x1a\x0f.gil.v1.Session\"\x17\x82\xd3\xe4\x93\x02\x11:\x01*\"\f/v1/sessions\x12E\n" +
 	"\x03Get\x12\x12.gil.v1.GetRequest\x1a\x0f.gil.v1.Session\"\x19\x82\xd3\xe4\x93\x02\x13\x12\x11/v1/sessions/{id}\x12G\n" +
-	"\x04List\x12\x13.gil.v1.ListRequest\x1a\x14.gil.v1.ListResponse\"\x14\x82\xd3\xe4\x93\x02\x0e\x12\f/v1/sessionsB1Z/github.com/mindungil/gil/proto/gen/gil/v1;gilv1b\x06proto3"
+	"\x04List\x12\x13.gil.v1.ListRequest\x1a\x14.gil.v1.ListResponse\"\x14\x82\xd3\xe4\x93\x02\x0e\x12\f/v1/sessions\x12R\n" +
+	"\x06Delete\x12\x15.gil.v1.DeleteRequest\x1a\x16.gil.v1.DeleteResponse\"\x19\x82\xd3\xe4\x93\x02\x13*\x11/v1/sessions/{id}B1Z/github.com/mindungil/gil/proto/gen/gil/v1;gilv1b\x06proto3"
 
 var (
 	file_gil_v1_session_proto_rawDescOnce sync.Once
@@ -466,7 +563,7 @@ func file_gil_v1_session_proto_rawDescGZIP() []byte {
 }
 
 var file_gil_v1_session_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_gil_v1_session_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
+var file_gil_v1_session_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
 var file_gil_v1_session_proto_goTypes = []any{
 	(SessionStatus)(0),            // 0: gil.v1.SessionStatus
 	(*Session)(nil),               // 1: gil.v1.Session
@@ -474,21 +571,25 @@ var file_gil_v1_session_proto_goTypes = []any{
 	(*GetRequest)(nil),            // 3: gil.v1.GetRequest
 	(*ListRequest)(nil),           // 4: gil.v1.ListRequest
 	(*ListResponse)(nil),          // 5: gil.v1.ListResponse
-	(*timestamppb.Timestamp)(nil), // 6: google.protobuf.Timestamp
+	(*DeleteRequest)(nil),         // 6: gil.v1.DeleteRequest
+	(*DeleteResponse)(nil),        // 7: gil.v1.DeleteResponse
+	(*timestamppb.Timestamp)(nil), // 8: google.protobuf.Timestamp
 }
 var file_gil_v1_session_proto_depIdxs = []int32{
 	0, // 0: gil.v1.Session.status:type_name -> gil.v1.SessionStatus
-	6, // 1: gil.v1.Session.created_at:type_name -> google.protobuf.Timestamp
-	6, // 2: gil.v1.Session.updated_at:type_name -> google.protobuf.Timestamp
+	8, // 1: gil.v1.Session.created_at:type_name -> google.protobuf.Timestamp
+	8, // 2: gil.v1.Session.updated_at:type_name -> google.protobuf.Timestamp
 	1, // 3: gil.v1.ListResponse.sessions:type_name -> gil.v1.Session
 	2, // 4: gil.v1.SessionService.Create:input_type -> gil.v1.CreateRequest
 	3, // 5: gil.v1.SessionService.Get:input_type -> gil.v1.GetRequest
 	4, // 6: gil.v1.SessionService.List:input_type -> gil.v1.ListRequest
-	1, // 7: gil.v1.SessionService.Create:output_type -> gil.v1.Session
-	1, // 8: gil.v1.SessionService.Get:output_type -> gil.v1.Session
-	5, // 9: gil.v1.SessionService.List:output_type -> gil.v1.ListResponse
-	7, // [7:10] is the sub-list for method output_type
-	4, // [4:7] is the sub-list for method input_type
+	6, // 7: gil.v1.SessionService.Delete:input_type -> gil.v1.DeleteRequest
+	1, // 8: gil.v1.SessionService.Create:output_type -> gil.v1.Session
+	1, // 9: gil.v1.SessionService.Get:output_type -> gil.v1.Session
+	5, // 10: gil.v1.SessionService.List:output_type -> gil.v1.ListResponse
+	7, // 11: gil.v1.SessionService.Delete:output_type -> gil.v1.DeleteResponse
+	8, // [8:12] is the sub-list for method output_type
+	4, // [4:8] is the sub-list for method input_type
 	4, // [4:4] is the sub-list for extension type_name
 	4, // [4:4] is the sub-list for extension extendee
 	0, // [0:4] is the sub-list for field type_name
@@ -505,7 +606,7 @@ func file_gil_v1_session_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_gil_v1_session_proto_rawDesc), len(file_gil_v1_session_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   5,
+			NumMessages:   7,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

@@ -75,6 +75,26 @@ func TestRepo_List_ReturnsAll(t *testing.T) {
 	require.Len(t, list, 3)
 }
 
+func TestRepo_Delete(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	defer db.Close()
+	repo := NewRepo(db)
+
+	s, err := repo.Create(ctx, CreateInput{WorkingDir: "/x"})
+	require.NoError(t, err)
+	require.NoError(t, repo.Delete(ctx, s.ID))
+
+	// Gone.
+	_, err = repo.Get(ctx, s.ID)
+	require.ErrorIs(t, err, ErrNotFound)
+
+	// Idempotency at the repo layer surfaces NotFound (the service
+	// translates that to a CLI-friendly batch-count signal).
+	require.ErrorIs(t, repo.Delete(ctx, s.ID), ErrNotFound)
+	require.ErrorIs(t, repo.Delete(ctx, "never-existed"), ErrNotFound)
+}
+
 func TestRepo_UpdateStatus(t *testing.T) {
 	ctx := context.Background()
 	db := openTestDB(t)
