@@ -13,7 +13,7 @@ Thanks for considering a contribution to gil.
 ## Development setup
 
 ```bash
-git clone https://github.com/jedutools/gil.git
+git clone https://github.com/mindungil/GIL.git
 cd gil
 make build             # produces bin/{gil,gild,giltui,gilmcp}
 make test              # all unit tests
@@ -94,7 +94,7 @@ Only `main` and `develop` are long-lived. Everything else is deleted after merge
 
 ## Reporting bugs
 
-GitHub issues: https://github.com/jedutools/gil/issues
+GitHub issues: https://github.com/mindungil/GIL/issues
 
 Include:
 - gil version (`gil --version`)

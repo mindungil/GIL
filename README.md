@@ -8,8 +8,8 @@
 
 ```bash
 # 1. Build
-git clone https://github.com/<user>/gil.git
-cd gil
+git clone https://github.com/mindungil/GIL.git
+cd GIL
 make build           # produces bin/{gil,gild,giltui,gilmcp}
 # (or: make install — installs to /usr/local/bin)
 
@@ -197,7 +197,7 @@ In Phase 9 the "Ask" path uses TUI dialog if connected; non-interactive runs fal
 - **Modal / Daytona 실제 deployment**: 각각 Modal / Daytona 계정 + 토큰 필요. driver 코드 + e2e (fake CLI / httptest) 모두 green.
 - **OIDC 실제 IdP**: Google / Auth0 등 실제 issuer 설정. middleware + mock IdP e2e 모두 green.
 - **VS Code Marketplace 게시**: `vsce package` → publisher 등록 → publish.
-- **Homebrew tap**: `jedutools/homebrew-tap` 리포 생성 + GoReleaser brews 블록의 token 시크릿 등록.
+- **Homebrew tap**: `mindungil/homebrew-tap` 리포 생성 + GoReleaser brews 블록의 token 시크릿 등록.
 - **Atropos 실제 training run**: hermes-agent 설치 + `OPENROUTER_API_KEY` + Atropos server.
 
 ## License

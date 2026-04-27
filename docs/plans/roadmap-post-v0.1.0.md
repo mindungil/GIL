@@ -68,10 +68,7 @@
 - **proto Adopt RPC**: `gil import` 로 들어온 세션이 SessionService.List 에 보이게
 - **MCP OAuth 실제 구현**: `gil mcp login <name>` 현재 stub
 - **테스트 시점**: `Test User` author 이메일이 e2e fixtures + commit messages 일부에 박혀 있을 수 있음 — grep 후 정리
-- **GoReleaser brews owner**: `.goreleaser.yaml` 의 brews tap이 `jedutools/homebrew-tap` 으로 되어 있음 — `mindungil/homebrew-tap` 으로 변경 필요
-- **scripts/install.sh**: `GIL_INSTALL_REPO` 기본값 `jedutools/gil` → `mindungil/GIL`
-- **README**: `https://github.com/<user>/gil.git` placeholder → `https://github.com/mindungil/GIL.git`
-- **CONTRIBUTING/SECURITY/PRIVACY**: `jedutools.io` 이메일들 → 실제 사용자 도메인 (또는 GitHub Issues 으로 라우팅)
+- **(완료, Phase 17)** GoReleaser brews owner / install.sh / README / CONTRIBUTING / SECURITY / PRIVACY 의 placeholder 들 모두 `mindungil/GIL` + `alswnsrlf12@naver.com` 으로 swap.
 
 ## 우선순위 의견
 

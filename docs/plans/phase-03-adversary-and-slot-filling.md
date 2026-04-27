@@ -51,8 +51,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/jedutools/gil/core/provider"
-	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
+	"github.com/mindungil/gil/core/provider"
+	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
 )
 
 func TestSlotFiller_ExtractsGoalAndConstraints(t *testing.T) {
@@ -98,8 +98,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/jedutools/gil/core/provider"
-	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
+	"github.com/mindungil/gil/core/provider"
+	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
 )
 
 // SlotFiller analyzes a user reply and updates the working spec accordingly.
@@ -340,7 +340,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/jedutools/gil/core/provider"
+	"github.com/mindungil/gil/core/provider"
 )
 
 func TestAdversary_FindsBlockers(t *testing.T) {
@@ -378,7 +378,7 @@ import (
 
 	"google.golang.org/protobuf/encoding/protojson"
 
-	"github.com/jedutools/gil/core/provider"
+	"github.com/mindungil/gil/core/provider"
 )
 
 // Finding is one issue raised by the Adversary.
@@ -470,7 +470,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/jedutools/gil/core/provider"
+	"github.com/mindungil/gil/core/provider"
 )
 
 func TestSelfAuditGate_PassesWhenAgentApproves(t *testing.T) {
@@ -508,7 +508,7 @@ import (
 
 	"google.golang.org/protobuf/encoding/protojson"
 
-	"github.com/jedutools/gil/core/provider"
+	"github.com/mindungil/gil/core/provider"
 )
 
 // SelfAuditGate is the explicit "is the agent ready to advance?" check at
@@ -775,7 +775,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/jedutools/gil/sdk"
+	"github.com/mindungil/gil/sdk"
 )
 
 func resumeCmd() *cobra.Command {

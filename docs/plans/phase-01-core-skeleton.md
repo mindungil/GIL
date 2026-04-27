@@ -64,7 +64,7 @@ done
 ```bash
 cd /home/ubuntu/gil
 for m in core runtime proto server cli tui sdk mcp; do
-  (cd "$m" && go mod init "github.com/jedutools/gil/$m")
+  (cd "$m" && go mod init "github.com/mindungil/gil/$m")
 done
 ```
 
@@ -192,7 +192,7 @@ package gil.v1;
 
 import "google/protobuf/timestamp.proto";
 
-option go_package = "github.com/jedutools/gil/proto/gen/gil/v1;gilv1";
+option go_package = "github.com/mindungil/gil/proto/gen/gil/v1;gilv1";
 
 message FrozenSpec {
   string spec_id = 1;
@@ -331,7 +331,7 @@ package gil.v1;
 
 import "google/protobuf/timestamp.proto";
 
-option go_package = "github.com/jedutools/gil/proto/gen/gil/v1;gilv1";
+option go_package = "github.com/mindungil/gil/proto/gen/gil/v1;gilv1";
 
 message Event {
   int64 id = 1;
@@ -376,7 +376,7 @@ package gil.v1;
 import "google/protobuf/timestamp.proto";
 import "gil/v1/spec.proto";
 
-option go_package = "github.com/jedutools/gil/proto/gen/gil/v1;gilv1";
+option go_package = "github.com/mindungil/gil/proto/gen/gil/v1;gilv1";
 
 message Session {
   string id = 1;
@@ -1051,7 +1051,7 @@ git commit -m "feat(core/event): JSONL persistence with sync/load"
 
 ```bash
 cd /home/ubuntu/gil/core
-go get github.com/jedutools/gil/proto
+go get github.com/mindungil/gil/proto
 # (workspace 모드라 로컬 디렉토리에서 resolve됨)
 ```
 
@@ -1064,7 +1064,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
-	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
+	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
 )
 
 func validSpec() *gilv1.FrozenSpec {
@@ -1129,7 +1129,7 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
-	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
+	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
 )
 
 // Freeze는 spec 내용을 결정적 bytes로 직렬화하고 SHA-256 hex를 ContentSha256에 set한다.
@@ -1689,7 +1689,7 @@ git commit -m "feat(server/uds): UDS listener with mode 0600"
 
 ```bash
 cd /home/ubuntu/gil/server
-go get github.com/jedutools/gil/core github.com/jedutools/gil/proto google.golang.org/grpc google.golang.org/protobuf
+go get github.com/mindungil/gil/core github.com/mindungil/gil/proto google.golang.org/grpc google.golang.org/protobuf
 ```
 
 - [ ] **Step 2: 실패 테스트 작성**
@@ -1706,8 +1706,8 @@ import (
 	_ "modernc.org/sqlite"
 	"github.com/stretchr/testify/require"
 
-	"github.com/jedutools/gil/core/session"
-	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
+	"github.com/mindungil/gil/core/session"
+	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
 )
 
 func newTestService(t *testing.T) *SessionService {
@@ -1776,8 +1776,8 @@ import (
 
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	"github.com/jedutools/gil/core/session"
-	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
+	"github.com/mindungil/gil/core/session"
+	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
 )
 
 type SessionService struct {
@@ -1896,7 +1896,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
+	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
 )
 
 func TestGild_StartsAndAcceptsCreate(t *testing.T) {
@@ -1955,10 +1955,10 @@ import (
 	_ "modernc.org/sqlite"
 	"google.golang.org/grpc"
 
-	"github.com/jedutools/gil/core/session"
-	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
-	"github.com/jedutools/gil/server/internal/service"
-	"github.com/jedutools/gil/server/internal/uds"
+	"github.com/mindungil/gil/core/session"
+	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
+	"github.com/mindungil/gil/server/internal/service"
+	"github.com/mindungil/gil/server/internal/uds"
 )
 
 type server struct {
@@ -2079,7 +2079,7 @@ git commit -m "feat(server): gild daemon entry with gRPC SessionService over UDS
 
 ```bash
 cd /home/ubuntu/gil/sdk
-go get github.com/jedutools/gil/proto google.golang.org/grpc
+go get github.com/mindungil/gil/proto google.golang.org/grpc
 ```
 
 - [ ] **Step 2: 실패 테스트 (mock-free, 실제 gRPC server 띄움)**
@@ -2099,10 +2099,10 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 
-	"github.com/jedutools/gil/core/session"
-	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
-	svc "github.com/jedutools/gil/server/internal/service"
-	"github.com/jedutools/gil/server/internal/uds"
+	"github.com/mindungil/gil/core/session"
+	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
+	svc "github.com/mindungil/gil/server/internal/service"
+	"github.com/mindungil/gil/server/internal/uds"
 )
 
 func startTestServer(t *testing.T) (string, func()) {
@@ -2170,7 +2170,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
+	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
 )
 
 type Client struct {
@@ -2279,7 +2279,7 @@ git commit -m "feat(sdk): gRPC client wrapper with Dial + Session ops"
 
 ```bash
 cd /home/ubuntu/gil/cli
-go get github.com/spf13/cobra github.com/jedutools/gil/sdk
+go get github.com/spf13/cobra github.com/mindungil/gil/sdk
 ```
 
 - [ ] **Step 2: `cli/cmd/gil/main.go` 작성**
@@ -2291,7 +2291,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/jedutools/gil/cli/internal/cmd"
+	"github.com/mindungil/gil/cli/internal/cmd"
 )
 
 func main() {
@@ -2402,10 +2402,10 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 
-	"github.com/jedutools/gil/core/session"
-	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
-	svc "github.com/jedutools/gil/server/internal/service"
-	"github.com/jedutools/gil/server/internal/uds"
+	"github.com/mindungil/gil/core/session"
+	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
+	svc "github.com/mindungil/gil/server/internal/service"
+	"github.com/mindungil/gil/server/internal/uds"
 )
 
 func startGildForTest(t *testing.T) (sock string, cleanup func()) {
@@ -2474,7 +2474,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/jedutools/gil/sdk"
+	"github.com/mindungil/gil/sdk"
 )
 
 func newCmd() *cobra.Command {
@@ -2551,7 +2551,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/jedutools/gil/sdk"
+	"github.com/mindungil/gil/sdk"
 )
 
 func TestStatus_ListsSessions(t *testing.T) {
@@ -2594,7 +2594,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/jedutools/gil/sdk"
+	"github.com/mindungil/gil/sdk"
 )
 
 func statusCmd() *cobra.Command {

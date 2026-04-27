@@ -16,8 +16,8 @@
 
 3 채널 후보 비교:
 - GitHub releases + curl-installer (Phase 10 GoReleaser가 이미 만듦)
-- Homebrew tap (`jedutools/homebrew-tap` repo 필요 — placeholder formula GoReleaser가 만듦)
-- `go install github.com/jedutools/gil/cli/cmd/gil@latest` (모듈 path 정리 필요)
+- Homebrew tap (`mindungil/homebrew-tap` repo 필요 — placeholder formula GoReleaser가 만듦)
+- `go install github.com/mindungil/gil/cli/cmd/gil@latest` (모듈 path 정리 필요)
 
 각각의 trade-off + 권장 (curl-installer + homebrew). Marketplace는 phase-by-phase.
 

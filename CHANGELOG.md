@@ -116,5 +116,5 @@ in-session UX, distribution paths.
 - Pre-1.0: API and on-disk schemas may change between releases.
   Migrations will be best-effort.
 
-[Unreleased]: https://github.com/jedutools/gil/compare/v0.1.0-alpha...HEAD
-[0.1.0-alpha]: https://github.com/jedutools/gil/releases/tag/v0.1.0-alpha
+[Unreleased]: https://github.com/mindungil/GIL/compare/v0.1.0-alpha...HEAD
+[0.1.0-alpha]: https://github.com/mindungil/GIL/releases/tag/v0.1.0-alpha
