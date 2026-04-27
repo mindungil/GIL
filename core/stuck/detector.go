@@ -435,39 +435,8 @@ func checkNoProgress(events []event.Event, threshold, oscillationCap int) []Sign
 	// matches iteration order since iteration_start events come in sequence).
 	last := stats[len(stats)-threshold:]
 
-	// Require at least one verify_run signal across the K iters; otherwise
-	// abstain — we have no progress signal and cannot claim its absence.
-	anyVerify := false
-	for _, s := range last {
-		if s.hasVerifyRun {
-			anyVerify = true
-			break
-		}
-	}
-	if !anyVerify {
-		return nil
-	}
-
-	// Verifier passing count must be non-improving (i.e., never strictly
-	// increases) across iters that ran verify. If any iter strictly improves
-	// over the previous verify-bearing iter, progress was made.
-	var verifyTrace []int
-	for _, s := range last {
-		if s.hasVerifyRun {
-			verifyTrace = append(verifyTrace, s.verifyPassing)
-		}
-	}
-	for i := 1; i < len(verifyTrace); i++ {
-		if verifyTrace[i] > verifyTrace[i-1] {
-			return nil // strict improvement → not stuck
-		}
-	}
-	stalledAt := 0
-	if len(verifyTrace) > 0 {
-		stalledAt = verifyTrace[len(verifyTrace)-1]
-	}
-
-	// Merge files across the K iters.
+	// Merge files across the K iters first — we need this for both the
+	// verify-bearing path and the verify-independent fallback.
 	merged := map[string]int{}
 	for _, s := range last {
 		for f, n := range s.files {
@@ -488,17 +457,60 @@ func checkNoProgress(events []event.Event, threshold, oscillationCap int) []Sign
 		}
 	}
 
+	// Require at least one verify_run signal OR no edits at all. If verify
+	// fired, we have an explicit progress trace; if no verify AND no edits,
+	// the agent has done K iters of read-only / failed work — also stuck.
+	// Self-dogfood Run 10 (Phase 22.B) showed agents seldom run verify
+	// per-iter, so verify-required abstain was too conservative.
+	anyVerify := false
+	for _, s := range last {
+		if s.hasVerifyRun {
+			anyVerify = true
+			break
+		}
+	}
+	if !anyVerify && len(merged) > 0 {
+		// Agent is editing but not verifying — could be working productively
+		// toward an end_turn. Abstain.
+		return nil
+	}
+
+	// Verifier passing count must be non-improving (i.e., never strictly
+	// increases) across iters that ran verify. If any iter strictly improves
+	// over the previous verify-bearing iter, progress was made.
+	var verifyTrace []int
+	for _, s := range last {
+		if s.hasVerifyRun {
+			verifyTrace = append(verifyTrace, s.verifyPassing)
+		}
+	}
+	for i := 1; i < len(verifyTrace); i++ {
+		if verifyTrace[i] > verifyTrace[i-1] {
+			return nil // strict improvement → not stuck
+		}
+	}
+	stalledAt := -1 // unknown when no verify_run
+	if len(verifyTrace) > 0 {
+		stalledAt = verifyTrace[len(verifyTrace)-1]
+	}
+
 	if !(len(merged) == 0 || churn) {
 		return nil
 	}
 
 	// Build a stable, terse detail string.
 	var sb strings.Builder
-	sb.WriteString("verifier stalled at ")
-	sb.WriteString(itoa(stalledAt))
-	sb.WriteString(" passing over ")
-	sb.WriteString(itoa(threshold))
-	sb.WriteString(" iters; ")
+	if stalledAt < 0 {
+		sb.WriteString("no verify run + no edits over ")
+		sb.WriteString(itoa(threshold))
+		sb.WriteString(" iters; ")
+	} else {
+		sb.WriteString("verifier stalled at ")
+		sb.WriteString(itoa(stalledAt))
+		sb.WriteString(" passing over ")
+		sb.WriteString(itoa(threshold))
+		sb.WriteString(" iters; ")
+	}
 	if len(merged) == 0 {
 		sb.WriteString("no files modified")
 	} else {

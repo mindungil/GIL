@@ -380,8 +380,43 @@ func TestDetector_NoProgress_Abstains_NoVerifyEvents(t *testing.T) {
 	}
 	sigs := d.Check(events)
 	if hasPattern(sigs, PatternNoProgress) {
-		t.Fatalf("expected NO NoProgress when no verify events, got %v", sigs)
+		t.Fatalf("expected NO NoProgress when no verify events but files ARE modified, got %v", sigs)
 	}
+}
+
+// TestDetector_NoProgress_Fires_NoVerifyAndNoEdits — Phase 22.B fallback.
+// Self-dogfood Run 10 showed agents seldom call verify per-iter, so the
+// original "abstain when no verify_run" rule was too strict. New rule:
+// if K iters have NO successful edits/writes AND no verify_run, that's an
+// even stronger stuck signal (agent is iterating but neither verifying
+// nor modifying anything).
+func TestDetector_NoProgress_Fires_NoVerifyAndNoEdits(t *testing.T) {
+	d := &Detector{}
+	var events []event.Event
+	for i := 1; i <= 4; i++ {
+		events = append(events, iterStart(i))
+		// Read-only tool calls — no edits, no verify.
+		events = append(events, toolCall("read_file", `{"path":"a.go"}`))
+		events = append(events, toolResult("read_file", "<content>", false))
+		events = append(events, toolCall("bash", `{"command":"ls"}`))
+		events = append(events, toolResult("bash", "out", false))
+	}
+	sigs := d.Check(events)
+	if !hasPattern(sigs, PatternNoProgress) {
+		t.Fatalf("expected NoProgress fire when no verify AND no edits over 4 iters, got %v", sigs)
+	}
+	// Detail should mention the verify-independent path.
+	for _, s := range sigs {
+		if s.Pattern == PatternNoProgress {
+			if s.Detail == "" || !contains(s.Detail, "no verify run") {
+				t.Errorf("expected detail to mention verify-independent path, got %q", s.Detail)
+			}
+		}
+	}
+}
+
+func contains(s, sub string) bool {
+	return len(sub) > 0 && len(s) >= len(sub) && (s == sub || (len(s) > len(sub) && (s[:len(sub)] == sub || contains(s[1:], sub))))
 }
 
 // TestDetector_NoProgress_BelowThreshold asserts 3 iters (< default 4)
