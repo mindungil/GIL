@@ -742,24 +742,127 @@ func (a *AgentLoop) Run(ctx context.Context) (*Result, error) {
 	return &Result{Status: "max_iterations", Iterations: maxIter, Tokens: totalTokens, CostUSD: totalCostUSD, FinalText: lastAssistantText}, nil
 }
 
-// RunSubagent satisfies stuck.SubagentRunner. It builds a fresh AgentLoop
-// using the parent's spec/provider/tools (filtered to allowedTools),
-// disables the parent's stuck/checkpoint/memory wiring, and runs it to
-// maxIters iterations. The sub-loop's FinalText becomes the summary.
+// SubagentConfig parameterises a sub-loop spawn. Used by both stuck-recovery
+// (via the legacy RunSubagent shape) and the agent-callable subagent tool.
+//
+// All fields except Goal are optional:
+//   - AllowedTools: filter for the parent's tool set. Empty → use the
+//     conservative read-only default (read_file + repomap + memory_load +
+//     web_fetch + lsp).
+//   - MaxIterations: hard cap on sub-loop iters. Zero or negative → 8.
+//     Clamped to 20 so a runaway prompt can't blow the parent's budget.
+//   - MaxTokens: soft cap on the sub-loop's combined input+output token
+//     usage. The cap is plumbed through the cloned Budget so the runner's
+//     existing token-budget enforcement triggers a clean budget_exhausted
+//     return rather than running away. Zero → 30_000.
+//   - Model: provider model id override. Empty → reuse the parent's model.
+type SubagentConfig struct {
+	Goal          string
+	AllowedTools  []string
+	MaxIterations int
+	MaxTokens     int64
+	Model         string
+}
+
+// SubagentResult is what the parent sees after a sub-loop completes.
+// Tokens is the combined input+output count so the parent can charge the
+// sub-loop's spend against its own budget if it wants to (the agent-callable
+// subagent tool inspects this on the parent's side).
+type SubagentResult struct {
+	Summary    string
+	Status     string
+	Iterations int
+	Tokens     int64
+}
+
+// Default tools for a sub-loop when the caller passes no AllowedTools.
+// The list matches the read-only investigation surface called out in the
+// subagent tool description: read_file, repomap, memory_load, web_fetch,
+// lsp. NO bash, edit, write_file, apply_patch, exec — those are explicitly
+// dropped so sub-loops stay side-effect-free.
+var defaultSubagentTools = []string{
+	"read_file",
+	"repomap",
+	"memory_load",
+	"web_fetch",
+	"lsp",
+}
+
+// Bounds enforced on every SubagentConfig regardless of caller — keeps a
+// runaway tool call from spending the parent's budget on an ill-conceived
+// sub-loop.
+const (
+	subagentMaxIterCeiling   = 20
+	subagentDefaultMaxIter   = 8
+	subagentDefaultMaxTokens = 30_000
+)
+
+// RunSubagent satisfies stuck.SubagentRunner. Thin wrapper over
+// RunSubagentWithConfig that preserves the original positional shape
+// (subgoal, allowedTools, maxIters) the stuck-recovery interface expects.
+//
+// Stuck-recovery callers (SubagentBranch) come through this path; the
+// agent-callable subagent tool calls RunSubagentWithConfig directly so it
+// can plumb token caps + model overrides + return token usage.
 func (a *AgentLoop) RunSubagent(ctx context.Context, subgoal string, allowedTools []string, maxIters int) (string, error) {
-	// Filter parent's tools to the allowed subset.
+	res, err := a.RunSubagentWithConfig(ctx, SubagentConfig{
+		Goal:          subgoal,
+		AllowedTools:  allowedTools,
+		MaxIterations: maxIters,
+	})
+	if err != nil {
+		return "", err
+	}
+	if res == nil {
+		return "", nil
+	}
+	return res.Summary, nil
+}
+
+// RunSubagentWithConfig is the full-fidelity entrypoint used by the
+// agent-callable subagent tool. It clones the parent's spec, applies the
+// config's iteration + token caps, filters the tool set, and runs the
+// sub-loop in-process (NO new session, NO new event stream — the sub-loop
+// inherits the parent's stream so subagent_started / subagent_done /
+// provider_request events all surface to the same TUI/CLI viewers).
+func (a *AgentLoop) RunSubagentWithConfig(ctx context.Context, cfg SubagentConfig) (*SubagentResult, error) {
+	if strings.TrimSpace(cfg.Goal) == "" {
+		return nil, errors.New("subagent: goal is required")
+	}
+
+	// Resolve caps with defaults + ceilings.
+	maxIter := cfg.MaxIterations
+	if maxIter <= 0 {
+		maxIter = subagentDefaultMaxIter
+	}
+	if maxIter > subagentMaxIterCeiling {
+		maxIter = subagentMaxIterCeiling
+	}
+	maxTokens := cfg.MaxTokens
+	if maxTokens <= 0 {
+		maxTokens = subagentDefaultMaxTokens
+	}
+
+	// Resolve allowed tools. Empty → conservative read-only default.
+	allowedTools := cfg.AllowedTools
+	if len(allowedTools) == 0 {
+		allowedTools = defaultSubagentTools
+	}
 	allow := make(map[string]bool, len(allowedTools))
 	for _, t := range allowedTools {
 		allow[t] = true
 	}
 	var subTools []tool.Tool
+	var actualToolNames []string
 	for _, t := range a.Tools {
 		if allow[t.Name()] {
 			subTools = append(subTools, t)
+			actualToolNames = append(actualToolNames, t.Name())
 		}
 	}
 
-	// Build a sub-spec that overrides max iterations for the sub-loop only.
+	// Build a sub-spec that overrides iteration + token caps for the
+	// sub-loop only. Clone keeps the parent's spec untouched.
 	var subSpec *gilv1.FrozenSpec
 	if a.Spec != nil {
 		subSpec = proto.Clone(a.Spec).(*gilv1.FrozenSpec)
@@ -769,32 +872,116 @@ func (a *AgentLoop) RunSubagent(ctx context.Context, subgoal string, allowedTool
 	if subSpec.Budget == nil {
 		subSpec.Budget = &gilv1.Budget{}
 	}
-	subSpec.Budget.MaxIterations = int32(maxIters)
+	subSpec.Budget.MaxIterations = int32(maxIter)
+	subSpec.Budget.MaxTotalTokens = maxTokens
+	// Cost budget intentionally not inherited; the parent's
+	// CostCalculator already accounts for every provider call (the
+	// sub-loop reuses the same provider) and a separate cap on the child
+	// would double-count.
+	subSpec.Budget.MaxTotalCostUsd = 0
 	if subSpec.Verification == nil {
 		subSpec.Verification = &gilv1.Verification{}
 	}
 	// No verifier checks for sub-loops: their goal is reconnaissance, not verify-pass.
 	subSpec.Verification.Checks = nil
 
+	model := cfg.Model
+	if model == "" {
+		model = a.Model
+	}
+
+	a.emit(event.SourceSystem, event.KindNote, "subagent_started", map[string]any{
+		"goal":           cfg.Goal,
+		"max_iterations": maxIter,
+		"max_tokens":     maxTokens,
+		"model":          model,
+		"tools":          actualToolNames,
+	})
+
 	sub := &AgentLoop{
 		Spec:            subSpec,
 		Provider:        a.Provider,
-		Model:           a.Model,
+		Model:           model,
 		Tools:           subTools,
 		Verifier:        verify.NewRunner(""),
-		SeedUserMessage: subgoal,
-		// Deliberately leave Stuck/Checkpoint/Memory/Permission/AskCallback nil
+		SeedUserMessage: cfg.Goal,
+		// Deliberately do NOT share the parent's event stream — the
+		// parent has already emitted subagent_started above and emits
+		// subagent_done with the final summary on return. Plumbing every
+		// per-iteration sub-loop event (provider_request / tool_call /
+		// run_done) into the parent stream would (1) confuse stream
+		// consumers that can't tell parent vs child events apart and
+		// (2) break stuck-recovery wiring that filters on run_done /
+		// run_max_iterations to know when the *parent* finished. The
+		// sub-loop runs to completion silently; the parent's two
+		// subagent_* events are the surface API.
+		//
+		// Inherit memory bank READ-ONLY: the runner reads it for the
+		// system-prompt prepend, but without memory_update in the
+		// allowed-tool default the sub-loop can't write back.
+		Memory: a.Memory,
+		// Workspace flows through so AGENTS.md / CLAUDE.md project
+		// instructions feed into the sub-loop's system prompt the same
+		// way they feed the parent's.
+		Workspace: a.Workspace,
+		// Deliberately leave Stuck/Checkpoint/Plan/Permission/AskCallback nil
 		// so the sub-loop is a clean, sandbox-free, no-side-effect investigator.
+		// (Permission gating is enforced at the PARENT level when the agent
+		// invokes the subagent tool — the sub-loop's restricted tool set
+		// makes a second permission layer redundant.)
 	}
 
 	res, err := sub.Run(ctx)
+	out := &SubagentResult{}
+	if res != nil {
+		out.Summary = res.FinalText
+		out.Status = res.Status
+		out.Iterations = res.Iterations
+		out.Tokens = res.Tokens
+	}
+	a.emit(event.SourceSystem, event.KindNote, "subagent_done", map[string]any{
+		"goal":       cfg.Goal,
+		"status":     out.Status,
+		"iterations": out.Iterations,
+		"tokens":     out.Tokens,
+		"summary":    truncateString(out.Summary, 512),
+	})
 	if err != nil {
-		return "", err
+		return out, err
 	}
-	if res == nil {
-		return "", nil
+	return out, nil
+}
+
+// AsSubagentRunner returns an adapter that satisfies tool.SubagentRunner
+// for the agent-callable subagent tool. The interface lives in core/tool
+// (alongside the tool itself) to avoid an import cycle (runner → tool →
+// runner). This adapter lives here because it has to reach into the
+// AgentLoop's RunSubagentWithConfig — declaring it on the runner side
+// keeps the tool side completely loop-agnostic.
+func (a *AgentLoop) AsSubagentRunner() tool.SubagentRunner {
+	return &subagentRunnerAdapter{loop: a}
+}
+
+type subagentRunnerAdapter struct {
+	loop *AgentLoop
+}
+
+func (s *subagentRunnerAdapter) RunSubagentWithConfig(ctx context.Context, cfg tool.SubagentRunConfig) (tool.SubagentRunResult, error) {
+	res, err := s.loop.RunSubagentWithConfig(ctx, SubagentConfig{
+		Goal:          cfg.Goal,
+		AllowedTools:  cfg.AllowedTools,
+		MaxIterations: cfg.MaxIterations,
+		MaxTokens:     cfg.MaxTokens,
+		Model:         cfg.Model,
+	})
+	out := tool.SubagentRunResult{}
+	if res != nil {
+		out.Summary = res.Summary
+		out.Status = res.Status
+		out.Iterations = res.Iterations
+		out.Tokens = res.Tokens
 	}
-	return res.FinalText, nil
+	return out, err
 }
 
 func buildSystemPrompt(spec *gilv1.FrozenSpec, tools []tool.Tool, bank *memory.Bank, instructionsSection string) string {
