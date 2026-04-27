@@ -3,6 +3,8 @@ package app
 import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/bubbles/key"
+
+	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
 )
 
 // Update implements tea.Model. Handles key input, terminal resize, and
@@ -85,16 +87,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return mm, cmd
 			}
 		}
-		// When a permission modal is open, intercept ALL keys and handle y/n/esc.
+		// When a permission modal is open, intercept ALL keys and handle
+		// the six allow/deny x once/session/always tiers (plus esc/q
+		// for "deny once" as the safe default-on-dismissal). Any
+		// non-permission key is swallowed so the user can't accidentally
+		// trigger refresh / movement while the agent is blocked waiting
+		// for an answer.
 		if m.pendingAsk != nil {
 			ask := m.pendingAsk
-			switch msg.String() {
-			case "y", "Y":
+			decision := permissionKeyToDecision(msg.String())
+			if decision != gilv1.PermissionDecision_PERMISSION_DECISION_UNSPECIFIED {
 				m.pendingAsk = nil
-				return m, answerCmd(m.client, ask.SessionID, ask.RequestID, true)
-			case "n", "N", "esc":
-				m.pendingAsk = nil
-				return m, answerCmd(m.client, ask.SessionID, ask.RequestID, false)
+				return m, answerCmd(m.client, ask.SessionID, ask.RequestID, decision)
 			}
 			// Swallow other keys while modal is open.
 			return m, nil

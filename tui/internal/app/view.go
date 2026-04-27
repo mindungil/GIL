@@ -95,11 +95,21 @@ func overlaySlash(base string, st *slashState, w int) string {
 
 // overlayModal appends a permission-request dialog below the base view.
 // (A true center-overlay would require terminal cell arithmetic; the
-// appended-box approach is sufficient for Phase 7 — Phase 8 can refine.)
+// appended-box approach is sufficient — refining the visual placement
+// is a future polish pass.)
+//
+// The six visible options map to permissionKeyToDecision in
+// tui/internal/app/permission.go. The phrasing follows codex's
+// 3-tier ladder (once/session/always) extended symmetrically to the
+// deny side, the way cline's CommandPermissionController organises its
+// allow/deny lists.
 func overlayModal(base string, ask *pendingAskMsg, w int) string {
 	box := modalBorder.Render(fmt.Sprintf(
-		"Permission Request\n\nTool:  %s\nKey:   %s\n\n[y] Allow   [n] Deny   [esc] Deny",
-		ask.Tool, truncate(ask.Key, max(w-20, 10)),
+		"The agent wants to run: %s %s\n\n"+
+			"[a] Allow once         [s] Allow session      [A] Always allow\n"+
+			"[d] Deny once                                 [D] Always deny\n"+
+			"[Esc] Cancel (deny once)",
+		ask.Tool, truncate(ask.Key, max(w-30, 10)),
 	))
 	return lipgloss.JoinVertical(lipgloss.Left, base, "", box)
 }

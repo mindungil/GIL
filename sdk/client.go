@@ -189,13 +189,39 @@ func (c *Client) RestoreRun(ctx context.Context, sessionID string, step int32) (
 	})
 }
 
-// AnswerPermission sends a yes/no response to a pending permission_ask.
-// delivered=false means the request_id wasn't pending (timed out or unknown).
+// AnswerPermission sends a yes/no response to a pending permission_ask
+// with ONCE semantics (legacy bool field). delivered=false means the
+// request_id wasn't pending (timed out or unknown).
+//
+// Prefer AnswerPermissionDecision when the caller wants to record the
+// user's persistence intent (session / always). The bool form is kept so
+// older clients (the gil run --interactive prompt, phase07 e2e) can stay
+// on the once-tier path without thinking about persistence.
 func (c *Client) AnswerPermission(ctx context.Context, sessionID, requestID string, allow bool) (bool, error) {
 	resp, err := c.runs.AnswerPermission(ctx, &gilv1.AnswerPermissionRequest{
 		SessionId: sessionID,
 		RequestId: requestID,
 		Allow:     allow,
+	})
+	if err != nil {
+		return false, err
+	}
+	return resp.Delivered, nil
+}
+
+// AnswerPermissionDecision sends the user's full answer (allow/deny x
+// once/session/always) to a pending permission_ask. The server uses the
+// enum to drive both the runner unblock AND the persistence side-effect
+// (in-memory session list for *_SESSION; on-disk PersistentStore for
+// *_ALWAYS). delivered=false has the same meaning as in AnswerPermission.
+//
+// Use this from the TUI modal where the user picks one of the six tiers
+// directly.
+func (c *Client) AnswerPermissionDecision(ctx context.Context, sessionID, requestID string, decision gilv1.PermissionDecision) (bool, error) {
+	resp, err := c.runs.AnswerPermission(ctx, &gilv1.AnswerPermissionRequest{
+		SessionId: sessionID,
+		RequestId: requestID,
+		Decision:  decision,
 	})
 	if err != nil {
 		return false, err
