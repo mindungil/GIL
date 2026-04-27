@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -262,6 +263,61 @@ func TestMCPLogin_StubMessage(t *testing.T) {
 	}
 	if !strings.Contains(stdout2, "Phase 13") {
 		t.Errorf("expected Phase 13 hint, got: %q", stdout2)
+	}
+}
+
+func TestMCPList_JSONOutput(t *testing.T) {
+	withGilHome(t)
+	withCwd(t, t.TempDir())
+
+	// Add one stdio + one http with bearer to exercise both shapes.
+	if _, _, err := runMCPCmd(t, "add", "fs", "--type", "stdio", "--", "echo", "hi"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := runMCPCmd(t,
+		"add", "issues",
+		"--type", "http",
+		"--url", "https://issues.example.com/mcp",
+		"--bearer", "super-secret",
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	prev := outputFormat
+	outputFormat = "json"
+	t.Cleanup(func() { outputFormat = prev })
+
+	stdout, _, err := runMCPCmd(t, "list")
+	if err != nil {
+		t.Fatalf("list --output json: %v", err)
+	}
+	var parsed mcpListJSON
+	if err := json.Unmarshal([]byte(stdout), &parsed); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, stdout)
+	}
+	if len(parsed.Servers) != 2 {
+		t.Fatalf("expected 2 servers, got %d", len(parsed.Servers))
+	}
+	if parsed.GlobalPath == "" {
+		t.Errorf("expected global_path to be populated")
+	}
+	if strings.Contains(stdout, "super-secret") {
+		t.Errorf("bearer token leaked into JSON output: %s", stdout)
+	}
+	var stdio, http *mcpServerJSON
+	for i := range parsed.Servers {
+		switch parsed.Servers[i].Name {
+		case "fs":
+			stdio = &parsed.Servers[i]
+		case "issues":
+			http = &parsed.Servers[i]
+		}
+	}
+	if stdio == nil || stdio.Type != "stdio" || stdio.Command != "echo" {
+		t.Errorf("missing/incorrect stdio entry: %+v", stdio)
+	}
+	if http == nil || http.Type != "http" || !http.HasBearer {
+		t.Errorf("missing/incorrect http entry: %+v", http)
 	}
 }
 

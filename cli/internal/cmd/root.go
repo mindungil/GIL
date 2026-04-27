@@ -6,6 +6,37 @@ import (
 	"github.com/jedutools/gil/core/paths"
 )
 
+// outputFormat is the value of the persistent `--output` flag wired in
+// Root(). Subcommands consult it via outputJSON() so we do not have to
+// thread a per-command boolean through every RunE. Valid values are
+// "text" (default) and "json"; unknown values fall through to text so
+// adding a new format later is forward-compatible.
+//
+// The variable is package-scoped because cobra's PersistentFlags binding
+// requires a stable address. Tests reset it to "text" via the helper
+// resetOutputFormatForTest at the bottom of root.go.
+var outputFormat = "text"
+
+// outputJSON reports whether the user asked for JSON via the persistent
+// --output flag. We compare case-insensitively so `--output JSON` works
+// the same as `--output json` (matches goose/codex tolerance).
+func outputJSON() bool {
+	switch outputFormat {
+	case "json", "JSON", "Json":
+		return true
+	default:
+		return false
+	}
+}
+
+// resetOutputFormatForTest restores the package-level outputFormat to its
+// default. Tests that mutate the flag (or that exercise multiple commands
+// in one process) call this in t.Cleanup so a stale "json" value from a
+// previous test does not bleed into a sibling.
+func resetOutputFormatForTest() {
+	outputFormat = "text"
+}
+
 // defaultLayout returns the XDG-derived layout (or the GIL_HOME single-
 // tree override when set). It silently falls back to /tmp/gil/* if the
 // user's HOME cannot be resolved at all — in practice that only happens
@@ -51,6 +82,11 @@ func Root() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
+	// Persistent --output flag (Phase 12, Track G / T13). Subcommands
+	// that have a structured form check outputJSON() and emit JSON
+	// instead of the human table. Default "text" preserves the existing
+	// CLI surface 1:1; unknown values fall through to text.
+	root.PersistentFlags().StringVar(&outputFormat, "output", "text", "output format: text|json")
 	root.AddCommand(daemonCmd())
 	root.AddCommand(authCmd())
 	root.AddCommand(initCmd())

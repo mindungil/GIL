@@ -151,6 +151,40 @@ func TestCost_JSONOutputParses(t *testing.T) {
 	require.True(t, parsed.Known)
 }
 
+func TestCost_OutputJSONFlagAlias(t *testing.T) {
+	// The persistent --output json flag should produce the same payload
+	// shape as the legacy --json flag.
+	layout := withCostEnv(t)
+	seedSession(t, layout, "01TEST00000000000000OUTJ1", "claude-sonnet-4-6", time.Now(),
+		struct{ in, out int64 }{1_000_000, 100_000},
+	)
+
+	prev := outputFormat
+	outputFormat = "json"
+	t.Cleanup(func() { outputFormat = prev })
+
+	out, err := runCostCmd(t, "01TEST00000000000000OUTJ1")
+	require.NoError(t, err)
+	var parsed sessionCostReport
+	require.NoError(t, json.Unmarshal([]byte(out), &parsed))
+	require.Equal(t, "01TEST00000000000000OUTJ1", parsed.Session)
+	require.Equal(t, "claude-sonnet-4-6", parsed.Model)
+	require.True(t, parsed.Known)
+}
+
+func TestCost_LegacyJSONStillWorks(t *testing.T) {
+	// --json must keep producing JSON even when --output is the default.
+	layout := withCostEnv(t)
+	seedSession(t, layout, "01TEST00000000000000LEGAC", "claude-haiku-4-5", time.Now(),
+		struct{ in, out int64 }{1000, 100},
+	)
+	out, err := runCostCmd(t, "--json", "01TEST00000000000000LEGAC")
+	require.NoError(t, err)
+	var parsed sessionCostReport
+	require.NoError(t, json.Unmarshal([]byte(out), &parsed))
+	require.Equal(t, "01TEST00000000000000LEGAC", parsed.Session)
+}
+
 func TestCost_UnknownModelReturnsZeroAndFlag(t *testing.T) {
 	layout := withCostEnv(t)
 	seedSession(t, layout, "01TEST000000000000000UNKWN", "made-up-model-x", time.Now(),

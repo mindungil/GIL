@@ -52,14 +52,16 @@ the filter and aggregates over all-time.`,
 			if err != nil {
 				return err
 			}
-			if asJSON {
+			// Back-compat: --json wins over --output for legacy scripts;
+			// otherwise the persistent flag drives the format.
+			if asJSON || outputJSON() {
 				return writeStatsJSON(cmd.OutOrStdout(), report)
 			}
 			return writeStatsText(cmd.OutOrStdout(), report)
 		},
 	}
 	c.Flags().IntVar(&days, "days", 30, "include sessions started within the last N days (0 = all)")
-	c.Flags().BoolVar(&asJSON, "json", false, "emit JSON instead of human-readable text")
+	c.Flags().BoolVar(&asJSON, "json", false, "emit JSON instead of human-readable text (alias for --output json)")
 	return c
 }
 

@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -254,6 +255,51 @@ func TestAuthLogin_UnknownProvider(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "Saved credential for my-custom-gw") {
 		t.Errorf("expected save message, got: %s", stdout)
+	}
+}
+
+func TestAuthList_JSONOutput(t *testing.T) {
+	dir := t.TempDir()
+	authFile := filepath.Join(dir, "auth.json")
+
+	// Seed two providers — one with a base URL so we exercise both
+	// shapes of the JSON entry.
+	if _, _, err := runAuthCmd(t, authFile, "login", "anthropic", "--api-key", "sk-ant-1234567890abcd3f2a"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := runAuthCmd(t, authFile, "login", "vllm", "--api-key", "local1234567890abcd", "--base-url", "http://localhost:8000/v1"); err != nil {
+		t.Fatal(err)
+	}
+
+	prev := outputFormat
+	outputFormat = "json"
+	t.Cleanup(func() { outputFormat = prev })
+
+	stdout, _, err := runAuthCmd(t, authFile, "list")
+	if err != nil {
+		t.Fatalf("list --output json: %v", err)
+	}
+	var parsed authListJSON
+	if err := json.Unmarshal([]byte(stdout), &parsed); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, stdout)
+	}
+	if len(parsed.Providers) != 2 {
+		t.Fatalf("expected 2 providers, got %d", len(parsed.Providers))
+	}
+	if parsed.File != authFile {
+		t.Errorf("expected file=%q, got %q", authFile, parsed.File)
+	}
+	// Raw key bytes must NOT appear anywhere in the JSON output.
+	if strings.Contains(stdout, "1234567890abcd3f2a") {
+		t.Errorf("anthropic key leaked into JSON output: %s", stdout)
+	}
+	for _, p := range parsed.Providers {
+		if p.MaskedKey == "" {
+			t.Errorf("provider %q has empty masked_key", p.Name)
+		}
+		if p.Name == "vllm" && p.BaseURL != "http://localhost:8000/v1" {
+			t.Errorf("vllm base_url not propagated, got %q", p.BaseURL)
+		}
 	}
 }
 

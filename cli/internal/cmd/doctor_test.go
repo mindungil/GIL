@@ -284,6 +284,40 @@ func TestDoctor_JSONOutput(t *testing.T) {
 	}
 }
 
+func TestDoctor_OutputJSONFlagAlias(t *testing.T) {
+	// --output json should produce the same valid JSON document as the
+	// legacy --json flag.
+	gilHome, _, _ := withDoctorEnv(t, true)
+	for _, d := range []string{"config", "data", "state", "cache"} {
+		_ = os.MkdirAll(filepath.Join(gilHome, d), 0o700)
+	}
+
+	prev := outputFormat
+	outputFormat = "json"
+	t.Cleanup(func() { outputFormat = prev })
+
+	stdout, _, _, err := runDoctorCmd(t)
+	if err != nil {
+		t.Fatalf("doctor --output json: %v", err)
+	}
+	var payload struct {
+		Version string `json:"version"`
+		Checks  []struct {
+			Group  string `json:"group"`
+			Status string `json:"status"`
+		} `json:"checks"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+		t.Fatalf("expected valid JSON, got: %s\n%v", stdout, err)
+	}
+	if payload.Version == "" {
+		t.Errorf("expected non-empty version in JSON output")
+	}
+	if len(payload.Checks) < 5 {
+		t.Errorf("expected several checks in JSON, got %d", len(payload.Checks))
+	}
+}
+
 func TestDoctor_Verbose_IncludesRuntime(t *testing.T) {
 	withDoctorEnv(t, true)
 

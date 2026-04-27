@@ -1,7 +1,9 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"strings"
@@ -14,6 +16,29 @@ import (
 	"github.com/jedutools/gil/core/mcpregistry"
 	"github.com/jedutools/gil/core/workspace"
 )
+
+// mcpServerJSON is the per-server shape emitted by `gil mcp list --output
+// json`. Bearer tokens are masked unconditionally — matching the text
+// renderer — so a copy/paste of a JSON dump into chat or a bug report
+// never leaks one. Type-irrelevant fields (URL on stdio, Command/Args on
+// http) are omitted to keep the document small and unambiguous.
+type mcpServerJSON struct {
+	Name        string            `json:"name"`
+	Scope       string            `json:"scope"`
+	Type        string            `json:"type"`
+	Command     string            `json:"command,omitempty"`
+	Args        []string          `json:"args,omitempty"`
+	Env         map[string]string `json:"env,omitempty"`
+	URL         string            `json:"url,omitempty"`
+	HasBearer   bool              `json:"has_bearer,omitempty"`
+	Description string            `json:"description,omitempty"`
+}
+
+type mcpListJSON struct {
+	Servers     []mcpServerJSON `json:"servers"`
+	GlobalPath  string          `json:"global_path"`
+	ProjectPath string          `json:"project_path"`
+}
 
 // mcpCmd returns the `gil mcp` subcommand group.
 //
@@ -96,6 +121,9 @@ func mcpListCmd() *cobra.Command {
 			}
 
 			out := cmd.OutOrStdout()
+			if outputJSON() {
+				return writeMCPListJSON(out, reg, global, project)
+			}
 			if len(global) == 0 && len(project) == 0 {
 				fmt.Fprintln(out, "No MCP servers configured. Run \"gil mcp add <name> ...\" to add one.")
 				fmt.Fprintf(out, "Global file:  %s\n", reg.GlobalPath)
@@ -119,6 +147,60 @@ func mcpListCmd() *cobra.Command {
 		},
 	}
 	return c
+}
+
+// writeMCPListJSON renders the merged registry view as `{"servers":[...]}`
+// with the resolved global/project file paths attached as siblings — that
+// way a `gil mcp list --output json` dump is enough to debug a "where is
+// this entry coming from?" report without a follow-up call.
+//
+// Servers are emitted in the same global-then-project, name-sorted order
+// as the text renderer so a side-by-side diff of the two formats is just
+// a JSON-vs-table comparison rather than a re-ordering one.
+func writeMCPListJSON(w io.Writer, reg *mcpregistry.Registry, global, project map[string]mcpregistry.Server) error {
+	rows := make([]mcpServerJSON, 0, len(global)+len(project))
+	rows = append(rows, mcpServersToJSON(global, mcpregistry.ScopeGlobal)...)
+	rows = append(rows, mcpServersToJSON(project, mcpregistry.ScopeProject)...)
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	return enc.Encode(mcpListJSON{
+		Servers:     rows,
+		GlobalPath:  reg.GlobalPath,
+		ProjectPath: reg.ProjectPath,
+	})
+}
+
+// mcpServersToJSON converts one scope's worth of registry entries to the
+// JSON shape, sorted by name for stability. has_bearer is true exactly
+// when Auth carries the "bearer:" prefix; the token bytes themselves are
+// never emitted.
+func mcpServersToJSON(servers map[string]mcpregistry.Server, scope string) []mcpServerJSON {
+	names := make([]string, 0, len(servers))
+	for n := range servers {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	out := make([]mcpServerJSON, 0, len(names))
+	for _, n := range names {
+		s := servers[n]
+		row := mcpServerJSON{
+			Name:        n,
+			Scope:       scope,
+			Type:        s.Type,
+			Description: s.Description,
+		}
+		switch s.Type {
+		case "stdio":
+			row.Command = s.Command
+			row.Args = s.Args
+			row.Env = s.Env
+		case "http":
+			row.URL = s.URL
+			row.HasBearer = strings.HasPrefix(s.Auth, "bearer:")
+		}
+		out = append(out, row)
+	}
+	return out
 }
 
 // orderedRows returns tabwriter-formatted rows for one scope, sorted by

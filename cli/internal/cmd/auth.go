@@ -3,6 +3,7 @@ package cmd
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -16,6 +17,23 @@ import (
 	"github.com/jedutools/gil/core/cliutil"
 	"github.com/jedutools/gil/core/credstore"
 )
+
+// authProviderJSON is the per-provider shape emitted by `gil auth list
+// --output json`. The masked_key field uses the same redaction as the
+// text renderer (Credential.MaskedKey) so a JSON dump never carries the
+// raw secret.
+type authProviderJSON struct {
+	Name      string    `json:"name"`
+	Type      string    `json:"type"`
+	MaskedKey string    `json:"masked_key"`
+	BaseURL   string    `json:"base_url,omitempty"`
+	Updated   time.Time `json:"updated"`
+}
+
+type authListJSON struct {
+	Providers []authProviderJSON `json:"providers"`
+	File      string             `json:"file"`
+}
 
 // authCmd returns the "gil auth" subcommand group.
 //
@@ -198,6 +216,9 @@ func authListCmd() *cobra.Command {
 				return cliutil.Wrap(err, "could not read credentials", "")
 			}
 			out := cmd.OutOrStdout()
+			if outputJSON() {
+				return writeAuthListJSON(ctx, out, store, names, authStorePath(cmd))
+			}
 			if len(names) == 0 {
 				fmt.Fprintf(out, "No credentials configured. Run \"gil auth login <provider>\" to add one.\n")
 				fmt.Fprintf(out, "File: %s\n", authStorePath(cmd))
@@ -226,6 +247,36 @@ func authListCmd() *cobra.Command {
 	}
 	addAuthFileFlag(c)
 	return c
+}
+
+// writeAuthListJSON emits the structured `--output json` view of
+// `gil auth list`. The shape is `{"providers":[...], "file":"<path>"}`
+// so consumers can reach `.providers[].masked_key` for a quick "which
+// provider is wired" probe and `.file` for "where do I edit it".
+//
+// Each entry's masked_key uses the same Credential.MaskedKey rule as the
+// text path — never the raw secret — so a JSON dump captured in chat or
+// CI logs never leaks credentials.
+func writeAuthListJSON(ctx context.Context, w io.Writer, store interface {
+	Get(context.Context, credstore.ProviderName) (*credstore.Credential, error)
+}, names []credstore.ProviderName, file string) error {
+	rows := make([]authProviderJSON, 0, len(names))
+	for _, n := range names {
+		cred, err := store.Get(ctx, n)
+		if err != nil || cred == nil {
+			continue
+		}
+		rows = append(rows, authProviderJSON{
+			Name:      string(n),
+			Type:      string(cred.Type),
+			MaskedKey: cred.MaskedKey(),
+			BaseURL:   cred.BaseURL,
+			Updated:   cred.Updated,
+		})
+	}
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	return enc.Encode(authListJSON{Providers: rows, File: file})
 }
 
 // authLogoutCmd implements `gil auth logout <provider>`.

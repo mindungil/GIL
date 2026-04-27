@@ -67,7 +67,7 @@ type Check struct {
 //     directory-existence WARNs.
 func doctorCmd() *cobra.Command {
 	var (
-		outputJSON bool
+		legacyJSON bool
 		verbose    bool
 	)
 	cmd := &cobra.Command{
@@ -92,7 +92,9 @@ verifier.`,
 			checks := runDoctorChecks(ctx, layout, layoutErr)
 
 			out := cmd.OutOrStdout()
-			if outputJSON {
+			// Legacy --json wins for back-compat; otherwise the persistent
+			// --output flag drives format selection.
+			if legacyJSON || outputJSON() {
 				if err := renderDoctorJSON(out, checks); err != nil {
 					return err
 				}
@@ -115,7 +117,7 @@ verifier.`,
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&outputJSON, "json", false, "emit JSON instead of human-readable output")
+	cmd.Flags().BoolVar(&legacyJSON, "json", false, "emit JSON instead of human-readable output (alias for --output json)")
 	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "include extra environmental detail")
 	return cmd
 }

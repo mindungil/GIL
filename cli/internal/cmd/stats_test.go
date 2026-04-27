@@ -110,6 +110,27 @@ func TestStats_DaysWindowFiltersOldSessions(t *testing.T) {
 	require.Equal(t, 2, parsed.Sessions)
 }
 
+func TestStats_OutputJSONFlagAlias(t *testing.T) {
+	// --output json should yield the same payload as --json. We seed two
+	// sessions to ensure the parsed shape contains real rows.
+	layout := withCostEnv(t)
+	now := time.Now()
+	seedSession(t, layout, "01STATSOUT0000000000000A", "claude-haiku-4-5", now,
+		struct{ in, out int64 }{1000, 100},
+	)
+
+	prev := outputFormat
+	outputFormat = "json"
+	t.Cleanup(func() { outputFormat = prev })
+
+	out, err := runStatsCmd(t)
+	require.NoError(t, err)
+	var parsed statsReport
+	require.NoError(t, json.Unmarshal([]byte(out), &parsed))
+	require.Equal(t, 1, parsed.Sessions)
+	require.NotEmpty(t, parsed.ByModel)
+}
+
 func TestStats_NegativeDaysRejected(t *testing.T) {
 	withCostEnv(t)
 	_, err := runStatsCmd(t, "--days", "-1")

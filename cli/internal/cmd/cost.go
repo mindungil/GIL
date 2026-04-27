@@ -57,13 +57,17 @@ Prices are best-effort public list prices and may be stale.`,
 			if err != nil {
 				return err
 			}
-			if asJSON {
+			// Back-compat: the older per-command --json flag wins when set,
+			// then we fall through to the persistent --output flag. This
+			// keeps existing scripts (`gil cost --json`) byte-identical
+			// while letting new callers reach for `--output json` uniformly.
+			if asJSON || outputJSON() {
 				return writeCostJSON(cmd.OutOrStdout(), report)
 			}
 			return writeCostText(cmd.OutOrStdout(), report)
 		},
 	}
-	c.Flags().BoolVar(&asJSON, "json", false, "emit JSON instead of human-readable text")
+	c.Flags().BoolVar(&asJSON, "json", false, "emit JSON instead of human-readable text (alias for --output json)")
 	return c
 }
 
