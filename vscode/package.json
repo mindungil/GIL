@@ -4,7 +4,12 @@
 	"description": "VS Code panel for the gil autonomous coding harness. Lists sessions managed by the gild daemon, tails their event streams, and triggers runs.",
 	"version": "0.1.0",
 	"publisher": "gil",
-	"license": "Apache-2.0",
+	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/mindungil/GIL.git",
+		"directory": "vscode"
+	},
 	"engines": {
 		"vscode": "^1.84.0"
 	},
