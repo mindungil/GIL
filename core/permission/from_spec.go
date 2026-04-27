@@ -73,6 +73,10 @@ func FromAutonomy(autonomy gilv1.AutonomyDial) *Evaluator {
 			{Tool: "web_fetch", Key: "*", Action: DecisionAllow},
 			// lsp (Track C) is read-only at the operation layer.
 			{Tool: "lsp", Key: "*", Action: DecisionAllow},
+			// subagent (Track E) spawns a read-only investigation
+			// sub-loop; useful at PLAN_ONLY for scouting an unfamiliar
+			// area before drafting the plan.
+			{Tool: "subagent", Key: "*", Action: DecisionAllow},
 		}}
 	}
 	// Unknown autonomy values default to FULL (backwards-compat for newly
