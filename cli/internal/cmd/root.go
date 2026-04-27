@@ -137,6 +137,7 @@ func Root() *cobra.Command {
 	root.AddCommand(doctorCmd())
 	root.AddCommand(newCmd())
 	root.AddCommand(statusCmd())
+	root.AddCommand(sessionCmd())
 	root.AddCommand(interviewCmd())
 	root.AddCommand(resumeCmd())
 	root.AddCommand(specCmd())
@@ -149,6 +150,7 @@ func Root() *cobra.Command {
 	root.AddCommand(costCmd())
 	root.AddCommand(statsCmd())
 	root.AddCommand(mcpCmd())
+	root.AddCommand(permissionsCmd())
 	root.AddCommand(updateCmd())
 	root.AddCommand(newCompletionCmd(root))
 	return root

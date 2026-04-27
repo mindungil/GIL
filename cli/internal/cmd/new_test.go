@@ -14,6 +14,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
 )
@@ -75,6 +77,36 @@ func (s *testSessionServer) List(ctx context.Context, req *gilv1.ListRequest) (*
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return &gilv1.ListResponse{Sessions: append([]*gilv1.Session(nil), s.sessions...)}, nil
+}
+
+// Get / Delete are needed by the session subcommand tests
+// (cli/internal/cmd/session_test.go). They live on the same stub so the
+// shared startGildForTest harness keeps one in-process server.
+func (s *testSessionServer) Get(ctx context.Context, req *gilv1.GetRequest) (*gilv1.Session, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, sess := range s.sessions {
+		if sess.Id == req.Id {
+			return sess, nil
+		}
+	}
+	return nil, status.Errorf(codes.NotFound, "session %q not found", req.Id)
+}
+
+func (s *testSessionServer) Delete(ctx context.Context, req *gilv1.DeleteRequest) (*gilv1.DeleteResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, sess := range s.sessions {
+		if sess.Id == req.Id {
+			if sess.Status == gilv1.SessionStatus_RUNNING {
+				return nil, status.Errorf(codes.FailedPrecondition,
+					"session %q is currently running; stop the run first", req.Id)
+			}
+			s.sessions = append(s.sessions[:i], s.sessions[i+1:]...)
+			return &gilv1.DeleteResponse{FreedBytes: 1024}, nil
+		}
+	}
+	return nil, status.Errorf(codes.NotFound, "session %q not found", req.Id)
 }
 
 // testInterviewServer is a minimal in-test stub of InterviewService.
