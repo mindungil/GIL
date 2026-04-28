@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -9,6 +11,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/mindungil/gil/cli/internal/cmd/uistyle"
+	"github.com/mindungil/gil/core/intent"
+	"github.com/mindungil/gil/core/provider"
 	"github.com/mindungil/gil/sdk"
 )
 
@@ -155,4 +159,74 @@ func TestIntentModelFor(t *testing.T) {
 func TestShortHex(t *testing.T) {
 	require.Equal(t, "abcdef012345", shortHex("abcdef0123456789"))
 	require.Equal(t, "ab", shortHex("ab"))
+}
+
+// TestChatConversation_GreetingProtestNoDispatch is the headline
+// regression test for the Phase 24 chat redesign. It replays the user's
+// EXACT real session — "안녕" → "뭐??" → "아니 안녕ㄹ이라니까" — through
+// a Conversation backed by a MockToolProvider. The previous classifier-
+// based dispatcher would have committed the third message as a goal
+// because it was 12+ chars and didn't match the greeting regex. The new
+// LLM-driven path must NOT produce a start_interview tool call for any
+// of the three messages.
+func TestChatConversation_GreetingProtestNoDispatch(t *testing.T) {
+	prov := provider.NewMockToolProvider([]provider.MockTurn{
+		{Text: "Standing by. What would you like to work on?", StopReason: "end_turn"},
+		{Text: "Could you say more about the task?", StopReason: "end_turn"},
+		{Text: "Apologies for the misunderstanding. Standing by for your task.", StopReason: "end_turn"},
+	})
+	conv := intent.NewConversation()
+
+	for _, msg := range []string{"안녕", "뭐??", "아니 안녕ㄹ이라니까"} {
+		turn, err := conv.Send(context.Background(), prov, "haiku", msg)
+		require.NoError(t, err, "msg %q must not error", msg)
+		require.Empty(t, turn.ToolCalls, "msg %q must not trigger start_interview", msg)
+	}
+}
+
+// TestChatConversation_TaskCommitsStartInterview verifies the positive
+// path: a clear task description with a target file produces a
+// start_interview tool call ready for the chat dispatcher to consume.
+func TestChatConversation_TaskCommitsStartInterview(t *testing.T) {
+	prov := provider.NewMockToolProvider([]provider.MockTurn{
+		{
+			Text: "Briefing your task.",
+			ToolCalls: []provider.ToolCall{
+				{
+					ID:    "tu_1",
+					Name:  intent.ToolStartInterview,
+					Input: json.RawMessage(`{"goal":"fix the lint warnings in handlers/auth.go","workspace":""}`),
+				},
+			},
+			StopReason: "tool_use",
+		},
+	})
+	conv := intent.NewConversation()
+	turn, err := conv.Send(context.Background(), prov, "haiku", "fix the lint warnings in handlers/auth.go")
+	require.NoError(t, err)
+	require.Len(t, turn.ToolCalls, 1)
+	require.Equal(t, intent.ToolStartInterview, turn.ToolCalls[0].Name)
+
+	args, err := intent.ParseStartInterview(turn.ToolCalls[0])
+	require.NoError(t, err)
+	require.Contains(t, args.Goal, "lint warnings")
+}
+
+// TestChatConversation_StatusDispatch — "show my sessions" routes to
+// the show_status tool, which the chat dispatcher renders inline.
+func TestChatConversation_StatusDispatch(t *testing.T) {
+	prov := provider.NewMockToolProvider([]provider.MockTurn{
+		{
+			Text: "",
+			ToolCalls: []provider.ToolCall{
+				{ID: "tu_1", Name: intent.ToolShowStatus, Input: json.RawMessage(`{}`)},
+			},
+			StopReason: "tool_use",
+		},
+	})
+	conv := intent.NewConversation()
+	turn, err := conv.Send(context.Background(), prov, "haiku", "show me my sessions")
+	require.NoError(t, err)
+	require.Len(t, turn.ToolCalls, 1)
+	require.Equal(t, intent.ToolShowStatus, turn.ToolCalls[0].Name)
 }
