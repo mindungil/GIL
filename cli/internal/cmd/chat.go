@@ -103,6 +103,19 @@ func runChat(cmd *cobra.Command, socket, providerName, model string) error {
 	g := uistyle.NewGlyphs(asciiMode)
 	p := uistyle.NewPalette(false)
 
+	// Phase 25 S3: short-circuit fresh-install / no-cred users to a
+	// focused onboarding card BEFORE we boot the daemon. The chat
+	// surface used to drop everyone — including users who'd never run
+	// `gil init` — into the same banner + "Limited mode" warning, which
+	// hid the actual next step (run init / run auth login) behind a
+	// dim secondary line.
+	switch detectPreDaemonState(cmd) {
+	case stateNoInit:
+		return runOnboardingNoInit(cmd, in, out, p, g)
+	case stateNoCreds:
+		return runOnboardingNoCreds(cmd, in, out, p, g)
+	}
+
 	// Daemon up — we need it for ListSessions to seed the conversation
 	// gating ("hasSessions") and for any handoff that follows.
 	if err := ensureDaemon(socket, defaultBase()); err != nil {
