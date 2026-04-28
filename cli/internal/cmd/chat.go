@@ -127,6 +127,26 @@ func runChat(cmd *cobra.Command, socket, providerName, model string) error {
 	// Resolve the intake provider once at chat start. If nil, we drop
 	// into limited mode (regex-only fast paths + advise auth login).
 	intakeProv, intakeModel := pickIntentProvider(cmd, providerName, model)
+
+	// Phase 25 polish: when the resolved provider exists but model is
+	// empty (typical for vllm credentials registered before the wizard),
+	// don't crash with "model required" — prompt the user inline ONCE
+	// to pick one and persist it to the credstore. Future chats use it
+	// automatically.
+	if intakeProv != nil && intakeModel == "" {
+		resolvedProv := providerName
+		if resolvedProv == "" {
+			resolvedProv = pickInterviewProvider(cmd)
+		}
+		picked := promptModelInline(cmd, in, out, p, g, resolvedProv)
+		if picked == "" {
+			fmt.Fprintln(out, agentLine(p, g, p.Caution("No model picked. Run `gil auth login "+resolvedProv+" --model <name>` to set one.")))
+			return nil
+		}
+		intakeModel = picked
+		// Persist for next time so we don't ask again.
+		_ = saveModelToCred(cmd, resolvedProv, picked)
+	}
 	if intakeProv == nil {
 		fmt.Fprintln(out, agentLine(p, g, p.Caution("No LLM credentials found. Limited mode.")))
 		fmt.Fprintln(out, agentLine(p, g, p.Dim("Run `gil auth login` for the full conversational experience.")))
@@ -161,13 +181,23 @@ func runChat(cmd *cobra.Command, socket, providerName, model string) error {
 			continue
 		}
 
+		// Show a Braille spinner while the LLM is thinking. The chat
+		// surface previously froze silently during Complete() — users
+		// thought it had hung and ctrl-C'd. Phase 25 S4: visible
+		// activity indicator + dim "thinking..." label, cleared the
+		// instant the response arrives.
+		stopSpinner := startSpinner(out, p, "thinking…")
 		turn, terr := conv.Send(ctx, intakeProv, intakeModel, msg)
+		stopSpinner()
 		if terr != nil {
 			// Network failure / malformed response. Surface a friendly
 			// message and keep the chat alive; History was already
 			// rolled back by Conversation.Send so a retry won't double
 			// the user turn.
 			fmt.Fprintln(out, agentLine(p, g, p.Caution("Lost contact briefly. Try again?")))
+			if os.Getenv("GIL_CHAT_DEBUG") != "" {
+				fmt.Fprintln(out, agentLine(p, g, p.Dim("(debug: "+terr.Error()+")")))
+			}
 			continue
 		}
 
@@ -428,7 +458,15 @@ func handleChatNewTask(ctx context.Context, cmd *cobra.Command, cli *sdk.Client,
 	}
 	effModel := model
 	if effModel == "" {
-		effModel = defaultModelFor(effProv)
+		// Phase 25: prefer the credstore.Model the user set via the
+		// wizard (`gil auth login`). Falls back to the per-provider
+		// hardcoded default — "" for vllm — when the credstore has
+		// no preference.
+		if cred := credentialFor(cmd, credstore.ProviderName(effProv)); cred != nil && cred.Model != "" {
+			effModel = cred.Model
+		} else {
+			effModel = defaultModelFor(effProv)
+		}
 	}
 	effWorkspace := it.Workspace
 	if effWorkspace == "" {
@@ -808,7 +846,7 @@ func pickInterviewProvider(cmd *cobra.Command) string {
 func pickIntentProvider(cmd *cobra.Command, providerName, model string) (provider.Provider, string) {
 	if providerName != "" {
 		if p := buildProvider(cmd, providerName); p != nil {
-			return p, intentModelFor(providerName, model)
+			return p, resolveIntentModel(cmd, providerName, model)
 		}
 	}
 	// Auto: pick the first credstore entry that maps to a provider we
@@ -826,7 +864,7 @@ func pickIntentProvider(cmd *cobra.Command, providerName, model string) (provide
 	}
 	for _, n := range names {
 		if p := buildProvider(cmd, string(n)); p != nil {
-			return p, intentModelFor(string(n), model)
+			return p, resolveIntentModel(cmd, string(n), model)
 		}
 	}
 	return nil, ""
@@ -952,9 +990,37 @@ func credentialOrEnv(cmd *cobra.Command, name credstore.ProviderName, envKey str
 // given a provider. When the user supplied an explicit --model we honour
 // it; otherwise we pick the smallest model the provider exposes so a
 // classification call costs well under a cent.
+//
+// PHASE 25 CHANGE: previously hardcoded "qwen3.6-27b" as a vllm default
+// — that was the dev's local model, not a general one. The new
+// resolution order is:
+//
+//  1. --model flag (userModel) — explicit user pick wins.
+//  2. credstore.Credential.Model — set by the wizard at registration.
+//  3. GIL_VLLM_MODEL env var (vllm only) — legacy override.
+//  4. Hardcoded sensible default for paid providers; "" for vllm so
+//     the chat surface refuses to start the LLM-driven path and tells
+//     the user to run `gil auth login vllm` to pick a model.
+//
+// The two-arg form preserved here goes through resolveIntentModel with
+// no cmd — it doesn't read credstore. The cmd-aware form is what
+// pickIntentProvider actually calls in production.
 func intentModelFor(providerName, userModel string) string {
+	return resolveIntentModel(nil, providerName, userModel)
+}
+
+// resolveIntentModel is the cmd-aware variant of intentModelFor. The
+// wizard-set credstore.Model takes precedence over hardcoded defaults
+// so a vllm user who registered "qwen3-32b" via `gil auth login vllm`
+// actually gets that, not a fallback that ignores their setup.
+func resolveIntentModel(cmd *cobra.Command, providerName, userModel string) string {
 	if userModel != "" {
 		return userModel
+	}
+	if cmd != nil {
+		if cred := credentialFor(cmd, credstore.ProviderName(providerName)); cred != nil && cred.Model != "" {
+			return cred.Model
+		}
 	}
 	switch providerName {
 	case "anthropic":
@@ -964,14 +1030,15 @@ func intentModelFor(providerName, userModel string) string {
 	case "openrouter":
 		return "anthropic/claude-haiku-4-5"
 	case "vllm":
-		// vllm has no canonical default — pick a sensible common one
-		// for self-hosted setups so the chat surface works without
-		// the user supplying --model. They can override with
-		// `--model <name>` or set GIL_VLLM_MODEL env var.
+		// vllm has no canonical default. Honour the legacy env var
+		// override; otherwise return "" — the caller (chat surface)
+		// will refuse the LLM-driven path and point the user at the
+		// wizard. The previous hardcoded "qwen3.6-27b" was the dev's
+		// local model and broke "general user" assumptions.
 		if v := os.Getenv("GIL_VLLM_MODEL"); v != "" {
 			return v
 		}
-		return "qwen3.6-27b"
+		return ""
 	default:
 		return ""
 	}
