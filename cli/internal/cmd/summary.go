@@ -103,6 +103,7 @@ type summaryEnv struct {
 // has stopped.
 type summaryRow struct {
 	ID             string
+	Name           string // pre-computed display slug — Phase 25 A3
 	Status         string // "RUNNING" / "DONE" / "STUCK" / ...
 	Iter           int32
 	MaxIter        int32
@@ -125,6 +126,7 @@ type summaryRow struct {
 func summaryRowFromSession(s *sdk.Session) summaryRow {
 	row := summaryRow{
 		ID:             s.ID,
+		Name:           displayName(s),
 		Status:         s.Status,
 		Iter:           s.CurrentIteration,
 		MaxIter:        100, // server doesn't expose max yet; matches spec mockup
@@ -187,8 +189,12 @@ func renderSummary(out io.Writer, e summaryEnv) {
 		// 14-char goal column — truncate with ellipsis if longer so the
 		// row stays single-line under the spec's 80-col target.
 		goal := truncRune(r.Goal, 48)
-		fmt.Fprintf(out, "   %s  %s   %s   %-7s  %-18s %s\n",
-			coloured, p.Dim(shortID(r.ID)), bar, iterStr, costStr, goal)
+		name := r.Name
+		if name == "" {
+			name = shortID(r.ID)
+		}
+		fmt.Fprintf(out, "   %s  %-22s   %s   %-7s  %-18s %s\n",
+			coloured, p.Dim(name), bar, iterStr, costStr, goal)
 		if r.StuckNote != "" {
 			indent := strings.Repeat(" ", 49) // hand-aligned with cost column
 			fmt.Fprintf(out, "%s%s %s\n", indent, p.Caution(g.Warn),
@@ -395,6 +401,60 @@ func shortID(id string) string {
 		return strings.ToLower(id)
 	}
 	return strings.ToLower(id[:6])
+}
+
+// displayName returns a human-friendly label for a session — a slug
+// derived from the goal text plus a MMDD date, e.g. "add-dark-mode-
+// 0428". Falls back to shortID when no slug is meaningful (empty goal,
+// non-ASCII-only goal where every char gets stripped). The hex ID
+// remains the canonical reference for commands; this is purely a
+// display win — Phase 25 A3.
+//
+// Reference lift: Heroku-style "happy-fox-1234" friendly names + the
+// kubectl pod-name pattern (slug + short suffix). We use a date suffix
+// rather than a random one because timestamps carry useful signal
+// when scanning a session list.
+func displayName(s *sdk.Session) string {
+	if s == nil {
+		return ""
+	}
+	slug := slugify(s.GoalHint)
+	if slug == "" {
+		return shortID(s.ID)
+	}
+	stamp := s.CreatedAt
+	if stamp.IsZero() {
+		stamp = time.Now()
+	}
+	return slug + "-" + stamp.Format("0102")
+}
+
+// slugify converts arbitrary goal text to a kebab-case ASCII slug
+// suitable for filenames and command-line scanning. Non-ASCII letters
+// are dropped (we don't transliterate — Korean/CJK goals fall through
+// to the shortID fallback). Whitespace and punctuation collapse to
+// single hyphens; the result is trimmed and capped at 24 chars.
+func slugify(s string) string {
+	var b strings.Builder
+	prevHyphen := true // prevents leading hyphen
+	for _, r := range strings.ToLower(s) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+			prevHyphen = false
+		default:
+			if !prevHyphen {
+				b.WriteByte('-')
+				prevHyphen = true
+			}
+		}
+	}
+	out := strings.TrimRight(b.String(), "-")
+	const max = 24
+	if len(out) > max {
+		out = strings.TrimRight(out[:max], "-")
+	}
+	return out
 }
 
 // truncRune cuts s to width with a trailing single-char ellipsis when

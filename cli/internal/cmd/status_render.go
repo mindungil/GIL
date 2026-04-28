@@ -65,8 +65,8 @@ func writeStatusCard(w io.Writer, g uistyle.Glyphs, p uistyle.Palette, s *sdk.Se
 	iter := iterDisplay(row)
 	cost := renderCostCell(g, p, row)
 	goal := truncRune(s.GoalHint, 48)
-	fmt.Fprintf(w, "   %s  %s   %s   %-7s  %-18s %s\n",
-		col, p.Dim(shortID(s.ID)), bar, iter, cost, goal)
+	fmt.Fprintf(w, "   %s  %-22s   %s   %-7s  %-18s %s\n",
+		col, p.Dim(displayName(s)), bar, iter, cost, goal)
 
 	// Meta band — joins non-empty fragments with " · ". This keeps the
 	// row stable across sessions that don't have every datum (e.g. a

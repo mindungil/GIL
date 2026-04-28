@@ -46,8 +46,10 @@ func TestRenderChatBanner(t *testing.T) {
 }
 
 // TestRenderChatStatus checks the conversational session listing. We
-// expect short IDs, status glyphs, and a truncated goal — but no budget
-// columns (those live in the verb-mode surfaces).
+// expect a slug-based displayName (Phase 25 A3), status glyphs, and a
+// truncated goal — but no budget columns (those live in the verb-mode
+// surfaces). When the goal yields no slug (empty / non-ASCII-only), the
+// displayName falls back to a 6-char shortID.
 func TestRenderChatStatus(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 
@@ -61,9 +63,9 @@ func TestRenderChatStatus(t *testing.T) {
 	})
 	out := buf.String()
 	require.Contains(t, out, "2 session(s)")
-	require.Contains(t, out, "01abcd")
+	require.Contains(t, out, "add-dark-mode-")
 	require.Contains(t, out, "Add dark mode")
-	require.Contains(t, out, "01xyzq")
+	require.Contains(t, out, "migrate-auth-to-oauth2-")
 	require.Contains(t, out, "Migrate auth to OAuth2")
 }
 

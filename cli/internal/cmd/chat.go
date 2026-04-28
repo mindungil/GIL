@@ -406,8 +406,8 @@ func renderChatStatus(out io.Writer, g uistyle.Glyphs, p uistyle.Palette, sessio
 		marker, role := sessionStatusGlyph(g, s.Status)
 		coloured := colourMarker(p, marker, role)
 		goal := truncRune(s.GoalHint, 56)
-		fmt.Fprintf(out, "%s   %s  %s  %s\n",
-			agentLine(p, g, ""), coloured, p.Dim(shortID(s.ID)), goal)
+		fmt.Fprintf(out, "%s   %s  %-22s %s\n",
+			agentLine(p, g, ""), coloured, p.Dim(displayName(s)), goal)
 	}
 }
 
@@ -693,7 +693,7 @@ func handleChatResume(ctx context.Context, cmd *cobra.Command, cli *sdk.Client, 
 		marker, role := sessionStatusGlyph(g, s.Status)
 		coloured := colourMarker(p, marker, role)
 		goal := truncRune(s.GoalHint, 56)
-		fmt.Fprintf(out, "  %s [%d] %s  %s  %s\n", agentLine(p, g, ""), i+1, coloured, p.Dim(shortID(s.ID)), goal)
+		fmt.Fprintf(out, "  %s [%d] %s  %-22s %s\n", agentLine(p, g, ""), i+1, coloured, p.Dim(displayName(s)), goal)
 	}
 	fmt.Fprint(out, p.Info("›")+" ")
 	reader := bufio.NewReader(in)
@@ -724,7 +724,7 @@ func runResumeForSession(ctx context.Context, cmd *cobra.Command, cli *sdk.Clien
 		prov = pickInterviewProvider(cmd)
 	}
 
-	fmt.Fprintln(out, agentLine(p, g, fmt.Sprintf("Resuming %s — %s", p.Primary(shortID(sess.ID)), truncRune(sess.GoalHint, 56))))
+	fmt.Fprintln(out, agentLine(p, g, fmt.Sprintf("Resuming %s — %s", p.Primary(displayName(sess)), truncRune(sess.GoalHint, 56))))
 
 	// Lean on the existing resume RPC. It re-emits the last agent
 	// turn; we then loop on user replies just like the new-task path.
