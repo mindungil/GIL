@@ -844,22 +844,74 @@ func buildProvider(cmd *cobra.Command, name string) provider.Provider {
 			return nil
 		}
 		return provider.NewAnthropic(key)
+	case credstore.OpenAI:
+		cred := credentialFor(cmd, credstore.OpenAI)
+		key := envOrCred(cred, "OPENAI_API_KEY")
+		if key == "" {
+			return nil
+		}
+		base := envOrCredBase(cred, "OPENAI_BASE_URL", "https://api.openai.com/v1")
+		return provider.NewOpenAI(key, base)
+	case credstore.OpenRouter:
+		cred := credentialFor(cmd, credstore.OpenRouter)
+		key := envOrCred(cred, "OPENROUTER_API_KEY")
+		if key == "" {
+			return nil
+		}
+		base := envOrCredBase(cred, "", "https://openrouter.ai/api/v1")
+		return provider.NewOpenAI(key, base)
+	case credstore.VLLM:
+		cred := credentialFor(cmd, credstore.VLLM)
+		// vllm requires explicit base_url (no canonical default).
+		if cred == nil || cred.BaseURL == "" {
+			base := os.Getenv("OPENAI_BASE_URL")
+			if base == "" {
+				return nil
+			}
+			return provider.NewOpenAI(os.Getenv("OPENAI_API_KEY"), base)
+		}
+		return provider.NewOpenAI(cred.APIKey, cred.BaseURL)
 	default:
-		// "mock" is a special-cased dev/smoke aid — it lets
-		// `gil chat --provider mock` exercise the LLM-driven dispatcher
-		// without burning real tokens. We return a never-exhausting
-		// mock that always replies "Standing by." with no tool calls,
-		// so smoke tests can replay arbitrary user turns; the chat
-		// stays alive and never commits to a session.
 		if name == "mock" {
 			return repeatingMockProvider{}
 		}
-		// OpenAI / OpenRouter / vllm don't have a Provider impl in
-		// core/provider yet (or live behind an SDK function the
-		// classifier doesn't need to gate on). Returning nil keeps
-		// the chat surface working — the regex layer is sufficient.
 		return nil
 	}
+}
+
+// credentialFor reads the named credstore entry; returns nil on miss.
+func credentialFor(cmd *cobra.Command, name credstore.ProviderName) *credstore.Credential {
+	store := newStoreFor(cmd)
+	ctx := cmd.Context()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	cred, err := store.Get(ctx, name)
+	if err != nil {
+		return nil
+	}
+	return cred
+}
+
+// envOrCred returns cred.APIKey when non-empty, else os.Getenv(envKey).
+func envOrCred(cred *credstore.Credential, envKey string) string {
+	if cred != nil && cred.APIKey != "" {
+		return cred.APIKey
+	}
+	return os.Getenv(envKey)
+}
+
+// envOrCredBase returns cred.BaseURL when set, else env var, else default.
+func envOrCredBase(cred *credstore.Credential, envKey, fallback string) string {
+	if cred != nil && cred.BaseURL != "" {
+		return cred.BaseURL
+	}
+	if envKey != "" {
+		if v := os.Getenv(envKey); v != "" {
+			return v
+		}
+	}
+	return fallback
 }
 
 // repeatingMockProvider is an in-package mock provider that always
@@ -912,7 +964,14 @@ func intentModelFor(providerName, userModel string) string {
 	case "openrouter":
 		return "anthropic/claude-haiku-4-5"
 	case "vllm":
-		return "" // vllm has no canonical "small" — let the server decide
+		// vllm has no canonical default — pick a sensible common one
+		// for self-hosted setups so the chat surface works without
+		// the user supplying --model. They can override with
+		// `--model <name>` or set GIL_VLLM_MODEL env var.
+		if v := os.Getenv("GIL_VLLM_MODEL"); v != "" {
+			return v
+		}
+		return "qwen3.6-27b"
 	default:
 		return ""
 	}
