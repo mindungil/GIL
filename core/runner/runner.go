@@ -253,6 +253,27 @@ type AgentLoop struct {
 	// internal: set once Run() prints the system-prompt breakdown so
 	// later iterations don't spam stderr with the same numbers.
 	breakdownLogged bool
+
+	// NoGrace disables the budget-exhaust grace call (Hermes pattern).
+	// When true, the loop halts cold on budget cap with no wrap-up summary.
+	NoGrace bool
+
+	// graceFired marks that the wrap-up call has already been made for
+	// this run, preventing double-firing on repeated budget checks.
+	graceFired bool
+
+	// internal: grace-call state — synced from Run()'s local vars at
+	// the budget-break sites so checkBudgetAndMaybeGrace can read them.
+	graceBudgetMaxTokens  int64
+	graceBudgetMaxCostUSD float64
+	graceTotalTokens      int64
+	graceTotalCostUSD     float64
+	graceMessages         []provider.Message
+
+	// status is set by checkBudgetAndMaybeGrace and read by Run()'s
+	// post-loop section to override the verify-based status classification
+	// when a grace call was (or was not) made.
+	graceStatus string
 }
 
 // CompactRequester is satisfied by AgentLoop; the compact_now tool uses it
@@ -643,6 +664,7 @@ loop:
 					"reserve":            budgetReserveTokens,
 					"fraction":           frac,
 				})
+				a.syncGraceState(totalTokens, totalCostUSD, budgetMaxTokens, budgetMaxCostUSD, messages)
 				exit = exitState{reason: "budget_tokens", iterations: iter}
 				break loop
 			}
@@ -665,6 +687,7 @@ loop:
 					"limit":    budgetMaxCostUSD,
 					"fraction": frac,
 				})
+				a.syncGraceState(totalTokens, totalCostUSD, budgetMaxTokens, budgetMaxCostUSD, messages)
 				exit = exitState{reason: "budget_cost", iterations: iter}
 				break loop
 			}
@@ -1066,6 +1089,12 @@ loop:
 	finalErr := exit.err
 	switch exit.reason {
 	case "budget_tokens", "budget_cost":
+		// Fire the grace wrap-up call (Hermes pattern). Grace appends a
+		// hand-off summary to the message history so a future resume has a
+		// clean starting point. The Result.Status is still determined by
+		// the post-loop verify outcome (verify-based classification below)
+		// so existing callers that match "budget_exhausted*" keep working.
+		_ = a.checkBudgetAndMaybeGrace(ctx)
 		// New three-way classification:
 		//   - verify pass after budget hit  → budget_exhausted_verify_passed
 		//     (best-effort: agent's prior edits already satisfied checks)
