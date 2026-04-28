@@ -33,6 +33,18 @@ gil이 알아서:
 2. 인터뷰 — saturation까지 후속 질문
 3. "Spec 동결하고 자율 실행할까요?" → Y → 백그라운드 실행
 
+### 채팅은 LLM-주도 (Phase 24)
+
+채팅 표면은 작은 LLM (haiku 등)에 매 turn 보내고, LLM이 tool call로
+다음 행동을 결정하는 방식. 인사("안녕")는 그냥 인사로 받고, 항의
+("아니 안녕이라니까")도 항의로 받음 — regex로 분류해서 강제로
+세션을 만드는 짓을 하지 않음. 진짜 task 설명("fix lint in auth.go")
+일 때만 `start_interview` tool call이 나가서 인터뷰가 시작됨.
+
+LLM 자격증명이 없으면 limited mode로 떨어져 regex fast-path만 동작 —
+`/quit`, `status`, `help` 정도는 동작하고 새 task는 확인 프롬프트
+거쳐 진행 (`gil auth login`을 권장).
+
 진행 모니터링:
 ```bash
 gil watch <session-id>     # 라이브 진행률
