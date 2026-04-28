@@ -418,12 +418,29 @@ loop:
 		// Compaction check: runs before provider_request so the context is
 		// already trimmed before the next LLM call.
 		if a.Compactor != nil {
-			maxCtx := a.MaxContextTokens
-			if maxCtx <= 0 {
-				maxCtx = 200_000
+			// P27 T5: per-model context window. When MaxContextTokens is
+			// explicitly set by the caller, honour it as an override (preserves
+			// backward-compat for tests and callers that hard-code a budget).
+			// Otherwise resolve the upcoming-turn role — same logic classifyTurn
+			// applies a few lines below — and look up the per-model window from
+			// the provider capacity table so the trigger fires at the right
+			// threshold for each role (e.g. editor=ollama:llama3:8b fires at 8k,
+			// main=claude-opus-4-7 fires at 1M).
+			var ctxWindow int64
+			if a.MaxContextTokens > 0 {
+				ctxWindow = int64(a.MaxContextTokens)
+			} else {
+				nextRole := classifyTurn(iter-1, lastResponse)
+				nextModel := a.pickModel(nextRole)
+				ctxWindow = provider.ContextTokens(nextModel)
+				// ContextTokens returns 200_000 for unknown models; belt-and-
+				// suspenders guard in case the implementation ever changes.
+				if ctxWindow == 0 {
+					ctxWindow = 200_000
+				}
 			}
 			estimated := estimateMessagesTokens(a.Provider.Name(), messages)
-			threshold := int64(float64(maxCtx) * 0.95)
+			threshold := int64(float64(ctxWindow) * 0.95)
 			forced := a.compactNowRequested
 			a.compactNowRequested = false
 			if forced || estimated >= threshold {

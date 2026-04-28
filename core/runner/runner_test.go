@@ -2403,3 +2403,132 @@ func TestRunner_OpenAIRequest_NoCacheMarkers(t *testing.T) {
 		require.False(t, m.CacheControl, "message[%d] must NOT have CacheControl=true for non-Anthropic provider", i)
 	}
 }
+
+// TestRunner_PerRoleContextWindow_SmallEditorTriggersEarly verifies that when
+// the next-turn role is "editor" and Models["editor"] = "ollama:llama3:8b"
+// (8192 token window), the compaction trigger fires before reaching the
+// default 200k threshold. Messages totalling ~8000 tokens exceed 95% of 8192
+// (= 7782) but are far below 95% of 200k (= 190k).
+func TestRunner_PerRoleContextWindow_SmallEditorTriggersEarly(t *testing.T) {
+	// Build a response that contains only exec tools so classifyTurn routes
+	// turn 2 (iterIdx=1) to RoleEditor, which maps to "ollama:llama3:8b".
+	// With "loop-mock" provider (default 4.0 chars/token), bigText of 4000
+	// chars = ~1000 tokens. We run 10 such turns → ~10000 tokens total,
+	// well above the 7782 threshold for ollama:llama3:8b (8192*0.95).
+	bigText := strings.Repeat("e", 4000) // ~1000 tokens at 4 chars/token
+	var seq []provider.MockTurn
+	for i := 0; i < 10; i++ {
+		seq = append(seq, provider.MockTurn{
+			Text:       bigText,
+			StopReason: "tool_use",
+			ToolCalls: []provider.ToolCall{{
+				ID: fmt.Sprintf("c%d", i), Name: "bash", Input: json.RawMessage(`{"command":"echo hi"}`),
+			}},
+		})
+	}
+	seq = append(seq, provider.MockTurn{Text: "done", StopReason: "end_turn"})
+	prov := provider.NewMockToolProvider(seq)
+
+	summaryProv := provider.NewMock([]string{"## summary"})
+	compactor := &compact.Compactor{Provider: summaryProv, Model: "m", HeadKeep: 1, TailKeep: 2, MinMiddle: 2}
+
+	spec := &gilv1.FrozenSpec{Budget: &gilv1.Budget{MaxIterations: 12}, Verification: &gilv1.Verification{}}
+	ver := verify.NewRunner(t.TempDir())
+
+	loop := &AgentLoop{
+		Spec:      spec,
+		Provider:  prov,
+		Model:     "claude-sonnet-4-6", // default/main model
+		Models:    map[string]string{"editor": "ollama:llama3:8b"},
+		Tools:     []tool.Tool{&noopTool{}},
+		Verifier:  ver,
+		Compactor: compactor,
+		// MaxContextTokens intentionally 0 so we rely entirely on provider.ContextTokens.
+		Events: event.NewStream(),
+	}
+	sub := loop.Events.Subscribe(256)
+	var collected []event.Event
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for e := range sub.Events() {
+			collected = append(collected, e)
+		}
+	}()
+
+	_, err := loop.Run(context.Background())
+	require.NoError(t, err)
+	sub.Close()
+	<-done
+
+	var compactCount int
+	for _, e := range collected {
+		if e.Type == "compact_start" {
+			compactCount++
+		}
+	}
+	require.Greater(t, compactCount, 0,
+		"expected compaction to trigger: ollama:llama3:8b has 8192-token window, "+
+			"messages exceed 95%% threshold of 7782 tokens")
+}
+
+// TestRunner_PerRoleContextWindow_LargeMainTolerates verifies that when
+// Models["main"] = "claude-opus-4-7" (1M token window), messages totalling
+// only ~8000 tokens do NOT trigger compaction (far below 95% of 1M = 950k).
+func TestRunner_PerRoleContextWindow_LargeMainTolerates(t *testing.T) {
+	// Same bigText/seq as above but role stays "main" because turns have
+	// mixed text+tools (not exclusively exec tools). We use a non-exec tool
+	// name to keep classifyTurn on RoleMain every iteration.
+	bigText := strings.Repeat("m", 4000) // ~1000 tokens at 4 chars/token
+	var seq []provider.MockTurn
+	for i := 0; i < 10; i++ {
+		seq = append(seq, provider.MockTurn{
+			Text:       bigText,
+			StopReason: "tool_use",
+			ToolCalls: []provider.ToolCall{{
+				// "plan" tool forces RolePlanner; any non-exec tool keeps RoleMain.
+				// We use "noop" (not in execToolNames) to stay on RoleMain.
+				ID: fmt.Sprintf("c%d", i), Name: "noop", Input: json.RawMessage(`{}`),
+			}},
+		})
+	}
+	seq = append(seq, provider.MockTurn{Text: "done", StopReason: "end_turn"})
+	prov := provider.NewMockToolProvider(seq)
+
+	summaryProv := provider.NewMock([]string{"## summary"})
+	compactor := &compact.Compactor{Provider: summaryProv, Model: "m", HeadKeep: 1, TailKeep: 2, MinMiddle: 2}
+
+	spec := &gilv1.FrozenSpec{Budget: &gilv1.Budget{MaxIterations: 12}, Verification: &gilv1.Verification{}}
+	ver := verify.NewRunner(t.TempDir())
+
+	loop := &AgentLoop{
+		Spec:      spec,
+		Provider:  prov,
+		Model:     "claude-opus-4-7", // main model: 1M token window
+		Models:    map[string]string{"main": "claude-opus-4-7"},
+		Tools:     []tool.Tool{&noopTool{}},
+		Verifier:  ver,
+		Compactor: compactor,
+		// MaxContextTokens intentionally 0 so we rely entirely on provider.ContextTokens.
+		Events: event.NewStream(),
+	}
+	sub := loop.Events.Subscribe(256)
+	var collected []event.Event
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for e := range sub.Events() {
+			collected = append(collected, e)
+		}
+	}()
+
+	_, err := loop.Run(context.Background())
+	require.NoError(t, err)
+	sub.Close()
+	<-done
+
+	for _, e := range collected {
+		require.NotEqual(t, "compact_start", e.Type,
+			"claude-opus-4-7 has 1M token window; ~8000 tokens should not trigger compaction")
+	}
+}
