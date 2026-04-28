@@ -527,10 +527,14 @@ func writeSessionShow(w io.Writer, s *sdk.Session, events int, specPreview strin
 	row("Status", s.Status)
 	row("Working dir", s.WorkingDir)
 	if !s.CreatedAt.IsZero() {
-		row("Created", s.CreatedAt.Local().Format("2006-01-02 15:04:05"))
+		row("Created", fmt.Sprintf("%s  (%s)",
+			relTime(s.CreatedAt),
+			s.CreatedAt.Local().Format("2006-01-02 15:04:05")))
 	}
 	if !s.UpdatedAt.IsZero() {
-		row("Updated", s.UpdatedAt.Local().Format("2006-01-02 15:04:05"))
+		row("Updated", fmt.Sprintf("%s  (%s)",
+			relTime(s.UpdatedAt),
+			s.UpdatedAt.Local().Format("2006-01-02 15:04:05")))
 	}
 	if s.SpecID != "" {
 		row("Spec", s.SpecID)

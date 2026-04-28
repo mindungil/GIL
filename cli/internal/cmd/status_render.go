@@ -75,6 +75,13 @@ func writeStatusCard(w io.Writer, g uistyle.Glyphs, p uistyle.Palette, s *sdk.Se
 	if s.CurrentIteration > 0 {
 		meta = append(meta, fmt.Sprintf("iter %d", s.CurrentIteration))
 	}
+	// Phase 25 A4 — relative time for "when did this start", much more
+	// readable than the raw RFC3339-ish absolute we used to bury in the
+	// JSON output. Falls through silently when CreatedAt is zero
+	// (older daemons).
+	if rel := relTime(s.CreatedAt); rel != "" {
+		meta = append(meta, "started "+rel)
+	}
 	// Server doesn't surface autonomy on the SDK Session today; when it
 	// does we'll splice it here. Showing the stuck note is the most
 	// load-bearing meta a user wants at a glance, and falls naturally

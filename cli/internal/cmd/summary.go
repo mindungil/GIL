@@ -429,6 +429,42 @@ func displayName(s *sdk.Session) string {
 	return slug + "-" + stamp.Format("0102")
 }
 
+// relTime renders a duration relative to now using a small set of
+// units the user can read at a glance: "just now", "5m ago", "2h ago",
+// "3d ago", or "12 Apr" for anything older than ~30 days. Future
+// timestamps (clock skew between client and daemon) collapse to "just
+// now" rather than "in 3s" — this is the status surface, not a
+// scheduling view, and "in" prefixes confuse more than they help.
+//
+// Phase 25 A4. Reference lifts: opencode's session list ("2m ago"
+// short form), aider's relative timestamps in /history.
+func relTime(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	d := time.Since(t)
+	if d < 0 {
+		return "just now"
+	}
+	switch {
+	case d < 45*time.Second:
+		return "just now"
+	case d < 90*time.Second:
+		return "1m ago"
+	case d < 60*time.Minute:
+		return fmt.Sprintf("%dm ago", int(d/time.Minute))
+	case d < 90*time.Minute:
+		return "1h ago"
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh ago", int(d/time.Hour))
+	case d < 48*time.Hour:
+		return "yesterday"
+	case d < 30*24*time.Hour:
+		return fmt.Sprintf("%dd ago", int(d/(24*time.Hour)))
+	}
+	return t.Format("2 Jan")
+}
+
 // slugify converts arbitrary goal text to a kebab-case ASCII slug
 // suitable for filenames and command-line scanning. Non-ASCII letters
 // are dropped (we don't transliterate — Korean/CJK goals fall through

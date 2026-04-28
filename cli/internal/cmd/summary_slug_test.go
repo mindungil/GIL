@@ -58,6 +58,39 @@ func TestDisplayName_NilSession(t *testing.T) {
 	require.Equal(t, "", displayName(nil))
 }
 
+func TestRelTime_Buckets(t *testing.T) {
+	now := time.Now()
+	cases := []struct {
+		ago  time.Duration
+		want string
+	}{
+		{0, "just now"},
+		{30 * time.Second, "just now"},
+		{60 * time.Second, "1m ago"},
+		{5 * time.Minute, "5m ago"},
+		{59 * time.Minute, "59m ago"},
+		{75 * time.Minute, "1h ago"},
+		{3 * time.Hour, "3h ago"},
+		{36 * time.Hour, "yesterday"},
+		{5 * 24 * time.Hour, "5d ago"},
+	}
+	for _, c := range cases {
+		got := relTime(now.Add(-c.ago))
+		require.Equal(t, c.want, got, "ago=%s", c.ago)
+	}
+}
+
+func TestRelTime_ZeroIsEmpty(t *testing.T) {
+	require.Equal(t, "", relTime(time.Time{}))
+}
+
+func TestRelTime_FutureCollapsesToJustNow(t *testing.T) {
+	// Clock skew: server timestamp is 2s in the future. Don't render
+	// "in 2s" — collapse to "just now" so users don't think gil sees
+	// the future.
+	require.Equal(t, "just now", relTime(time.Now().Add(2*time.Second)))
+}
+
 func TestDisplayName_ZeroCreatedAtUsesNow(t *testing.T) {
 	s := &sdk.Session{
 		ID:       "01HQXY7G8H9JMQRSV9XYZW000A",
