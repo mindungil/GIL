@@ -25,6 +25,13 @@ var outputFormat = "text"
 // Unicode set per terminal-aesthetic.md §3.
 var asciiMode = false
 
+// noChat suppresses the Phase 24 chat surface so bare `gil` falls
+// through to the legacy mission-control summary even on a TTY. Useful
+// for users who prefer the verb-mode UX, and for the existing e2e
+// suite where some scripts assume the summary's text shape. The flag
+// is a kill-switch — the chat is the new default.
+var noChat = false
+
 // outputJSON reports whether the user asked for JSON via the persistent
 // --output flag. We compare case-insensitively so `--output JSON` works
 // the same as `--output json` (matches goose/codex tolerance).
@@ -44,6 +51,7 @@ func outputJSON() bool {
 func resetOutputFormatForTest() {
 	outputFormat = "text"
 	asciiMode = false
+	noChat = false
 }
 
 // defaultLayout returns the XDG-derived layout (or the GIL_HOME single-
@@ -102,9 +110,21 @@ func Root() *cobra.Command {
 		Args: cobra.NoArgs,
 		// RunE only fires on bare `gil` (no subcommand, no `--help`,
 		// no `--version`). Cobra resolves --help / --version itself
-		// before this hook, so the mission-control summary is the
-		// only thing the user sees when they type `gil` alone.
+		// before this hook, so we get a clean choice between two UX
+		// modes:
+		//
+		//   - TTY  → drop into the chat REPL (Phase 24).
+		//   - pipe → keep the mission-control summary so scripts can
+		//            still grep `gil` output for session metadata.
+		//
+		// stdoutIsTTY (chat.go) is the single source of truth for the
+		// switch; --no-chat (and the explicit `gil chat` subcommand)
+		// override it for power users who want one form regardless of
+		// where stdout points.
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if !noChat && stdoutIsTTY() {
+				return runChat(cmd, defaultSocket(), "", "")
+			}
 			return runSummary(cmd.OutOrStdout(), defaultSocket(), defaultBase(), asciiMode)
 		},
 	}
@@ -131,6 +151,11 @@ func Root() *cobra.Command {
 	// reasonable trigger but we leave that to the caller; the env
 	// variable does not auto-flip the flag).
 	root.PersistentFlags().BoolVar(&asciiMode, "ascii", false, "use ASCII fallback glyphs (no Unicode)")
+	// --no-chat: opt out of the Phase 24 chat-first UX. When set, bare
+	// `gil` always renders the legacy summary regardless of TTY state.
+	// Off by default so the conversational surface ships as the new
+	// front door.
+	root.PersistentFlags().BoolVar(&noChat, "no-chat", false, "skip the chat REPL on bare gil; always render the summary")
 	root.AddCommand(daemonCmd())
 	root.AddCommand(authCmd())
 	root.AddCommand(initCmd())
@@ -153,6 +178,7 @@ func Root() *cobra.Command {
 	root.AddCommand(permissionsCmd())
 	root.AddCommand(clarifyCmd())
 	root.AddCommand(updateCmd())
+	root.AddCommand(chatCmd())
 	root.AddCommand(newCompletionCmd(root))
 	return root
 }
