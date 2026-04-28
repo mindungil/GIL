@@ -24,7 +24,12 @@ type Result struct {
 
 // Compactor implements the Hermes cache-preserving compaction pattern.
 type Compactor struct {
-	Provider  provider.Provider
+	Provider   provider.Provider
+	// ProviderID is the un-wrapped factory key (e.g. "anthropic") used for
+	// token-density lookups. When empty, falls back to Provider.Name() —
+	// set this to the factory key to avoid the "+retry" suffix that
+	// NewRetry injects, which would miss the providerCharsPerToken table.
+	ProviderID string
 	Model     string
 	HeadKeep  int      // first N messages kept verbatim; default 2
 	TailKeep  int      // last N messages kept verbatim; default 6
@@ -108,7 +113,16 @@ func (c *Compactor) Compact(ctx context.Context, msgs []provider.Message) ([]pro
 		out = append(out, cloneMessage(m))
 	}
 
-	saved := estimateTokens(middle) - estimateTokens([]provider.Message{{Content: resp.Text}})
+	// Use ProviderID (un-wrapped factory key) when set; fall back to
+	// Provider.Name() for callers that pre-date the ProviderID field.
+	// NewRetry wraps the provider and makes Name() return "<id>+retry",
+	// which misses the providerCharsPerToken lookup — same bug class as
+	// the runner.go P27 fix.
+	providerID := c.ProviderID
+	if providerID == "" {
+		providerID = c.Provider.Name()
+	}
+	saved := estimateTokens(providerID, middle) - estimateTokens(providerID, []provider.Message{{Content: resp.Text}})
 	if saved < 0 {
 		saved = 0
 	}
@@ -116,7 +130,7 @@ func (c *Compactor) Compact(ctx context.Context, msgs []provider.Message) ([]pro
 		// Estimate original tokens from the WHOLE input slice (not just middle)
 		// for a meaningful percentage. SavedTokens uses the value already computed.
 		c.History.Record(CompactionEvent{
-			OriginalTokens: estimateTokens(msgs),
+			OriginalTokens: estimateTokens(providerID, msgs),
 			SavedTokens:    saved,
 			Timestamp:      time.Now().UTC(),
 		})
@@ -154,16 +168,18 @@ func cloneMessage(m provider.Message) provider.Message {
 	return out
 }
 
-// estimateTokens: 1 token ≈ 4 chars across all content fields.
-func estimateTokens(msgs []provider.Message) int64 {
+// estimateTokens uses per-provider tokenizer density heuristics to
+// estimate token count. This is provider-aware and replaces the previous
+// uniform 4-chars-per-token approach.
+func estimateTokens(providerID string, msgs []provider.Message) int64 {
 	total := int64(0)
 	for _, m := range msgs {
-		total += int64(len(m.Content)) / 4
+		total += int64(provider.EstimateTokens(providerID, m.Content))
 		for _, tc := range m.ToolCalls {
-			total += int64(len(tc.Input)) / 4
+			total += int64(provider.EstimateTokens(providerID, string(tc.Input)))
 		}
 		for _, tr := range m.ToolResults {
-			total += int64(len(tr.Content)) / 4
+			total += int64(provider.EstimateTokens(providerID, tr.Content))
 		}
 	}
 	return total

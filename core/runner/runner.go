@@ -253,6 +253,27 @@ type AgentLoop struct {
 	// internal: set once Run() prints the system-prompt breakdown so
 	// later iterations don't spam stderr with the same numbers.
 	breakdownLogged bool
+
+	// NoGrace disables the budget-exhaust grace call (Hermes pattern).
+	// When true, the loop halts cold on budget cap with no wrap-up summary.
+	NoGrace bool
+
+	// graceFired marks that the wrap-up call has already been made for
+	// this run, preventing double-firing on repeated budget checks.
+	graceFired bool
+
+	// internal: grace-call state — synced from Run()'s local vars at
+	// the budget-break sites so checkBudgetAndMaybeGrace can read them.
+	graceBudgetMaxTokens  int64
+	graceBudgetMaxCostUSD float64
+	graceTotalTokens      int64
+	graceTotalCostUSD     float64
+	graceMessages         []provider.Message
+
+	// graceStatus is set by checkBudgetAndMaybeGrace and read by Run()'s
+	// post-loop section to override the verify-based status classification
+	// when a grace call was (or was not) made.
+	graceStatus string
 }
 
 // CompactRequester is satisfied by AgentLoop; the compact_now tool uses it
@@ -288,6 +309,18 @@ func (a *AgentLoop) Run(ctx context.Context) (*Result, error) {
 	if a.Spec != nil && a.Spec.Budget != nil && a.Spec.Budget.MaxIterations > 0 {
 		maxIter = int(a.Spec.Budget.MaxIterations)
 	}
+
+	// P27 T6: reset grace state at the start of every Run() so that an
+	// AgentLoop reused for a second run gets a fresh grace flag set.
+	a.graceFired = false
+	a.graceStatus = ""
+	// Snapshot fields are written by syncGraceState before they're read,
+	// but reset them too to avoid leaving stale values in the struct.
+	a.graceBudgetMaxTokens = 0
+	a.graceBudgetMaxCostUSD = 0
+	a.graceTotalTokens = 0
+	a.graceTotalCostUSD = 0
+	a.graceMessages = nil
 
 	// Resolve project-level instructions (AGENTS.md / CLAUDE.md /
 	// cursor rules) once per run. The result lives between the base
@@ -418,12 +451,32 @@ loop:
 		// Compaction check: runs before provider_request so the context is
 		// already trimmed before the next LLM call.
 		if a.Compactor != nil {
-			maxCtx := a.MaxContextTokens
-			if maxCtx <= 0 {
-				maxCtx = 200_000
+			// P27 T5: per-model context window. When MaxContextTokens is
+			// explicitly set by the caller, honour it as an override (preserves
+			// backward-compat for tests and callers that hard-code a budget).
+			// Otherwise resolve the upcoming-turn role — same logic classifyTurn
+			// applies a few lines below — and look up the per-model window from
+			// the provider capacity table so the trigger fires at the right
+			// threshold for each role (e.g. editor=ollama:llama3:8b fires at 8k,
+			// main=claude-opus-4-7 fires at 1M).
+			var ctxWindow int64
+			if a.MaxContextTokens > 0 {
+				ctxWindow = int64(a.MaxContextTokens)
+			} else {
+				nextRole := classifyTurn(iter-1, lastResponse)
+				nextModel := a.pickModel(nextRole)
+				ctxWindow = provider.ContextTokens(nextModel)
+				// ContextTokens returns 200_000 for unknown models; belt-and-
+				// suspenders guard in case the implementation ever changes.
+				if ctxWindow == 0 {
+					ctxWindow = 200_000
+				}
 			}
-			estimated := estimateMessagesTokens(messages)
-			threshold := int64(float64(maxCtx) * 0.95)
+			// Use a.ProviderName (the un-wrapped factory key), not a.Provider.Name()
+			// — the latter returns "<provider>+retry" because RunService wraps with
+			// NewRetry. Same bug class as the T4 fix (runner.go HasPrefix).
+			estimated := estimateMessagesTokens(a.ProviderName, messages)
+			threshold := int64(float64(ctxWindow) * 0.95)
 			forced := a.compactNowRequested
 			a.compactNowRequested = false
 			if forced || estimated >= threshold {
@@ -521,10 +574,26 @@ loop:
 			a.extraSystemNote = "" // single-shot: clear after one use
 		}
 
+		// P27 T4: Apply Anthropic prompt-caching markers to the last 3
+		// messages so the static prefix is cached and recent turns hit the
+		// rolling cache window. No-op for non-Anthropic providers.
+		//
+		// Use strings.HasPrefix so the check survives the "+retry" suffix
+		// that provider.NewRetry appends to Name() — in production all
+		// providers are wrapped by NewRetry in RunService, so a bare
+		// equality check would never fire.
+		iterMessages := messages
+		if strings.HasPrefix(iterProvider.Name(), "anthropic") {
+			// MarkCacheBreakpoints mutates in place; copy the slice header
+			// so the loop's own messages slice is not affected.
+			iterMessages = make([]provider.Message, len(messages))
+			copy(iterMessages, messages)
+			iterMessages = compact.MarkCacheBreakpoints(iterMessages)
+		}
 		resp, err := iterProvider.Complete(ctx, provider.Request{
 			Model:     iterModel,
 			System:    iterSystem,
-			Messages:  messages,
+			Messages:  iterMessages,
 			Tools:     tools,
 			MaxTokens: 4096,
 		})
@@ -615,6 +684,7 @@ loop:
 					"reserve":            budgetReserveTokens,
 					"fraction":           frac,
 				})
+				a.syncGraceState(totalTokens, totalCostUSD, budgetMaxTokens, budgetMaxCostUSD, messages)
 				exit = exitState{reason: "budget_tokens", iterations: iter}
 				break loop
 			}
@@ -637,6 +707,7 @@ loop:
 					"limit":    budgetMaxCostUSD,
 					"fraction": frac,
 				})
+				a.syncGraceState(totalTokens, totalCostUSD, budgetMaxTokens, budgetMaxCostUSD, messages)
 				exit = exitState{reason: "budget_cost", iterations: iter}
 				break loop
 			}
@@ -1038,6 +1109,12 @@ loop:
 	finalErr := exit.err
 	switch exit.reason {
 	case "budget_tokens", "budget_cost":
+		// Fire the grace wrap-up call (Hermes pattern). Grace appends a
+		// hand-off summary to the message history so a future resume has a
+		// clean starting point. The Result.Status is still determined by
+		// the post-loop verify outcome (verify-based classification below)
+		// so existing callers that match "budget_exhausted*" keep working.
+		_ = a.checkBudgetAndMaybeGrace(ctx)
 		// New three-way classification:
 		//   - verify pass after budget hit  → budget_exhausted_verify_passed
 		//     (best-effort: agent's prior edits already satisfied checks)
@@ -1050,6 +1127,13 @@ loop:
 			finalStatus = "budget_exhausted_verify_passed"
 		} else {
 			finalStatus = "budget_exhausted_verify_failed"
+		}
+		// graceStatus, when non-empty, is set by checkBudgetAndMaybeGrace to
+		// signal that the wrap-up turn fired and the run hands off cleanly.
+		// It overrides the verify-based classification so callers can detect
+		// the soft-exit path.
+		if a.graceStatus != "" {
+			finalStatus = a.graceStatus
 		}
 	case "stuck":
 		finalStatus = "stuck"
@@ -1802,16 +1886,18 @@ func planLine(it plan.Item, indent string) string {
 	return body
 }
 
-// estimateMessagesTokens uses the same 4-chars-per-token heuristic as compact.estimateTokens.
-func estimateMessagesTokens(msgs []provider.Message) int64 {
+// estimateMessagesTokens uses per-provider tokenizer density heuristics to
+// estimate token count. This is provider-aware and replaces the previous
+// uniform 4-chars-per-token approach.
+func estimateMessagesTokens(providerID string, msgs []provider.Message) int64 {
 	var total int64
 	for _, m := range msgs {
-		total += int64(len(m.Content)) / 4
+		total += int64(provider.EstimateTokens(providerID, m.Content))
 		for _, tc := range m.ToolCalls {
-			total += int64(len(tc.Input)) / 4
+			total += int64(provider.EstimateTokens(providerID, string(tc.Input)))
 		}
 		for _, tr := range m.ToolResults {
-			total += int64(len(tr.Content)) / 4
+			total += int64(provider.EstimateTokens(providerID, tr.Content))
 		}
 	}
 	return total

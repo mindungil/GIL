@@ -2329,3 +2329,231 @@ func TestSplitBashChain(t *testing.T) {
 		})
 	}
 }
+
+// capturedReqProvider records the last provider.Request it received on Complete.
+// Used by the P27 T4 cache-marker tests below.
+type capturedReqProvider struct {
+	name   string
+	req    provider.Request
+	called bool
+}
+
+func (c *capturedReqProvider) Name() string { return c.name }
+func (c *capturedReqProvider) Complete(_ context.Context, req provider.Request) (provider.Response, error) {
+	c.req = req
+	c.called = true
+	// Return end_turn so the loop terminates after one iteration.
+	return provider.Response{
+		Text:         "done",
+		StopReason:   "end_turn",
+		InputTokens:  10,
+		OutputTokens: 4,
+	}, nil
+}
+
+// minimalSpec returns a FrozenSpec that allows the loop to run for at most one
+// iteration without requiring any verification (nil Verification → vacuous pass).
+func minimalSpec() *gilv1.FrozenSpec {
+	return &gilv1.FrozenSpec{
+		Goal:   &gilv1.Goal{OneLiner: "test goal"},
+		Budget: &gilv1.Budget{MaxIterations: 1},
+	}
+}
+
+// TestRunner_AnthropicRequest_HasCacheMarkers verifies that, when the provider
+// name is "anthropic", the runner applies MarkCacheBreakpoints so the outgoing
+// messages carry CacheControl=true on the last (up to 3) messages.
+func TestRunner_AnthropicRequest_HasCacheMarkers(t *testing.T) {
+	captured := &capturedReqProvider{name: "anthropic"}
+	loop := NewAgentLoop(minimalSpec(), captured, "claude-sonnet-4-6", nil, verify.NewRunner(t.TempDir()))
+	_, err := loop.Run(context.Background())
+	require.NoError(t, err)
+	require.True(t, captured.called, "provider must have been called")
+
+	msgs := captured.req.Messages
+	require.NotEmpty(t, msgs, "request must contain at least one message")
+
+	// With MarkCacheBreakpoints applied, the last min(3, n) messages must
+	// have CacheControl=true. Verify at least one of them is marked.
+	n := len(msgs)
+	start := n - 3
+	if start < 0 {
+		start = 0
+	}
+	var marked int
+	for i := start; i < n; i++ {
+		if msgs[i].CacheControl {
+			marked++
+		}
+	}
+	require.GreaterOrEqual(t, marked, 1, "at least one of the last-3 messages must have CacheControl=true after MarkCacheBreakpoints")
+}
+
+// TestRunner_OpenAIRequest_NoCacheMarkers verifies that, when the provider name
+// is NOT "anthropic", the runner does NOT apply cache markers — all messages
+// must have CacheControl=false.
+func TestRunner_OpenAIRequest_NoCacheMarkers(t *testing.T) {
+	captured := &capturedReqProvider{name: "openai"}
+	loop := NewAgentLoop(minimalSpec(), captured, "gpt-4o", nil, verify.NewRunner(t.TempDir()))
+	_, err := loop.Run(context.Background())
+	require.NoError(t, err)
+	require.True(t, captured.called, "provider must have been called")
+
+	for i, m := range captured.req.Messages {
+		require.False(t, m.CacheControl, "message[%d] must NOT have CacheControl=true for non-Anthropic provider", i)
+	}
+}
+
+// TestRunner_PerRoleContextWindow_SmallEditorTriggersEarly verifies that when
+// the next-turn role is "editor" and Models["editor"] = "ollama:llama3:8b"
+// (8192 token window), the compaction trigger fires before reaching the
+// default 200k threshold. Messages totalling ~8000 tokens exceed 95% of 8192
+// (= 7782) but are far below 95% of 200k (= 190k).
+func TestRunner_PerRoleContextWindow_SmallEditorTriggersEarly(t *testing.T) {
+	// Build a response that contains only exec tools so classifyTurn routes
+	// turn 2 (iterIdx=1) to RoleEditor, which maps to "ollama:llama3:8b".
+	// With "loop-mock" provider (default 4.0 chars/token), bigText of 4000
+	// chars = ~1000 tokens. We run 10 such turns → ~10000 tokens total,
+	// well above the 7782 threshold for ollama:llama3:8b (8192*0.95).
+	bigText := strings.Repeat("e", 4000) // ~1000 tokens at 4 chars/token
+	var seq []provider.MockTurn
+	for i := 0; i < 10; i++ {
+		seq = append(seq, provider.MockTurn{
+			Text:       bigText,
+			StopReason: "tool_use",
+			ToolCalls: []provider.ToolCall{{
+				ID: fmt.Sprintf("c%d", i), Name: "bash", Input: json.RawMessage(`{"command":"echo hi"}`),
+			}},
+		})
+	}
+	seq = append(seq, provider.MockTurn{Text: "done", StopReason: "end_turn"})
+	prov := provider.NewMockToolProvider(seq)
+
+	summaryProv := provider.NewMock([]string{"## summary"})
+	compactor := &compact.Compactor{Provider: summaryProv, Model: "m", HeadKeep: 1, TailKeep: 2, MinMiddle: 2}
+
+	spec := &gilv1.FrozenSpec{Budget: &gilv1.Budget{MaxIterations: 12}, Verification: &gilv1.Verification{}}
+	ver := verify.NewRunner(t.TempDir())
+
+	loop := &AgentLoop{
+		Spec:      spec,
+		Provider:  prov,
+		Model:     "claude-sonnet-4-6", // default/main model
+		Models:    map[string]string{"editor": "ollama:llama3:8b"},
+		Tools:     []tool.Tool{&noopTool{}},
+		Verifier:  ver,
+		Compactor: compactor,
+		// MaxContextTokens intentionally 0 so we rely entirely on provider.ContextTokens.
+		Events: event.NewStream(),
+	}
+	sub := loop.Events.Subscribe(256)
+	var collected []event.Event
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for e := range sub.Events() {
+			collected = append(collected, e)
+		}
+	}()
+
+	_, err := loop.Run(context.Background())
+	require.NoError(t, err)
+	sub.Close()
+	<-done
+
+	var compactCount int
+	for _, e := range collected {
+		if e.Type == "compact_start" {
+			compactCount++
+		}
+	}
+	require.Greater(t, compactCount, 0,
+		"expected compaction to trigger: ollama:llama3:8b has 8192-token window, "+
+			"messages exceed 95%% threshold of 7782 tokens")
+}
+
+// TestRunner_PerRoleContextWindow_LargeMainTolerates verifies that when
+// Models["main"] = "claude-opus-4-7" (1M token window), messages totalling
+// only ~8000 tokens do NOT trigger compaction (far below 95% of 1M = 950k).
+func TestRunner_PerRoleContextWindow_LargeMainTolerates(t *testing.T) {
+	// Same bigText/seq as above but role stays "main" because turns have
+	// mixed text+tools (not exclusively exec tools). We use a non-exec tool
+	// name to keep classifyTurn on RoleMain every iteration.
+	bigText := strings.Repeat("m", 4000) // ~1000 tokens at 4 chars/token
+	var seq []provider.MockTurn
+	for i := 0; i < 10; i++ {
+		seq = append(seq, provider.MockTurn{
+			Text:       bigText,
+			StopReason: "tool_use",
+			ToolCalls: []provider.ToolCall{{
+				// "plan" tool forces RolePlanner; any non-exec tool keeps RoleMain.
+				// We use "noop" (not in execToolNames) to stay on RoleMain.
+				ID: fmt.Sprintf("c%d", i), Name: "noop", Input: json.RawMessage(`{}`),
+			}},
+		})
+	}
+	seq = append(seq, provider.MockTurn{Text: "done", StopReason: "end_turn"})
+	prov := provider.NewMockToolProvider(seq)
+
+	summaryProv := provider.NewMock([]string{"## summary"})
+	compactor := &compact.Compactor{Provider: summaryProv, Model: "m", HeadKeep: 1, TailKeep: 2, MinMiddle: 2}
+
+	spec := &gilv1.FrozenSpec{Budget: &gilv1.Budget{MaxIterations: 12}, Verification: &gilv1.Verification{}}
+	ver := verify.NewRunner(t.TempDir())
+
+	loop := &AgentLoop{
+		Spec:      spec,
+		Provider:  prov,
+		Model:     "claude-opus-4-7", // main model: 1M token window
+		Models:    map[string]string{"main": "claude-opus-4-7"},
+		Tools:     []tool.Tool{&noopTool{}},
+		Verifier:  ver,
+		Compactor: compactor,
+		// MaxContextTokens intentionally 0 so we rely entirely on provider.ContextTokens.
+		Events: event.NewStream(),
+	}
+	sub := loop.Events.Subscribe(256)
+	var collected []event.Event
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for e := range sub.Events() {
+			collected = append(collected, e)
+		}
+	}()
+
+	_, err := loop.Run(context.Background())
+	require.NoError(t, err)
+	sub.Close()
+	<-done
+
+	for _, e := range collected {
+		require.NotEqual(t, "compact_start", e.Type,
+			"claude-opus-4-7 has 1M token window; ~8000 tokens should not trigger compaction")
+	}
+}
+
+// TestRunner_EstimateUsesUnwrappedProviderName verifies that the token
+// estimator is called with the un-wrapped provider name so that the
+// Anthropic-specific 3.5 chars/token density is honoured even when
+// RunService wraps the provider in NewRetry (making Provider.Name()
+// return "anthropic+retry").
+//
+// Critical assertion: 100 chars / 3.5 = 28.57 → 29 tokens (Anthropic)
+// vs 100 chars / 4.0 = 25 tokens (default / broken path).
+func TestRunner_EstimateUsesUnwrappedProviderName(t *testing.T) {
+	msgs := []provider.Message{
+		{Role: provider.RoleUser, Content: strings.Repeat("a", 100)},
+	}
+
+	// "anthropic" — the un-wrapped factory key — must yield the Anthropic
+	// 3.5 chars/token density.
+	got := estimateMessagesTokens("anthropic", msgs)
+	require.Equal(t, int64(29), got,
+		"'anthropic' must use 3.5 chars/token density (got %d, broken path gives 25)", got)
+
+	// Sanity-check: the wrapped name falls back to the default 4.0 density.
+	gotWrapped := estimateMessagesTokens("anthropic+retry", msgs)
+	require.Equal(t, int64(25), gotWrapped,
+		"'anthropic+retry' should fall back to 4.0 density (got %d)", gotWrapped)
+}

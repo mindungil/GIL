@@ -1183,6 +1183,26 @@ func (s *RunService) executeRun(
 	loop.Plan = planStore
 	loop.SessionID = sessionID
 
+	// P27 T3: instantiate Compactor from spec so the compaction trigger
+	// in runner.go is no longer dead code.
+	// "" catch-all: workspace.ApplyDefaults may leave ModelChoice.Provider
+	// blank; see core/runner/factory.go for why this entry is required.
+	provsByName := map[string]provider.Provider{providerName: prov, "": prov}
+	compactor, cerr := runner.NewCompactorFromSpec(spec.GetModels(), provsByName)
+	if cerr != nil {
+		data, _ := json.Marshal(map[string]any{"err": cerr.Error()})
+		_, _ = stream.Append(event.Event{
+			Timestamp: time.Now().UTC(),
+			Source:    event.SourceSystem,
+			Kind:      event.KindNote,
+			Type:      "compactor_setup_error",
+			Data:      data,
+		})
+		_ = s.repo.UpdateStatus(ctx, sessionID, "stopped")
+		return nil, status.Errorf(codes.InvalidArgument, "compactor setup: %v", cerr)
+	}
+	loop.Compactor = compactor
+
 	// Register the loop pointer so RequestCompact / PostHint RPCs can
 	// stage actions for the next iteration boundary. Cleared in the
 	// existing exit-cleanup defer below alongside runStreams /
