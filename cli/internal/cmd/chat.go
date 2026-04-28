@@ -71,6 +71,27 @@ terminal — gil chat is the explicit form for piped or scripted use.`,
 // at the top-level prompt). All other errors propagate so the caller can
 // surface them via cliutil.Exit; this matches every other subcommand's
 // shape.
+//
+// PHASE 24 REDESIGN: The chat dispatcher used to be a switch on a regex
+// classifier (intent.Classify -> Kind -> handler). That worked for clean
+// wordings but committed protests/clarifications as new tasks (real bug:
+// "아니 안녕ㄹ이라니까" = "no, I told you it's hello" got recorded as a
+// goal because it was 12+ chars and didn't match the greeting regex).
+//
+// The new design follows Cline / Codex / aider / opencode: every user
+// turn goes to a small LLM with tool definitions; the LLM decides via
+// tool_use whether to start an interview, show status, resume a session,
+// or just keep talking. Greetings stay greetings because the model
+// doesn't emit a tool call; protests stay protests for the same reason.
+//
+// Regex fast-path is kept ONLY for the literal `/quit` shortcut so users
+// can leave even when the LLM is unreachable. Everything else routes
+// through Conversation.Send.
+//
+// Offline fallback: when no provider can be resolved (no credstore entry,
+// no env var), we degrade to a regex-only "limited mode" surface so the
+// chat is still usable for status/resume/quit; we explicitly tell the
+// user to run `gil auth login` for the full experience.
 func runChat(cmd *cobra.Command, socket, providerName, model string) error {
 	out := cmd.OutOrStdout()
 	in := cmd.InOrStdin()
@@ -82,8 +103,8 @@ func runChat(cmd *cobra.Command, socket, providerName, model string) error {
 	g := uistyle.NewGlyphs(asciiMode)
 	p := uistyle.NewPalette(false)
 
-	// Daemon up — we need it for ListSessions to seed the intent
-	// classifier's "hasSessions" hint and for any handoff that follows.
+	// Daemon up — we need it for ListSessions to seed the conversation
+	// gating ("hasSessions") and for any handoff that follows.
 	if err := ensureDaemon(socket, defaultBase()); err != nil {
 		return err
 	}
@@ -103,11 +124,17 @@ func runChat(cmd *cobra.Command, socket, providerName, model string) error {
 
 	renderChatBanner(out, g, p, len(active))
 
-	// Single-shot intent classification loop. We deliberately keep the
-	// chat at "first message" granularity: the user's first non-empty
-	// message routes to a downstream flow that owns the rest of the
-	// conversation (interview, resume, etc.). A future iteration can
-	// loop here for multi-task chats — Phase 24 only owns the entry.
+	// Resolve the intake provider once at chat start. If nil, we drop
+	// into limited mode (regex-only fast paths + advise auth login).
+	intakeProv, intakeModel := pickIntentProvider(cmd, providerName, model)
+	if intakeProv == nil {
+		fmt.Fprintln(out, agentLine(p, g, p.Caution("No LLM credentials found. Limited mode.")))
+		fmt.Fprintln(out, agentLine(p, g, p.Dim("Run `gil auth login` for the full conversational experience.")))
+		fmt.Fprintln(out)
+		return runChatOffline(ctx, cmd, cli, allSessions, active, providerName, model)
+	}
+
+	conv := intent.NewConversation()
 	reader := bufio.NewReader(in)
 	for {
 		fmt.Fprint(out, p.Info("›")+" ")
@@ -117,9 +144,9 @@ func runChat(cmd *cobra.Command, socket, providerName, model string) error {
 		}
 		msg := strings.TrimSpace(line)
 
-		// Top-level quit shortcuts. "/quit" matches the existing
-		// run-interactive lexicon; bare "exit"/"quit" is forgiving for
-		// users coming from other shells.
+		// Hard fast-path: literal /quit (and "/q", "/exit", bare
+		// "quit"/"exit"/"bye"). Kept regex-only so a user can always
+		// leave even when the LLM is unreachable mid-session.
 		if isQuitWord(msg) {
 			fmt.Fprintln(out, p.Dim("bye."))
 			return nil
@@ -128,70 +155,131 @@ func runChat(cmd *cobra.Command, socket, providerName, model string) error {
 			fmt.Fprintln(out)
 			return nil
 		}
-
-		// Resolve the optional intent provider lazily. nil is fine —
-		// the regex layer alone covers the chat surface's primary
-		// shapes; the LLM only matters for ambiguous wordings.
-		intentProv, intentModel := pickIntentProvider(cmd, providerName, model)
-
-		it, ierr := intent.Classify(ctx, intentProv, intentModel, msg, len(active) > 0)
-		if ierr != nil {
-			fmt.Fprintln(out, p.Caution("(classification failed; treating as new task)"))
-			it = intent.Intent{Kind: intent.KindNewTask, GoalText: msg}
+		if msg == "" {
+			// User hit enter on an empty line — re-prompt without
+			// burning a token.
+			continue
 		}
 
+		turn, terr := conv.Send(ctx, intakeProv, intakeModel, msg)
+		if terr != nil {
+			// Network failure / malformed response. Surface a friendly
+			// message and keep the chat alive; History was already
+			// rolled back by Conversation.Send so a retry won't double
+			// the user turn.
+			fmt.Fprintln(out, agentLine(p, g, p.Caution("Lost contact briefly. Try again?")))
+			continue
+		}
+
+		// Render any text the LLM produced before dispatching tools.
+		// Anthropic permits a tool_use response with a leading text
+		// block (e.g. "Briefing your task." then start_interview); the
+		// user should see that line before the manifest renders.
+		if turn.AssistantText != "" {
+			for _, ln := range strings.Split(turn.AssistantText, "\n") {
+				fmt.Fprintln(out, agentLine(p, g, ln))
+			}
+		}
+
+		// Dispatch tool calls in order. Most turns produce 0 or 1
+		// tool calls; the loop tolerates more for robustness.
+		if len(turn.ToolCalls) == 0 {
+			continue
+		}
+		for _, tc := range turn.ToolCalls {
+			switch tc.Name {
+			case intent.ToolStartInterview:
+				args, perr := intent.ParseStartInterview(tc)
+				if perr != nil || strings.TrimSpace(args.Goal) == "" {
+					fmt.Fprintln(out, agentLine(p, g, p.Caution("(could not parse start_interview; please rephrase)")))
+					continue
+				}
+				return handleChatNewTask(ctx, cmd, cli, intent.Intent{
+					Kind:      intent.KindNewTask,
+					GoalText:  args.Goal,
+					Workspace: args.Workspace,
+				}, providerName, model)
+
+			case intent.ToolResumeSession:
+				args, _ := intent.ParseResumeSession(tc)
+				return handleChatResume(ctx, cmd, cli, active, intent.Intent{
+					Kind:      intent.KindResume,
+					SessionID: args.Query, // Query is a hint; resume picker handles fuzzy fallback.
+				}, providerName, model)
+
+			case intent.ToolShowStatus:
+				renderChatStatus(out, g, p, allSessions)
+				fmt.Fprintln(out, p.Dim("type a task description to start a new session, or /quit"))
+
+			case intent.ToolExplain:
+				// The LLM may or may not have included narrative text;
+				// in either case we fall through to the canonical
+				// short primer so the user gets a consistent answer.
+				renderChatExplain(out, g, p)
+
+			default:
+				// Unknown tool name — the LLM hallucinated a tool we
+				// didn't define. Treat as a no-op and let the
+				// conversation continue.
+				fmt.Fprintln(out, agentLine(p, g, p.Caution(fmt.Sprintf("(ignored unknown tool: %s)", tc.Name))))
+			}
+		}
+	}
+}
+
+// runChatOffline is the limited-mode chat surface for users with no
+// configured LLM provider. We keep regex-only routing for the trivial
+// shapes (/quit, status, help, resume) so the surface is still useful;
+// task descriptions are accepted with a single confirmation gate before
+// committing (no LLM available to disambiguate). This preserves the
+// "chat is always reachable" property while making the upgrade path
+// (run `gil auth login`) obvious.
+func runChatOffline(ctx context.Context, cmd *cobra.Command, cli *sdk.Client, allSessions, active []*sdk.Session, providerName, model string) error {
+	out := cmd.OutOrStdout()
+	in := cmd.InOrStdin()
+	g := uistyle.NewGlyphs(asciiMode)
+	p := uistyle.NewPalette(false)
+
+	reader := bufio.NewReader(in)
+	for {
+		fmt.Fprint(out, p.Info("›")+" ")
+		line, rerr := reader.ReadString('\n')
+		if rerr != nil && rerr != io.EOF {
+			return fmt.Errorf("read input: %w", rerr)
+		}
+		msg := strings.TrimSpace(line)
+		if isQuitWord(msg) {
+			fmt.Fprintln(out, p.Dim("bye."))
+			return nil
+		}
+		if msg == "" {
+			if rerr == io.EOF {
+				fmt.Fprintln(out)
+				return nil
+			}
+			continue
+		}
+
+		// Regex-only classification — no LLM in offline mode.
+		it, _ := intent.Classify(ctx, nil, "", msg, len(active) > 0)
 		switch it.Kind {
 		case intent.KindGreeting:
-			// Mission-briefing tone: terse acknowledgement, immediate
-			// reprompt. No "안녕하세요!" — gil is a precision tool, not
-			// a chatty companion.
-			fmt.Fprintln(out, agentLine(p, g, p.Surface("Acknowledged. Mission?")))
-			continue
-
-		case intent.KindTooVague:
-			// Brief request for detail. Examples in dim.
-			fmt.Fprintln(out, agentLine(p, g, p.Surface("Need more detail.")))
-			fmt.Fprintln(out, agentLine(p, g, p.Dim("e.g.  add dark mode to my React app at ~/myapp")))
-			fmt.Fprintln(out, agentLine(p, g, p.Dim("      fix the failing test in handlers/auth_test.go")))
-			fmt.Fprintln(out, agentLine(p, g, p.Dim("      refactor the retry logic across handlers/{a,b,c}.go")))
-			continue
-
-		case intent.KindUnknown:
-			if msg == "" {
-				fmt.Fprintln(out, p.Dim("Tell me what you want to work on."))
-				continue
-			}
-			// Genuinely ambiguous — confirm before commiting to an
-			// interview path. We treat the original message as the
-			// goal and ask the user to confirm.
-			fmt.Fprintln(out, agentLine(p, g, "Not sure I followed. Want me to start a new task with that?"))
-			fmt.Fprintln(out, p.Dim("  [y] start new task   [n] back to prompt"))
-			ans, _ := readLineRaw(reader)
-			if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(ans)), "y") {
-				continue
-			}
-			it.Kind = intent.KindNewTask
-			it.GoalText = msg
-			fallthrough
-
-		case intent.KindNewTask:
-			return handleChatNewTask(ctx, cmd, cli, it, providerName, model)
-
-		case intent.KindResume:
-			return handleChatResume(ctx, cmd, cli, active, it, providerName, model)
-
+			fmt.Fprintln(out, agentLine(p, g, p.Surface("Acknowledged. (limited mode — `gil auth login` for full chat.)")))
 		case intent.KindStatus:
 			renderChatStatus(out, g, p, allSessions)
-			fmt.Fprintln(out, p.Dim("type a task description to start a new session, or /quit"))
-			continue
-
 		case intent.KindHelp:
 			renderChatHelp(out, g, p)
-			continue
-
 		case intent.KindExplain:
 			renderChatExplain(out, g, p)
-			continue
+		case intent.KindResume:
+			return handleChatResume(ctx, cmd, cli, active, it, providerName, model)
+		case intent.KindNewTask:
+			// In offline mode we still allow a new task — but the
+			// confirmation prompt in handleChatNewTask gives the user
+			// a chance to abort if our regex misclassified.
+			return handleChatNewTask(ctx, cmd, cli, it, providerName, model)
+		case intent.KindTooVague, intent.KindUnknown:
+			fmt.Fprintln(out, agentLine(p, g, p.Surface("Need more detail or run `gil auth login` for conversational chat.")))
 		}
 	}
 }
@@ -757,12 +845,38 @@ func buildProvider(cmd *cobra.Command, name string) provider.Provider {
 		}
 		return provider.NewAnthropic(key)
 	default:
+		// "mock" is a special-cased dev/smoke aid — it lets
+		// `gil chat --provider mock` exercise the LLM-driven dispatcher
+		// without burning real tokens. We return a never-exhausting
+		// mock that always replies "Standing by." with no tool calls,
+		// so smoke tests can replay arbitrary user turns; the chat
+		// stays alive and never commits to a session.
+		if name == "mock" {
+			return repeatingMockProvider{}
+		}
 		// OpenAI / OpenRouter / vllm don't have a Provider impl in
 		// core/provider yet (or live behind an SDK function the
 		// classifier doesn't need to gate on). Returning nil keeps
 		// the chat surface working — the regex layer is sufficient.
 		return nil
 	}
+}
+
+// repeatingMockProvider is an in-package mock provider that always
+// returns a calm "Standing by." reply with no tool calls. Used by
+// `gil chat --provider mock` for smoke testing the chat surface
+// without touching a real LLM API. It is NOT exposed to production:
+// real users picking "mock" still see the limited-mode banner because
+// pickIntentProvider's auto-pick path won't select it (mock isn't in
+// the credstore preference list).
+type repeatingMockProvider struct{}
+
+func (repeatingMockProvider) Name() string { return "mock" }
+func (repeatingMockProvider) Complete(_ context.Context, _ provider.Request) (provider.Response, error) {
+	return provider.Response{
+		Text:       "Standing by.",
+		StopReason: "end_turn",
+	}, nil
 }
 
 // credentialOrEnv reads a provider's API key from the credstore first,
