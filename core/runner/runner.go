@@ -270,7 +270,7 @@ type AgentLoop struct {
 	graceTotalCostUSD     float64
 	graceMessages         []provider.Message
 
-	// status is set by checkBudgetAndMaybeGrace and read by Run()'s
+	// graceStatus is set by checkBudgetAndMaybeGrace and read by Run()'s
 	// post-loop section to override the verify-based status classification
 	// when a grace call was (or was not) made.
 	graceStatus string
@@ -309,6 +309,18 @@ func (a *AgentLoop) Run(ctx context.Context) (*Result, error) {
 	if a.Spec != nil && a.Spec.Budget != nil && a.Spec.Budget.MaxIterations > 0 {
 		maxIter = int(a.Spec.Budget.MaxIterations)
 	}
+
+	// P27 T6: reset grace state at the start of every Run() so that an
+	// AgentLoop reused for a second run gets a fresh grace flag set.
+	a.graceFired = false
+	a.graceStatus = ""
+	// Snapshot fields are written by syncGraceState before they're read,
+	// but reset them too to avoid leaving stale values in the struct.
+	a.graceBudgetMaxTokens = 0
+	a.graceBudgetMaxCostUSD = 0
+	a.graceTotalTokens = 0
+	a.graceTotalCostUSD = 0
+	a.graceMessages = nil
 
 	// Resolve project-level instructions (AGENTS.md / CLAUDE.md /
 	// cursor rules) once per run. The result lives between the base

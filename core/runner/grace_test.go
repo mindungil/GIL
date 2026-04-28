@@ -147,3 +147,14 @@ func TestRunner_BudgetExhaustNoGrace_ResultStatusIsExhausted(t *testing.T) {
 		"with NoGrace=true no handoff fires; legacy status must be preserved")
 	require.Equal(t, "tokens", res.BudgetReason)
 }
+
+func TestGraceCall_ProviderNilSetsHandoffStatus(t *testing.T) {
+	loop := newTestLoopForGrace(t, &graceProvider{name: "anthropic"})
+	loop.Provider = nil // simulate misconfigured loop
+	loop.graceBudgetMaxTokens = 100
+	loop.graceTotalTokens = 110
+
+	require.NoError(t, loop.checkBudgetAndMaybeGrace(context.Background()))
+	require.Equal(t, "budget_exhausted_with_handoff", loop.graceStatus,
+		"graceStatus must still signal handoff even when no provider call is possible")
+}
