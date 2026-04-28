@@ -574,8 +574,13 @@ loop:
 		// P27 T4: Apply Anthropic prompt-caching markers to the last 3
 		// messages so the static prefix is cached and recent turns hit the
 		// rolling cache window. No-op for non-Anthropic providers.
+		//
+		// Use strings.HasPrefix so the check survives the "+retry" suffix
+		// that provider.NewRetry appends to Name() — in production all
+		// providers are wrapped by NewRetry in RunService, so a bare
+		// equality check would never fire.
 		iterMessages := messages
-		if iterProvider.Name() == "anthropic" {
+		if strings.HasPrefix(iterProvider.Name(), "anthropic") {
 			// MarkCacheBreakpoints mutates in place; copy the slice header
 			// so the loop's own messages slice is not affected.
 			iterMessages = make([]provider.Message, len(messages))
