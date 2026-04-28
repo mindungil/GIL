@@ -24,7 +24,12 @@ type Result struct {
 
 // Compactor implements the Hermes cache-preserving compaction pattern.
 type Compactor struct {
-	Provider  provider.Provider
+	Provider   provider.Provider
+	// ProviderID is the un-wrapped factory key (e.g. "anthropic") used for
+	// token-density lookups. When empty, falls back to Provider.Name() —
+	// set this to the factory key to avoid the "+retry" suffix that
+	// NewRetry injects, which would miss the providerCharsPerToken table.
+	ProviderID string
 	Model     string
 	HeadKeep  int      // first N messages kept verbatim; default 2
 	TailKeep  int      // last N messages kept verbatim; default 6
@@ -108,7 +113,15 @@ func (c *Compactor) Compact(ctx context.Context, msgs []provider.Message) ([]pro
 		out = append(out, cloneMessage(m))
 	}
 
-	providerID := c.Provider.Name()
+	// Use ProviderID (un-wrapped factory key) when set; fall back to
+	// Provider.Name() for callers that pre-date the ProviderID field.
+	// NewRetry wraps the provider and makes Name() return "<id>+retry",
+	// which misses the providerCharsPerToken lookup — same bug class as
+	// the runner.go P27 fix.
+	providerID := c.ProviderID
+	if providerID == "" {
+		providerID = c.Provider.Name()
+	}
 	saved := estimateTokens(providerID, middle) - estimateTokens(providerID, []provider.Message{{Content: resp.Text}})
 	if saved < 0 {
 		saved = 0

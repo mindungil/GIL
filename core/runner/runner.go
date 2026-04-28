@@ -472,7 +472,10 @@ loop:
 					ctxWindow = 200_000
 				}
 			}
-			estimated := estimateMessagesTokens(a.Provider.Name(), messages)
+			// Use a.ProviderName (the un-wrapped factory key), not a.Provider.Name()
+			// — the latter returns "<provider>+retry" because RunService wraps with
+			// NewRetry. Same bug class as the T4 fix (runner.go HasPrefix).
+			estimated := estimateMessagesTokens(a.ProviderName, messages)
 			threshold := int64(float64(ctxWindow) * 0.95)
 			forced := a.compactNowRequested
 			a.compactNowRequested = false

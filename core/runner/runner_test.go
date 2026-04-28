@@ -2532,3 +2532,28 @@ func TestRunner_PerRoleContextWindow_LargeMainTolerates(t *testing.T) {
 			"claude-opus-4-7 has 1M token window; ~8000 tokens should not trigger compaction")
 	}
 }
+
+// TestRunner_EstimateUsesUnwrappedProviderName verifies that the token
+// estimator is called with the un-wrapped provider name so that the
+// Anthropic-specific 3.5 chars/token density is honoured even when
+// RunService wraps the provider in NewRetry (making Provider.Name()
+// return "anthropic+retry").
+//
+// Critical assertion: 100 chars / 3.5 = 28.57 → 29 tokens (Anthropic)
+// vs 100 chars / 4.0 = 25 tokens (default / broken path).
+func TestRunner_EstimateUsesUnwrappedProviderName(t *testing.T) {
+	msgs := []provider.Message{
+		{Role: provider.RoleUser, Content: strings.Repeat("a", 100)},
+	}
+
+	// "anthropic" — the un-wrapped factory key — must yield the Anthropic
+	// 3.5 chars/token density.
+	got := estimateMessagesTokens("anthropic", msgs)
+	require.Equal(t, int64(29), got,
+		"'anthropic' must use 3.5 chars/token density (got %d, broken path gives 25)", got)
+
+	// Sanity-check: the wrapped name falls back to the default 4.0 density.
+	gotWrapped := estimateMessagesTokens("anthropic+retry", msgs)
+	require.Equal(t, int64(25), gotWrapped,
+		"'anthropic+retry' should fall back to 4.0 density (got %d)", gotWrapped)
+}

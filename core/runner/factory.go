@@ -35,7 +35,11 @@ func NewCompactorFromSpec(models *specpb.ModelConfig, providers map[string]provi
 		return nil, fmt.Errorf("NewCompactorFromSpec: provider %q not in registry", providerID)
 	}
 	return &compact.Compactor{
-		Provider:  p,
+		Provider:   p,
+		// ProviderID carries the un-wrapped factory key so estimateTokens
+		// picks the correct chars/token density even when p is wrapped in
+		// NewRetry (which makes p.Name() return "<id>+retry").
+		ProviderID: providerID,
 		Model:     choice.GetModelId(),
 		HeadKeep:  2,
 		TailKeep:  6,
