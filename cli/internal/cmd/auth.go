@@ -175,7 +175,7 @@ func authListCmd() *cobra.Command {
 			store := newStoreFor(cmd)
 			names, err := store.List(ctx)
 			if err != nil {
-				return cliutil.Wrap(err, "could not read credentials", "")
+				return cliutil.Wrap(err, "could not read credentials", "run `gil doctor` to inspect filesystem permissions on the auth file")
 			}
 			out := cmd.OutOrStdout()
 			if outputJSON() {
@@ -268,10 +268,10 @@ func authLogoutCmd() *cobra.Command {
 			store := newStoreFor(cmd)
 			existed, err := store.Get(ctx, provider)
 			if err != nil {
-				return cliutil.Wrap(err, "could not read credentials", "")
+				return cliutil.Wrap(err, "could not read credentials", "run `gil doctor` to inspect filesystem permissions on the auth file")
 			}
 			if err := store.Remove(ctx, provider); err != nil {
-				return cliutil.Wrap(err, "could not remove credential", "")
+				return cliutil.Wrap(err, "could not remove credential", "check that the auth file is writable; run `gil auth list` to confirm what's configured")
 			}
 			out := cmd.OutOrStdout()
 			if existed == nil {
@@ -303,7 +303,7 @@ func authStatusCmd() *cobra.Command {
 			store := newStoreFor(cmd)
 			names, err := store.List(ctx)
 			if err != nil {
-				return cliutil.Wrap(err, "could not read credentials", "")
+				return cliutil.Wrap(err, "could not read credentials", "run `gil doctor` to inspect filesystem permissions on the auth file")
 			}
 			out := cmd.OutOrStdout()
 			fmt.Fprintf(out, "auth file: %s\n\n", authStorePath(cmd))
@@ -502,7 +502,7 @@ endpoint at a new URL.`,
 			store := newStoreFor(cmd)
 			existing, err := store.Get(ctx, provider)
 			if err != nil {
-				return cliutil.Wrap(err, "could not read credential", "")
+				return cliutil.Wrap(err, "could not read credential", "run `gil auth list` to confirm what's configured")
 			}
 			if existing == nil {
 				return cliutil.New(fmt.Sprintf("no credential for %s", provider),
@@ -574,7 +574,7 @@ a self-hosted vllm endpoint moved).`,
 			store := newStoreFor(cmd)
 			cred, err := store.Get(ctx, provider)
 			if err != nil {
-				return cliutil.Wrap(err, "could not read credential", "")
+				return cliutil.Wrap(err, "could not read credential", "run `gil auth list` to confirm what's configured")
 			}
 			if cred == nil {
 				return cliutil.New(fmt.Sprintf("no credential for %s", provider),

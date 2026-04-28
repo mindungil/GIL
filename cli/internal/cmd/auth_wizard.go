@@ -451,7 +451,7 @@ func wizardPickModel(cmd *cobra.Command, reader *bufio.Reader, out io.Writer, p 
 			if model == "" {
 				if name == credstore.VLLM {
 					if err == io.EOF {
-						return "", cliutil.New("vllm requires a model id", "")
+						return "", cliutil.New("vllm requires a model id", "re-run `gil auth login vllm --model <id>` (no canonical default exists for self-hosted endpoints)")
 					}
 					fmt.Fprintln(out, "  "+p.Caution("vllm requires a model id (no canonical default)"))
 					continue

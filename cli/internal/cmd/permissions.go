@@ -83,7 +83,7 @@ filter to one project.`,
 			for _, p := range projects {
 				rules, err := store.Load(p)
 				if err != nil {
-					return cliutil.Wrap(err, "load store: "+err.Error(), "")
+					return cliutil.Wrap(err, "load store: "+err.Error(), "run `gil doctor` to inspect filesystem permissions on the state dir")
 				}
 				if rules == nil {
 					rules = &permission.ProjectRules{}
@@ -148,7 +148,7 @@ common case ("I am in the repo I want to edit") work without typing.`,
 			// the wrong pattern deserves an error, not silent OK).
 			rules, err := store.Load(projectPath)
 			if err != nil {
-				return cliutil.Wrap(err, "could not read the permissions store", "")
+				return cliutil.Wrap(err, "could not read the permissions store", "run `gil doctor` to inspect filesystem permissions on the state dir")
 			}
 			if rules == nil || !containsPattern(rules, list, pattern) {
 				return cliutil.New(
@@ -156,7 +156,7 @@ common case ("I am in the repo I want to edit") work without typing.`,
 					`run "gil permissions list" to see the rules currently in effect`)
 			}
 			if err := store.Remove(projectPath, list, pattern); err != nil {
-				return cliutil.Wrap(err, "could not remove rule", "")
+				return cliutil.Wrap(err, "could not remove rule", "check that the permissions file is writable")
 			}
 			g := uistyle.NewGlyphs(asciiMode)
 			p := uistyle.NewPalette(false)
@@ -189,7 +189,7 @@ deleting; pass --yes to skip the prompt.`,
 			store := &permission.PersistentStore{Path: permissionsStorePath()}
 			rules, err := store.Load(projectPath)
 			if err != nil {
-				return cliutil.Wrap(err, "could not read the permissions store", "")
+				return cliutil.Wrap(err, "could not read the permissions store", "run `gil doctor` to inspect filesystem permissions on the state dir")
 			}
 			if rules == nil || (len(rules.AlwaysAllow) == 0 && len(rules.AlwaysDeny) == 0) {
 				fmt.Fprintln(cmd.OutOrStdout(), "   no rules — nothing to clear")
@@ -202,12 +202,12 @@ deleting; pass --yes to skip the prompt.`,
 			}
 			for _, pat := range rules.AlwaysAllow {
 				if err := store.Remove(projectPath, "always_allow", pat); err != nil {
-					return cliutil.Wrap(err, "remove allow rule "+pat, "")
+					return cliutil.Wrap(err, "remove allow rule "+pat, "check that the permissions file is writable")
 				}
 			}
 			for _, pat := range rules.AlwaysDeny {
 				if err := store.Remove(projectPath, "always_deny", pat); err != nil {
-					return cliutil.Wrap(err, "remove deny rule "+pat, "")
+					return cliutil.Wrap(err, "remove deny rule "+pat, "check that the permissions file is writable")
 				}
 			}
 			g := uistyle.NewGlyphs(asciiMode)
