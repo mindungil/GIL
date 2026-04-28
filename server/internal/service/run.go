@@ -1185,9 +1185,8 @@ func (s *RunService) executeRun(
 
 	// P27 T3: instantiate Compactor from spec so the compaction trigger
 	// in runner.go is no longer dead code.
-	// The "" key is a catch-all for model choices whose Provider field was
-	// left empty by workspace.ApplyDefaults (e.g., config.toml set only
-	// a model string, not a provider).
+	// "" catch-all: workspace.ApplyDefaults may leave ModelChoice.Provider
+	// blank; see core/runner/factory.go for why this entry is required.
 	provsByName := map[string]provider.Provider{providerName: prov, "": prov}
 	compactor, cerr := runner.NewCompactorFromSpec(spec.GetModels(), provsByName)
 	if cerr != nil {

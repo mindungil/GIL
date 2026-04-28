@@ -40,5 +40,6 @@ func NewCompactorFromSpec(models *specpb.ModelConfig, providers map[string]provi
 		HeadKeep:  2,
 		TailKeep:  6,
 		MinMiddle: 8,
+		History:   &compact.History{},
 	}, nil
 }

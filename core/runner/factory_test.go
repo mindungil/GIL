@@ -57,3 +57,26 @@ func TestNewCompactorFromSpec_ErrorsWhenNoModel(t *testing.T) {
 	_, err = NewCompactorFromSpec(nil, map[string]provider.Provider{})
 	require.Error(t, err)
 }
+
+func TestNewCompactorFromSpec_EmptyProviderUsedAsCatchAll(t *testing.T) {
+	// workspace.ApplyDefaults can leave Provider blank when config.toml
+	// sets only a model string. The factory accepts this if the caller
+	// has registered a "" catch-all in the providers map.
+	models := &specpb.ModelConfig{
+		Main: &specpb.ModelChoice{Provider: "", ModelId: "haiku"},
+	}
+	providers := map[string]provider.Provider{"": fakeProvider{}}
+	c, err := NewCompactorFromSpec(models, providers)
+	require.NoError(t, err)
+	require.Equal(t, "haiku", c.Model)
+}
+
+func TestNewCompactorFromSpec_EmptyProviderRejectsWithoutCatchAll(t *testing.T) {
+	// Same setup but no "" key registered → must error.
+	models := &specpb.ModelConfig{
+		Main: &specpb.ModelChoice{Provider: "", ModelId: "haiku"},
+	}
+	providers := map[string]provider.Provider{"anthropic": fakeProvider{}}
+	_, err := NewCompactorFromSpec(models, providers)
+	require.Error(t, err)
+}
