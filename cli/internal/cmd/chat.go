@@ -488,7 +488,7 @@ func handleChatNewTask(ctx context.Context, cmd *cobra.Command, cli *sdk.Client,
 		// otherwise gild errors out mid-interview with "model required".
 		fmt.Fprintln(out, agentLine(p, g, p.Dim("  model      ")+p.Caution("(required for vllm — please specify)")))
 		fmt.Fprintln(out, agentLine(p, g, ""))
-		fmt.Fprint(out, agentLine(p, g, p.Dim("Model name (e.g. qwen3.6-27b): "))+p.Info("› "))
+		fmt.Fprint(out, agentLine(p, g, p.Dim("Model name (e.g. qwen3-32b, your-finetune): "))+p.Info("› "))
 		modelLine, _ := readLineRaw(reader)
 		effModel = strings.TrimSpace(modelLine)
 		if effModel == "" {

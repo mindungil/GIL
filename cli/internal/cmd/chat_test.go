@@ -146,12 +146,70 @@ func TestRenderChatExplain(t *testing.T) {
 
 // TestIntentModelFor maps known providers to their small-model defaults.
 // When --model is set, every provider returns the user-supplied value.
+//
+// PHASE 25: vllm now returns "" instead of the dev's local
+// "qwen3.6-27b" — the chat surface refuses the LLM-driven path and
+// points the user at `gil auth login vllm` to pick a model. This is
+// the canonical "no general default" check.
 func TestIntentModelFor(t *testing.T) {
 	require.Equal(t, "claude-haiku-4-5", intentModelFor("anthropic", ""))
 	require.Equal(t, "gpt-4o-mini", intentModelFor("openai", ""))
 	require.Equal(t, "anthropic/claude-haiku-4-5", intentModelFor("openrouter", ""))
 	require.Equal(t, "", intentModelFor("vllm", ""))
 	require.Equal(t, "user-pin", intentModelFor("anthropic", "user-pin"))
+}
+
+// TestResolveIntentModel_ReadsCredstoreModel verifies that when the
+// wizard saved a Model on the credstore entry, resolveIntentModel
+// returns it in preference to the hardcoded provider default. This is
+// the headline Phase 25 contract: vllm users who registered
+// "qwen3-32b" via `gil auth login vllm` actually get that value when
+// the chat surface dispatches a classification call.
+func TestResolveIntentModel_ReadsCredstoreModel(t *testing.T) {
+	dir := t.TempDir()
+	authFile := dir + "/auth.json"
+
+	// Seed credstore via the auth login command (non-interactive).
+	if _, _, err := runAuthCmd(t, authFile,
+		"login", "vllm",
+		"--api-key", "local",
+		"--base-url", "http://localhost:8000/v1",
+		"--model", "qwen3-32b",
+		"--no-test",
+	); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// Build a cobra command with the auth-file flag set so the chat
+	// helpers see our temp credstore. We reuse authLoginCmd's flag
+	// wiring rather than mocking — that's the real path.
+	cmd := authLoginCmd()
+	cmd.SetArgs([]string{"--auth-file", authFile})
+	require.NoError(t, cmd.ParseFlags([]string{"--auth-file", authFile}))
+
+	// vllm with no --model should return the credstore.Model.
+	require.Equal(t, "qwen3-32b", resolveIntentModel(cmd, "vllm", ""))
+
+	// User --model still wins over credstore.
+	require.Equal(t, "user-pin", resolveIntentModel(cmd, "vllm", "user-pin"))
+
+	// Unrelated provider: no credstore entry → hardcoded default.
+	require.Equal(t, "claude-haiku-4-5", resolveIntentModel(cmd, "anthropic", ""))
+}
+
+// TestResolveIntentModel_VLLMEmptyWithoutCredstore covers the regression
+// the dev reported: with no credstore entry and no GIL_VLLM_MODEL env
+// var, vllm must NOT fall back to a hardcoded "qwen3.6-27b" — that
+// model is the dev's local pick, not a general default.
+func TestResolveIntentModel_VLLMEmptyWithoutCredstore(t *testing.T) {
+	t.Setenv("GIL_VLLM_MODEL", "")
+	dir := t.TempDir()
+	authFile := dir + "/auth.json"
+
+	cmd := authLoginCmd()
+	require.NoError(t, cmd.ParseFlags([]string{"--auth-file", authFile}))
+
+	require.Equal(t, "", resolveIntentModel(cmd, "vllm", ""))
 }
 
 // TestShortHex truncates SHA-style strings to a 12-char glanceable
