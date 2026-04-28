@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/mindungil/gil/core/provider"
+	"github.com/mindungil/gil/core/spec"
 )
 
 // Engine drives the interview State via an LLM provider. It is stateless
@@ -91,6 +92,21 @@ const (
 type ReplyTurn struct {
 	Outcome ReplyOutcome
 	Content string // next question OR audit reason
+
+	// SlotChangeCount is how many required-slot checks changed from unfilled to
+	// filled during this turn. Zero means no required slots were newly filled.
+	SlotChangeCount int
+
+	// SaturationFilled is the number of required slots currently filled after
+	// this turn (used to emit SaturationUpdate events).
+	SaturationFilled int
+
+	// SaturationTotal is the total number of required slots (denominator).
+	SaturationTotal int
+
+	// AdversaryFindings is populated only when the Adversary ran during this
+	// turn. It is nil when no adversary round occurred.
+	AdversaryFindings []Finding
 }
 
 // EngineWithSubmodels combines the main Engine with SlotFiller, Adversary, and
@@ -132,15 +148,28 @@ func NewEngineWithSubmodels(p provider.Provider, mainModel, slotModel, adversary
 func (e *EngineWithSubmodels) RunReplyTurn(ctx context.Context, st *State, userReply string) (*ReplyTurn, error) {
 	st.AppendUser(userReply)
 
+	// Snapshot slot fill count before slotfill so we can detect changes.
+	filledBefore := spec.FilledSlotCount(st.Spec)
+
 	if err := e.slotFiller.Apply(ctx, st, userReply); err != nil {
 		return nil, fmt.Errorf("RunReplyTurn slotfill: %w", err)
 	}
 
+	filledAfter := spec.FilledSlotCount(st.Spec)
+	slotChangeCount := filledAfter - filledBefore
+	if slotChangeCount < 0 {
+		slotChangeCount = 0
+	}
+	total := spec.RequiredSlotTotal()
+
 	// First adversary round once all required slots are filled
+	var adversaryFindings []Finding
 	if st.AllRequiredSlotsFilled() && st.AdversaryRounds == 0 {
-		if _, err := e.adversary.Critique(ctx, st); err != nil {
+		findings, err := e.adversary.Critique(ctx, st)
+		if err != nil {
 			return nil, fmt.Errorf("RunReplyTurn adversary: %w", err)
 		}
+		adversaryFindings = findings
 	}
 
 	if st.IsSaturated() {
@@ -150,7 +179,14 @@ func (e *EngineWithSubmodels) RunReplyTurn(ctx context.Context, st *State, userR
 		}
 		if ready {
 			st.Stage = StageConfirm
-			return &ReplyTurn{Outcome: ReplyOutcomeReadyToConfirm, Content: reason}, nil
+			return &ReplyTurn{
+				Outcome:           ReplyOutcomeReadyToConfirm,
+				Content:           reason,
+				SlotChangeCount:   slotChangeCount,
+				SaturationFilled:  filledAfter,
+				SaturationTotal:   total,
+				AdversaryFindings: adversaryFindings,
+			}, nil
 		}
 		// Audit blocks → fall through to NextQuestion
 	}
@@ -160,5 +196,12 @@ func (e *EngineWithSubmodels) RunReplyTurn(ctx context.Context, st *State, userR
 		return nil, fmt.Errorf("RunReplyTurn next question: %w", err)
 	}
 	st.AppendAssistant(q)
-	return &ReplyTurn{Outcome: ReplyOutcomeNextQuestion, Content: q}, nil
+	return &ReplyTurn{
+		Outcome:           ReplyOutcomeNextQuestion,
+		Content:           q,
+		SlotChangeCount:   slotChangeCount,
+		SaturationFilled:  filledAfter,
+		SaturationTotal:   total,
+		AdversaryFindings: adversaryFindings,
+	}, nil
 }

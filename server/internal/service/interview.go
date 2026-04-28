@@ -152,6 +152,12 @@ func (s *InterviewService) Start(req *gilv1.StartInterviewRequest, stream gilv1.
 // Reply handles the Reply RPC: runs richEngine.RunReplyTurn which orchestrates
 // slot filling, adversary, audit, and either emits a StageTransition (to confirm)
 // or AgentTurn (next question).
+//
+// After the turn completes, up to three additional events are emitted before
+// the main outcome event:
+//   - SpecUpdate — once per newly-filled required slot (SlotChangeCount > 0)
+//   - SaturationUpdate — always, reflecting the current fill ratio
+//   - AdversaryFindings — only when the adversary ran this turn
 func (s *InterviewService) Reply(req *gilv1.ReplyRequest, stream gilv1.InterviewService_ReplyServer) error {
 	ctx := stream.Context()
 
@@ -167,6 +173,51 @@ func (s *InterviewService) Reply(req *gilv1.ReplyRequest, stream gilv1.Interview
 		return status.Errorf(codes.Internal, "reply turn: %v", err)
 	}
 
+	// --- Emit SpecUpdate for each newly-filled required slot this turn ---
+	if turn.SlotChangeCount > 0 {
+		// We emit one SpecUpdate per newly-filled slot count with a synthetic
+		// field_path so the chat surface knows the spec changed this turn.
+		// The count is the number of required slots that transitioned to filled.
+		for i := 0; i < turn.SlotChangeCount; i++ {
+			if err := stream.Send(&gilv1.InterviewEvent{
+				Payload: &gilv1.InterviewEvent_SpecUpdate{SpecUpdate: &gilv1.SpecUpdate{
+					FieldPath: "required_slot",
+					NewValue:  fmt.Sprintf("filled (%d of %d)", turn.SaturationFilled, turn.SaturationTotal),
+				}},
+			}); err != nil {
+				return err
+			}
+		}
+	}
+
+	// --- Always emit SaturationUpdate ---
+	var saturation float64
+	if turn.SaturationTotal > 0 {
+		saturation = float64(turn.SaturationFilled) / float64(turn.SaturationTotal)
+	}
+	if err := stream.Send(&gilv1.InterviewEvent{
+		Payload: &gilv1.InterviewEvent_SaturationUpdate{SaturationUpdate: &gilv1.SaturationUpdate{
+			Saturation:   saturation,
+			SlotsFilled:  int32(turn.SaturationFilled),
+			SlotsTotal:   int32(turn.SaturationTotal),
+		}},
+	}); err != nil {
+		return err
+	}
+
+	// --- Emit AdversaryFindings if adversary ran this turn ---
+	if turn.AdversaryFindings != nil {
+		if err := stream.Send(&gilv1.InterviewEvent{
+			Payload: &gilv1.InterviewEvent_AdversaryFindings{AdversaryFindings: &gilv1.AdversaryFindings{
+				Count:           int32(len(turn.AdversaryFindings)),
+				HighestSeverity: highestSeverity(turn.AdversaryFindings),
+			}},
+		}); err != nil {
+			return err
+		}
+	}
+
+	// --- Main outcome event ---
 	switch turn.Outcome {
 	case interview.ReplyOutcomeReadyToConfirm:
 		return stream.Send(&gilv1.InterviewEvent{
@@ -181,6 +232,21 @@ func (s *InterviewService) Reply(req *gilv1.ReplyRequest, stream gilv1.Interview
 	default:
 		return status.Errorf(codes.Internal, "unknown reply outcome %d", turn.Outcome)
 	}
+}
+
+// highestSeverity returns the most severe level found in findings.
+// Severity order: blocker > high > medium > low > "".
+func highestSeverity(findings []interview.Finding) string {
+	rank := map[string]int{"blocker": 4, "high": 3, "medium": 2, "low": 1}
+	best := ""
+	bestRank := 0
+	for _, f := range findings {
+		if r := rank[f.Severity]; r > bestRank {
+			bestRank = r
+			best = f.Severity
+		}
+	}
+	return best
 }
 
 // Confirm finalizes the spec: requires all required slots filled, calls

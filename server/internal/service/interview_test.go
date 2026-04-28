@@ -172,10 +172,17 @@ func TestInterviewService_Reply_AppendsAndGeneratesQuestion(t *testing.T) {
 	}, replyStream)
 	require.NoError(t, err)
 
-	// Should get a question back
-	require.Len(t, replyStream.events, 1)
-	agentTurn := replyStream.events[0].GetAgentTurn()
-	require.NotNil(t, agentTurn)
+	// Should get at least a SaturationUpdate + AgentTurn back (emitter events precede outcome).
+	require.GreaterOrEqual(t, len(replyStream.events), 1)
+	// Find the AgentTurn event
+	var agentTurn *gilv1.AgentTurn
+	for _, e := range replyStream.events {
+		if at := e.GetAgentTurn(); at != nil {
+			agentTurn = at
+			break
+		}
+	}
+	require.NotNil(t, agentTurn, "expected an AgentTurn event")
 	require.Equal(t, "Tell me about your users.", agentTurn.Content)
 }
 
@@ -218,10 +225,16 @@ func TestInterviewService_Reply_AdvancesToConfirmWhenSaturated(t *testing.T) {
 	}, replyStream)
 	require.NoError(t, err)
 
-	// Should get a StageTransition to confirm
-	require.Len(t, replyStream.events, 1)
-	stageEvt := replyStream.events[0].GetStage()
-	require.NotNil(t, stageEvt)
+	// Should get at least a StageTransition to confirm (plus emitter events).
+	require.GreaterOrEqual(t, len(replyStream.events), 1)
+	var stageEvt *gilv1.StageTransition
+	for _, e := range replyStream.events {
+		if s := e.GetStage(); s != nil {
+			stageEvt = s
+			break
+		}
+	}
+	require.NotNil(t, stageEvt, "expected a StageTransition event")
 	require.Equal(t, "conversation", stageEvt.From)
 	require.Equal(t, "confirm", stageEvt.To)
 }
@@ -457,4 +470,140 @@ func TestInterviewService_Start_OverrideUsesProvidedModel(t *testing.T) {
 		}
 	}
 	require.True(t, foundSlot, "reply phase must use SLOT model for slot extraction")
+}
+
+// ---------------------------------------------------------------------------
+// P26 T0.5 — emitter tests
+// ---------------------------------------------------------------------------
+
+// TestInterviewService_Reply_EmitsSpecUpdate verifies that when a Reply turn
+// fills at least one required slot, at least one SpecUpdate event is emitted.
+func TestInterviewService_Reply_EmitsSpecUpdate(t *testing.T) {
+	// Mock: sensing + first question + slotfill (fills goal.one_liner) + next question
+	svc, repo, _ := newInterviewSvc(t, []string{
+		`{"domain":"cli","domain_confidence":0.8,"tech_hints":["go"],"scale_hint":"small","ambiguity":"none"}`,
+		`What is your goal?`,
+		`{"updates":[{"field":"goal.one_liner","value":"Build a CLI tool"}]}`,
+		`Tell me more.`,
+	})
+	ctx := context.Background()
+
+	s, err := repo.Create(ctx, session.CreateInput{WorkingDir: "/x"})
+	require.NoError(t, err)
+
+	startStream := &fakeInterviewStream{ctx: ctx}
+	require.NoError(t, svc.Start(&gilv1.StartInterviewRequest{
+		SessionId: s.ID, FirstInput: "build cli", Provider: "mock",
+	}, startStream))
+
+	replyStream := &fakeReplyStream{ctx: ctx}
+	require.NoError(t, svc.Reply(&gilv1.ReplyRequest{
+		SessionId: s.ID,
+		Content:   "Build a CLI tool",
+	}, replyStream))
+
+	// Find at least one SpecUpdate event
+	var found *gilv1.SpecUpdate
+	for _, e := range replyStream.events {
+		if su := e.GetSpecUpdate(); su != nil {
+			found = su
+			break
+		}
+	}
+	require.NotNil(t, found, "expected a SpecUpdate event when a required slot is filled")
+	require.NotEmpty(t, found.FieldPath)
+}
+
+// TestInterviewService_Reply_EmitsSaturationUpdate verifies that every Reply
+// turn emits a SaturationUpdate event with a sensible percentage.
+func TestInterviewService_Reply_EmitsSaturationUpdate(t *testing.T) {
+	// Mock: sensing + first question + slotfill (fills goal.one_liner) + next question
+	svc, repo, _ := newInterviewSvc(t, []string{
+		`{"domain":"cli","domain_confidence":0.8,"tech_hints":["go"],"scale_hint":"small","ambiguity":"none"}`,
+		`What is your goal?`,
+		`{"updates":[{"field":"goal.one_liner","value":"Build a CLI tool"}]}`,
+		`Tell me more.`,
+	})
+	ctx := context.Background()
+
+	s, err := repo.Create(ctx, session.CreateInput{WorkingDir: "/x"})
+	require.NoError(t, err)
+
+	startStream := &fakeInterviewStream{ctx: ctx}
+	require.NoError(t, svc.Start(&gilv1.StartInterviewRequest{
+		SessionId: s.ID, FirstInput: "build cli", Provider: "mock",
+	}, startStream))
+
+	replyStream := &fakeReplyStream{ctx: ctx}
+	require.NoError(t, svc.Reply(&gilv1.ReplyRequest{
+		SessionId: s.ID,
+		Content:   "Build a CLI tool",
+	}, replyStream))
+
+	// Find SaturationUpdate event
+	var found *gilv1.SaturationUpdate
+	for _, e := range replyStream.events {
+		if su := e.GetSaturationUpdate(); su != nil {
+			found = su
+			break
+		}
+	}
+	require.NotNil(t, found, "expected a SaturationUpdate event on every Reply turn")
+	require.Greater(t, found.SlotsTotal, int32(0), "slots_total must be positive")
+	require.GreaterOrEqual(t, found.SlotsFilled, int32(0))
+	require.LessOrEqual(t, found.SlotsFilled, found.SlotsTotal)
+	require.GreaterOrEqual(t, found.Saturation, 0.0)
+	require.LessOrEqual(t, found.Saturation, 1.0)
+	// We filled goal.one_liner so at least 1 slot should be counted
+	require.GreaterOrEqual(t, found.SlotsFilled, int32(1), "goal.one_liner fill should register")
+}
+
+// TestInterviewService_Reply_EmitsAdversaryFindings verifies that when a Reply
+// turn triggers the adversary (all required slots filled), an AdversaryFindings
+// event is emitted with correct count and severity.
+func TestInterviewService_Reply_EmitsAdversaryFindings(t *testing.T) {
+	// Mock: sensing + first question + slotfill (all slots filled) + adversary (1 finding) + audit (not ready) + next question
+	svc, repo, _ := newInterviewSvc(t, []string{
+		`{"domain":"cli","domain_confidence":0.8,"tech_hints":["go"],"scale_hint":"small","ambiguity":"none"}`,
+		`What is your goal?`,
+		`{"updates":[
+			{"field":"goal.one_liner","value":"Build CLI"},
+			{"field":"goal.success_criteria_natural","value":["a","b","c"]},
+			{"field":"constraints.tech_stack","value":["go"]},
+			{"field":"verification.checks","value":[{"name":"build","kind":"SHELL","command":"go build","expected_exit_code":0}]},
+			{"field":"workspace.backend","value":"LOCAL_SANDBOX"},
+			{"field":"models.main","value":{"provider":"anthropic","modelId":"claude-opus-4-7"}},
+			{"field":"risk.autonomy","value":"FULL"}
+		]}`,
+		`[{"severity":"high","category":"ambiguity","finding":"deployment target unspecified"}]`,
+		`{"ready":false,"reason":"needs clarification"}`,
+		`What deployment target?`,
+	})
+	ctx := context.Background()
+
+	s, err := repo.Create(ctx, session.CreateInput{WorkingDir: "/x"})
+	require.NoError(t, err)
+
+	startStream := &fakeInterviewStream{ctx: ctx}
+	require.NoError(t, svc.Start(&gilv1.StartInterviewRequest{
+		SessionId: s.ID, FirstInput: "build cli", Provider: "mock",
+	}, startStream))
+
+	replyStream := &fakeReplyStream{ctx: ctx}
+	require.NoError(t, svc.Reply(&gilv1.ReplyRequest{
+		SessionId: s.ID,
+		Content:   "everything",
+	}, replyStream))
+
+	// Find AdversaryFindings event
+	var found *gilv1.AdversaryFindings
+	for _, e := range replyStream.events {
+		if af := e.GetAdversaryFindings(); af != nil {
+			found = af
+			break
+		}
+	}
+	require.NotNil(t, found, "expected an AdversaryFindings event when adversary ran")
+	require.Equal(t, int32(1), found.Count, "adversary returned 1 finding")
+	require.Equal(t, "high", found.HighestSeverity, "highest severity should be 'high'")
 }

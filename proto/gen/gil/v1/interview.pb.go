@@ -313,6 +313,8 @@ type InterviewEvent struct {
 	//	*InterviewEvent_Stage
 	//	*InterviewEvent_SpecUpdate
 	//	*InterviewEvent_Error
+	//	*InterviewEvent_SaturationUpdate
+	//	*InterviewEvent_AdversaryFindings
 	Payload       isInterviewEvent_Payload `protobuf_oneof:"payload"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -391,6 +393,24 @@ func (x *InterviewEvent) GetError() *InterviewError {
 	return nil
 }
 
+func (x *InterviewEvent) GetSaturationUpdate() *SaturationUpdate {
+	if x != nil {
+		if x, ok := x.Payload.(*InterviewEvent_SaturationUpdate); ok {
+			return x.SaturationUpdate
+		}
+	}
+	return nil
+}
+
+func (x *InterviewEvent) GetAdversaryFindings() *AdversaryFindings {
+	if x != nil {
+		if x, ok := x.Payload.(*InterviewEvent_AdversaryFindings); ok {
+			return x.AdversaryFindings
+		}
+	}
+	return nil
+}
+
 type isInterviewEvent_Payload interface {
 	isInterviewEvent_Payload()
 }
@@ -411,6 +431,14 @@ type InterviewEvent_Error struct {
 	Error *InterviewError `protobuf:"bytes,4,opt,name=error,proto3,oneof"`
 }
 
+type InterviewEvent_SaturationUpdate struct {
+	SaturationUpdate *SaturationUpdate `protobuf:"bytes,5,opt,name=saturation_update,json=saturationUpdate,proto3,oneof"`
+}
+
+type InterviewEvent_AdversaryFindings struct {
+	AdversaryFindings *AdversaryFindings `protobuf:"bytes,6,opt,name=adversary_findings,json=adversaryFindings,proto3,oneof"`
+}
+
 func (*InterviewEvent_AgentTurn) isInterviewEvent_Payload() {}
 
 func (*InterviewEvent_Stage) isInterviewEvent_Payload() {}
@@ -418,6 +446,10 @@ func (*InterviewEvent_Stage) isInterviewEvent_Payload() {}
 func (*InterviewEvent_SpecUpdate) isInterviewEvent_Payload() {}
 
 func (*InterviewEvent_Error) isInterviewEvent_Payload() {}
+
+func (*InterviewEvent_SaturationUpdate) isInterviewEvent_Payload() {}
+
+func (*InterviewEvent_AdversaryFindings) isInterviewEvent_Payload() {}
 
 type AgentTurn struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -627,6 +659,118 @@ func (x *InterviewError) GetMessage() string {
 	return ""
 }
 
+type SaturationUpdate struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Saturation    float64                `protobuf:"fixed64,1,opt,name=saturation,proto3" json:"saturation,omitempty"`                     // 0.0..1.0
+	SlotsFilled   int32                  `protobuf:"varint,2,opt,name=slots_filled,json=slotsFilled,proto3" json:"slots_filled,omitempty"` // required slots that currently have content
+	SlotsTotal    int32                  `protobuf:"varint,3,opt,name=slots_total,json=slotsTotal,proto3" json:"slots_total,omitempty"`    // total required slots in the spec schema
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SaturationUpdate) Reset() {
+	*x = SaturationUpdate{}
+	mi := &file_gil_v1_interview_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SaturationUpdate) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SaturationUpdate) ProtoMessage() {}
+
+func (x *SaturationUpdate) ProtoReflect() protoreflect.Message {
+	mi := &file_gil_v1_interview_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SaturationUpdate.ProtoReflect.Descriptor instead.
+func (*SaturationUpdate) Descriptor() ([]byte, []int) {
+	return file_gil_v1_interview_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *SaturationUpdate) GetSaturation() float64 {
+	if x != nil {
+		return x.Saturation
+	}
+	return 0
+}
+
+func (x *SaturationUpdate) GetSlotsFilled() int32 {
+	if x != nil {
+		return x.SlotsFilled
+	}
+	return 0
+}
+
+func (x *SaturationUpdate) GetSlotsTotal() int32 {
+	if x != nil {
+		return x.SlotsTotal
+	}
+	return 0
+}
+
+type AdversaryFindings struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	Count           int32                  `protobuf:"varint,1,opt,name=count,proto3" json:"count,omitempty"`                                           // total findings on the latest critique
+	HighestSeverity string                 `protobuf:"bytes,2,opt,name=highest_severity,json=highestSeverity,proto3" json:"highest_severity,omitempty"` // "blocker" | "high" | "medium" | "low" | "" if none
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *AdversaryFindings) Reset() {
+	*x = AdversaryFindings{}
+	mi := &file_gil_v1_interview_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AdversaryFindings) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AdversaryFindings) ProtoMessage() {}
+
+func (x *AdversaryFindings) ProtoReflect() protoreflect.Message {
+	mi := &file_gil_v1_interview_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AdversaryFindings.ProtoReflect.Descriptor instead.
+func (*AdversaryFindings) Descriptor() ([]byte, []int) {
+	return file_gil_v1_interview_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *AdversaryFindings) GetCount() int32 {
+	if x != nil {
+		return x.Count
+	}
+	return 0
+}
+
+func (x *AdversaryFindings) GetHighestSeverity() string {
+	if x != nil {
+		return x.HighestSeverity
+	}
+	return ""
+}
+
 var File_gil_v1_interview_proto protoreflect.FileDescriptor
 
 const file_gil_v1_interview_proto_rawDesc = "" +
@@ -656,14 +800,16 @@ const file_gil_v1_interview_proto_rawDesc = "" +
 	"\x0econtent_sha256\x18\x02 \x01(\tR\rcontentSha256\"/\n" +
 	"\x0eGetSpecRequest\x12\x1d\n" +
 	"\n" +
-	"session_id\x18\x01 \x01(\tR\tsessionId\"\xe7\x01\n" +
+	"session_id\x18\x01 \x01(\tR\tsessionId\"\xfc\x02\n" +
 	"\x0eInterviewEvent\x122\n" +
 	"\n" +
 	"agent_turn\x18\x01 \x01(\v2\x11.gil.v1.AgentTurnH\x00R\tagentTurn\x12/\n" +
 	"\x05stage\x18\x02 \x01(\v2\x17.gil.v1.StageTransitionH\x00R\x05stage\x125\n" +
 	"\vspec_update\x18\x03 \x01(\v2\x12.gil.v1.SpecUpdateH\x00R\n" +
 	"specUpdate\x12.\n" +
-	"\x05error\x18\x04 \x01(\v2\x16.gil.v1.InterviewErrorH\x00R\x05errorB\t\n" +
+	"\x05error\x18\x04 \x01(\v2\x16.gil.v1.InterviewErrorH\x00R\x05error\x12G\n" +
+	"\x11saturation_update\x18\x05 \x01(\v2\x18.gil.v1.SaturationUpdateH\x00R\x10saturationUpdate\x12J\n" +
+	"\x12adversary_findings\x18\x06 \x01(\v2\x19.gil.v1.AdversaryFindingsH\x00R\x11adversaryFindingsB\t\n" +
 	"\apayload\"%\n" +
 	"\tAgentTurn\x12\x18\n" +
 	"\acontent\x18\x01 \x01(\tR\acontent\"M\n" +
@@ -678,7 +824,17 @@ const file_gil_v1_interview_proto_rawDesc = "" +
 	"\tnew_value\x18\x02 \x01(\tR\bnewValue\">\n" +
 	"\x0eInterviewError\x12\x12\n" +
 	"\x04code\x18\x01 \x01(\tR\x04code\x12\x18\n" +
-	"\amessage\x18\x02 \x01(\tR\amessage2\x80\x02\n" +
+	"\amessage\x18\x02 \x01(\tR\amessage\"v\n" +
+	"\x10SaturationUpdate\x12\x1e\n" +
+	"\n" +
+	"saturation\x18\x01 \x01(\x01R\n" +
+	"saturation\x12!\n" +
+	"\fslots_filled\x18\x02 \x01(\x05R\vslotsFilled\x12\x1f\n" +
+	"\vslots_total\x18\x03 \x01(\x05R\n" +
+	"slotsTotal\"T\n" +
+	"\x11AdversaryFindings\x12\x14\n" +
+	"\x05count\x18\x01 \x01(\x05R\x05count\x12)\n" +
+	"\x10highest_severity\x18\x02 \x01(\tR\x0fhighestSeverity2\x80\x02\n" +
 	"\x10InterviewService\x12@\n" +
 	"\x05Start\x12\x1d.gil.v1.StartInterviewRequest\x1a\x16.gil.v1.InterviewEvent0\x01\x127\n" +
 	"\x05Reply\x12\x14.gil.v1.ReplyRequest\x1a\x16.gil.v1.InterviewEvent0\x01\x12:\n" +
@@ -697,7 +853,7 @@ func file_gil_v1_interview_proto_rawDescGZIP() []byte {
 	return file_gil_v1_interview_proto_rawDescData
 }
 
-var file_gil_v1_interview_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
+var file_gil_v1_interview_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
 var file_gil_v1_interview_proto_goTypes = []any{
 	(*StartInterviewRequest)(nil), // 0: gil.v1.StartInterviewRequest
 	(*ReplyRequest)(nil),          // 1: gil.v1.ReplyRequest
@@ -709,26 +865,30 @@ var file_gil_v1_interview_proto_goTypes = []any{
 	(*StageTransition)(nil),       // 7: gil.v1.StageTransition
 	(*SpecUpdate)(nil),            // 8: gil.v1.SpecUpdate
 	(*InterviewError)(nil),        // 9: gil.v1.InterviewError
-	(*FrozenSpec)(nil),            // 10: gil.v1.FrozenSpec
+	(*SaturationUpdate)(nil),      // 10: gil.v1.SaturationUpdate
+	(*AdversaryFindings)(nil),     // 11: gil.v1.AdversaryFindings
+	(*FrozenSpec)(nil),            // 12: gil.v1.FrozenSpec
 }
 var file_gil_v1_interview_proto_depIdxs = []int32{
 	6,  // 0: gil.v1.InterviewEvent.agent_turn:type_name -> gil.v1.AgentTurn
 	7,  // 1: gil.v1.InterviewEvent.stage:type_name -> gil.v1.StageTransition
 	8,  // 2: gil.v1.InterviewEvent.spec_update:type_name -> gil.v1.SpecUpdate
 	9,  // 3: gil.v1.InterviewEvent.error:type_name -> gil.v1.InterviewError
-	0,  // 4: gil.v1.InterviewService.Start:input_type -> gil.v1.StartInterviewRequest
-	1,  // 5: gil.v1.InterviewService.Reply:input_type -> gil.v1.ReplyRequest
-	2,  // 6: gil.v1.InterviewService.Confirm:input_type -> gil.v1.ConfirmRequest
-	4,  // 7: gil.v1.InterviewService.GetSpec:input_type -> gil.v1.GetSpecRequest
-	5,  // 8: gil.v1.InterviewService.Start:output_type -> gil.v1.InterviewEvent
-	5,  // 9: gil.v1.InterviewService.Reply:output_type -> gil.v1.InterviewEvent
-	3,  // 10: gil.v1.InterviewService.Confirm:output_type -> gil.v1.ConfirmResponse
-	10, // 11: gil.v1.InterviewService.GetSpec:output_type -> gil.v1.FrozenSpec
-	8,  // [8:12] is the sub-list for method output_type
-	4,  // [4:8] is the sub-list for method input_type
-	4,  // [4:4] is the sub-list for extension type_name
-	4,  // [4:4] is the sub-list for extension extendee
-	0,  // [0:4] is the sub-list for field type_name
+	10, // 4: gil.v1.InterviewEvent.saturation_update:type_name -> gil.v1.SaturationUpdate
+	11, // 5: gil.v1.InterviewEvent.adversary_findings:type_name -> gil.v1.AdversaryFindings
+	0,  // 6: gil.v1.InterviewService.Start:input_type -> gil.v1.StartInterviewRequest
+	1,  // 7: gil.v1.InterviewService.Reply:input_type -> gil.v1.ReplyRequest
+	2,  // 8: gil.v1.InterviewService.Confirm:input_type -> gil.v1.ConfirmRequest
+	4,  // 9: gil.v1.InterviewService.GetSpec:input_type -> gil.v1.GetSpecRequest
+	5,  // 10: gil.v1.InterviewService.Start:output_type -> gil.v1.InterviewEvent
+	5,  // 11: gil.v1.InterviewService.Reply:output_type -> gil.v1.InterviewEvent
+	3,  // 12: gil.v1.InterviewService.Confirm:output_type -> gil.v1.ConfirmResponse
+	12, // 13: gil.v1.InterviewService.GetSpec:output_type -> gil.v1.FrozenSpec
+	10, // [10:14] is the sub-list for method output_type
+	6,  // [6:10] is the sub-list for method input_type
+	6,  // [6:6] is the sub-list for extension type_name
+	6,  // [6:6] is the sub-list for extension extendee
+	0,  // [0:6] is the sub-list for field type_name
 }
 
 func init() { file_gil_v1_interview_proto_init() }
@@ -742,6 +902,8 @@ func file_gil_v1_interview_proto_init() {
 		(*InterviewEvent_Stage)(nil),
 		(*InterviewEvent_SpecUpdate)(nil),
 		(*InterviewEvent_Error)(nil),
+		(*InterviewEvent_SaturationUpdate)(nil),
+		(*InterviewEvent_AdversaryFindings)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -749,7 +911,7 @@ func file_gil_v1_interview_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_gil_v1_interview_proto_rawDesc), len(file_gil_v1_interview_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   10,
+			NumMessages:   12,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

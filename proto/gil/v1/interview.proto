@@ -57,6 +57,8 @@ message InterviewEvent {
     StageTransition stage = 2;
     SpecUpdate spec_update = 3;
     InterviewError error = 4;
+    SaturationUpdate saturation_update = 5;
+    AdversaryFindings adversary_findings = 6;
   }
 }
 
@@ -78,4 +80,15 @@ message SpecUpdate {
 message InterviewError {
   string code = 1;
   string message = 2;
+}
+
+message SaturationUpdate {
+  double saturation = 1;    // 0.0..1.0
+  int32 slots_filled = 2;   // required slots that currently have content
+  int32 slots_total = 3;    // total required slots in the spec schema
+}
+
+message AdversaryFindings {
+  int32 count = 1;                // total findings on the latest critique
+  string highest_severity = 2;   // "blocker" | "high" | "medium" | "low" | "" if none
 }
