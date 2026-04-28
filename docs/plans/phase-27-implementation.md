@@ -379,47 +379,64 @@ Create `core/runner/factory_test.go`:
 package runner
 
 import (
+    "context"
     "testing"
 
     "github.com/stretchr/testify/require"
 
-    "github.com/mindungil/gil/core/compact"
-    "github.com/mindungil/gil/sdk"
+    "github.com/mindungil/gil/core/provider"
+    specpb "github.com/mindungil/gil/proto/gen/gil/v1"
 )
 
-// fakeProvider satisfies whatever provider interface compact.NewCompactor needs.
-// Replace with the real interface and a stub that returns canned summaries.
+// fakeProvider implements provider.Provider for the factory tests.
+// It returns nothing useful; the factory only needs the registry to
+// contain the matching provider id.
 type fakeProvider struct{}
 
-func (fakeProvider) Complete(ctx interface{}, req interface{}) (interface{}, error) {
-    return nil, nil
+func (fakeProvider) Complete(ctx context.Context, req provider.Request) (provider.Response, error) {
+    return provider.Response{}, nil
 }
 
 func TestNewCompactorFromSpec_PrefersWeakModel(t *testing.T) {
-    spec := &sdk.SpecView{ /* Build with Models.Weak="haiku", Models.Main="opus" */ }
-    providers := map[string]Provider{ /* mock anthropic */ }
-    c, err := NewCompactorFromSpec(spec, providers)
+    models := &specpb.ModelConfig{
+        Weak: &specpb.ModelChoice{Provider: "anthropic", ModelId: "haiku"},
+        Main: &specpb.ModelChoice{Provider: "anthropic", ModelId: "opus"},
+    }
+    providers := map[string]provider.Provider{"anthropic": fakeProvider{}}
+    c, err := NewCompactorFromSpec(models, providers)
     require.NoError(t, err)
     require.NotNil(t, c)
-    // Implementation-detail check: the compactor's model field should be the weak one.
-    require.Equal(t, "haiku", compactorModel(c))
+    require.Equal(t, "haiku", c.Model)
 }
 
 func TestNewCompactorFromSpec_FallsBackToMainWhenNoWeak(t *testing.T) {
-    spec := &sdk.SpecView{ /* Build with only Models.Main="opus" */ }
-    providers := map[string]Provider{ /* mock */ }
-    c, err := NewCompactorFromSpec(spec, providers)
+    models := &specpb.ModelConfig{
+        Main: &specpb.ModelChoice{Provider: "anthropic", ModelId: "opus"},
+    }
+    providers := map[string]provider.Provider{"anthropic": fakeProvider{}}
+    c, err := NewCompactorFromSpec(models, providers)
     require.NoError(t, err)
-    require.Equal(t, "opus", compactorModel(c))
+    require.Equal(t, "opus", c.Model)
 }
 
-// compactorModel exposes the configured model for assertion. May
-// require adding an exported accessor on *compact.Compactor or making
-// the field exported. Choose the lowest-friction option.
-func compactorModel(c *compact.Compactor) string { return c.Model() }
+func TestNewCompactorFromSpec_ErrorsWhenProviderMissing(t *testing.T) {
+    models := &specpb.ModelConfig{
+        Main: &specpb.ModelChoice{Provider: "anthropic", ModelId: "opus"},
+    }
+    providers := map[string]provider.Provider{} // empty
+    _, err := NewCompactorFromSpec(models, providers)
+    require.Error(t, err)
+}
+
+func TestNewCompactorFromSpec_ErrorsWhenNoModel(t *testing.T) {
+    _, err := NewCompactorFromSpec(&specpb.ModelConfig{}, map[string]provider.Provider{})
+    require.Error(t, err)
+    _, err = NewCompactorFromSpec(nil, map[string]provider.Provider{})
+    require.Error(t, err)
+}
 ```
 
-> **Note:** The exact `sdk.SpecView` builder pattern + the `Provider` type are gil-internal; copy from existing tests in `core/runner/runner_test.go` for shape.
+> **Note:** The exact `provider.Request` / `provider.Response` shapes are gil-internal; if `provider.Request` is a non-zero value type, mirror the empty struct used in existing tests (`core/runner/runner_test.go` is a good pattern reference).
 
 - [ ] **Step 3: Run (expect fail — symbol undefined)**
 
@@ -428,6 +445,10 @@ Expected: build error.
 
 - [ ] **Step 4: Implement factory**
 
+> **Drift note from Task 0 audit**: `core/compact/Compactor` is a struct without a `NewCompactor` constructor. Fields are `Provider`, `Model`, `HeadKeep`, `TailKeep`, `MinMiddle`, `History`. The 95% threshold is enforced in the runner (Task 5 territory), not by the Compactor itself.
+>
+> `spec.Models.Weak`, `.Main`, `.Editor` are `*ModelChoice` pointers (not strings). `ModelChoice` has `Provider string` and `ModelId string` fields. Use `spec.Models.Weak.GetModelId()` to read the model name and `spec.Models.Weak.GetProvider()` for the provider id (the generated getters are nil-safe). The pointer itself can be nil if the user did not configure a weak model.
+
 Create `core/runner/factory.go`:
 ```go
 package runner
@@ -435,55 +456,47 @@ package runner
 import (
     "fmt"
 
+    specpb "github.com/mindungil/gil/proto/gen/gil/v1"
     "github.com/mindungil/gil/core/compact"
-    "github.com/mindungil/gil/sdk"
+    "github.com/mindungil/gil/core/provider"
 )
 
-// NewCompactorFromSpec builds a production-ready Compactor from a
-// resolved spec and the provider registry available to the run loop.
+// NewCompactorFromSpec builds a production-ready Compactor from the
+// frozen spec and the provider registry available to the run loop.
 //
 // Model selection: prefer spec.Models.Weak (cost-efficient summarizer);
 // fall back to spec.Models.Main if Weak is unset. The summarizer's
 // provider must exist in the providers map.
-func NewCompactorFromSpec(spec *sdk.SpecView, providers map[string]Provider) (*compact.Compactor, error) {
-    model := spec.Models.Weak
-    if model == "" {
-        model = spec.Models.Main
+func NewCompactorFromSpec(models *specpb.ModelConfig, providers map[string]provider.Provider) (*compact.Compactor, error) {
+    if models == nil {
+        return nil, fmt.Errorf("NewCompactorFromSpec: spec has no Models")
     }
-    if model == "" {
+    choice := models.GetWeak()
+    if choice == nil || choice.GetModelId() == "" {
+        choice = models.GetMain()
+    }
+    if choice == nil || choice.GetModelId() == "" {
         return nil, fmt.Errorf("NewCompactorFromSpec: no model configured (neither Weak nor Main)")
     }
-    providerID := providerIDForModel(model)
+    providerID := choice.GetProvider()
+    if providerID == "" {
+        return nil, fmt.Errorf("NewCompactorFromSpec: model %q has empty provider", choice.GetModelId())
+    }
     p, ok := providers[providerID]
     if !ok {
         return nil, fmt.Errorf("NewCompactorFromSpec: provider %q not in registry", providerID)
     }
-    return compact.NewCompactor(p, model, compact.Opts{
-        Head:                2,
-        Tail:                6,
-        ThresholdPercentage: 95,
-    }), nil
-}
-
-// providerIDForModel maps a model identifier to its provider ID.
-// Mirrors the existing convention in core/runner/runner.go's classifier.
-func providerIDForModel(model string) string {
-    switch {
-    case len(model) >= 6 && model[:6] == "claude":
-        return "anthropic"
-    case len(model) >= 3 && model[:3] == "gpt":
-        return "openai"
-    case len(model) >= 6 && model[:6] == "gemini":
-        return "google"
-    case len(model) >= 7 && model[:7] == "ollama:":
-        return "ollama"
-    default:
-        return "openai"
-    }
+    return &compact.Compactor{
+        Provider:  p,
+        Model:     choice.GetModelId(),
+        HeadKeep:  2,
+        TailKeep:  6,
+        MinMiddle: 8,
+    }, nil
 }
 ```
 
-If the existing codebase already has a `providerIDForModel`-equivalent helper, import it instead of duplicating.
+The exact import path for `specpb` follows the generated proto location at `proto/gen/gil/v1/`. If the codebase already has a `core/spec` wrapper that aliases `*specpb.ModelConfig` as `*spec.ModelConfig`, use that wrapper instead — the function signature should match whichever type the caller in `server/internal/service/run.go` passes.
 
 - [ ] **Step 5: Wire factory into RunService**
 
@@ -493,12 +506,14 @@ loop := runner.NewAgentLoop(/* existing args */)
 
 // P27 T3: instantiate Compactor from spec so the 95% threshold check
 // in runner.go is no longer dead code.
-compactor, err := runner.NewCompactorFromSpec(spec, providers)
+compactor, err := runner.NewCompactorFromSpec(frozenSpec.GetModels(), providers)
 if err != nil {
     return fmt.Errorf("compactor setup: %w", err)
 }
 loop.Compactor = compactor
 ```
+
+The exact name of the local spec variable in run.go may differ from `frozenSpec` — use whatever it is (likely `spec` or `fs`). The point is to pass `*specpb.ModelConfig`, not the whole spec.
 
 - [ ] **Step 6: Run tests**
 
