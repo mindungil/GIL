@@ -21,12 +21,21 @@
 | `gil auth status` | credstore + env var fallback 표시 |
 | `gil auth logout <provider>` | credential 삭제 |
 
+## 채팅 (Phase 24 — primary entry)
+
+| 명령 | 동작 |
+|---|---|
+| `gil` (no-arg, TTY) | 채팅 REPL — 자연어로 task 설명, gil이 알아서 dispatch |
+| `gil chat` | 위와 동일 (명시적 형태; 파이프 환경에서도 강제 chat) |
+| `gil --no-chat` | 채팅 끄고 legacy summary로 |
+
+채팅은 첫 메시지를 NEW_TASK / RESUME / STATUS / HELP / EXPLAIN로 분류 후 적절한 flow로 자동 라우팅. 비대화형(stdout pipe)일 땐 자동으로 summary 모드 fallback — 스크립트 호환.
+
 ## 세션
 
 | 명령 | 동작 |
 |---|---|
-| `gil new --working-dir <dir>` | 새 세션 생성 |
-| `gil` (no-arg) | 모든 세션 한눈 (최대 10개 + N more) |
+| `gil new --working-dir <dir>` | 새 세션 생성 (verb-mode; 채팅이 자동 처리) |
 | `gil status [<id>]` | 세션 list (visual) — `--plain` / `--output json` |
 | `gil session list` | session list 별도 alias |
 | `gil session show <id>` | metadata + spec + event count |
