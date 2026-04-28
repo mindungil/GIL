@@ -521,10 +521,21 @@ loop:
 			a.extraSystemNote = "" // single-shot: clear after one use
 		}
 
+		// P27 T4: Apply Anthropic prompt-caching markers to the last 3
+		// messages so the static prefix is cached and recent turns hit the
+		// rolling cache window. No-op for non-Anthropic providers.
+		iterMessages := messages
+		if iterProvider.Name() == "anthropic" {
+			// MarkCacheBreakpoints mutates in place; copy the slice header
+			// so the loop's own messages slice is not affected.
+			iterMessages = make([]provider.Message, len(messages))
+			copy(iterMessages, messages)
+			iterMessages = compact.MarkCacheBreakpoints(iterMessages)
+		}
 		resp, err := iterProvider.Complete(ctx, provider.Request{
 			Model:     iterModel,
 			System:    iterSystem,
-			Messages:  messages,
+			Messages:  iterMessages,
 			Tools:     tools,
 			MaxTokens: 4096,
 		})

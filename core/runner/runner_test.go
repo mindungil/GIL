@@ -2329,3 +2329,77 @@ func TestSplitBashChain(t *testing.T) {
 		})
 	}
 }
+
+// capturedReqProvider records the last provider.Request it received on Complete.
+// Used by the P27 T4 cache-marker tests below.
+type capturedReqProvider struct {
+	name   string
+	req    provider.Request
+	called bool
+}
+
+func (c *capturedReqProvider) Name() string { return c.name }
+func (c *capturedReqProvider) Complete(_ context.Context, req provider.Request) (provider.Response, error) {
+	c.req = req
+	c.called = true
+	// Return end_turn so the loop terminates after one iteration.
+	return provider.Response{
+		Text:         "done",
+		StopReason:   "end_turn",
+		InputTokens:  10,
+		OutputTokens: 4,
+	}, nil
+}
+
+// minimalSpec returns a FrozenSpec that allows the loop to run for at most one
+// iteration without requiring any verification (nil Verification → vacuous pass).
+func minimalSpec() *gilv1.FrozenSpec {
+	return &gilv1.FrozenSpec{
+		Goal:   &gilv1.Goal{OneLiner: "test goal"},
+		Budget: &gilv1.Budget{MaxIterations: 1},
+	}
+}
+
+// TestRunner_AnthropicRequest_HasCacheMarkers verifies that, when the provider
+// name is "anthropic", the runner applies MarkCacheBreakpoints so the outgoing
+// messages carry CacheControl=true on the last (up to 3) messages.
+func TestRunner_AnthropicRequest_HasCacheMarkers(t *testing.T) {
+	captured := &capturedReqProvider{name: "anthropic"}
+	loop := NewAgentLoop(minimalSpec(), captured, "claude-sonnet-4-6", nil, verify.NewRunner(t.TempDir()))
+	_, err := loop.Run(context.Background())
+	require.NoError(t, err)
+	require.True(t, captured.called, "provider must have been called")
+
+	msgs := captured.req.Messages
+	require.NotEmpty(t, msgs, "request must contain at least one message")
+
+	// With MarkCacheBreakpoints applied, the last min(3, n) messages must
+	// have CacheControl=true. Verify at least one of them is marked.
+	n := len(msgs)
+	start := n - 3
+	if start < 0 {
+		start = 0
+	}
+	var marked int
+	for i := start; i < n; i++ {
+		if msgs[i].CacheControl {
+			marked++
+		}
+	}
+	require.GreaterOrEqual(t, marked, 1, "at least one of the last-3 messages must have CacheControl=true after MarkCacheBreakpoints")
+}
+
+// TestRunner_OpenAIRequest_NoCacheMarkers verifies that, when the provider name
+// is NOT "anthropic", the runner does NOT apply cache markers — all messages
+// must have CacheControl=false.
+func TestRunner_OpenAIRequest_NoCacheMarkers(t *testing.T) {
+	captured := &capturedReqProvider{name: "openai"}
+	loop := NewAgentLoop(minimalSpec(), captured, "gpt-4o", nil, verify.NewRunner(t.TempDir()))
+	_, err := loop.Run(context.Background())
+	require.NoError(t, err)
+	require.True(t, captured.called, "provider must have been called")
+
+	for i, m := range captured.req.Messages {
+		require.False(t, m.CacheControl, "message[%d] must NOT have CacheControl=true for non-Anthropic provider", i)
+	}
+}
