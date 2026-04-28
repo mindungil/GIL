@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/mindungil/gil/cli/internal/cmd/uistyle"
 )
@@ -94,9 +95,52 @@ func formatDoneStrip(s SessionState, ascii bool) string {
 		s.Iter, s.CostUSD, mark, s.ChecksPassed, s.ChecksTotal)
 }
 
-// Stubs for the rest of the interface; later tasks fill them in.
-func (r *StdoutChatRenderer) SystemNote(NoteKind, string)              {}
-func (r *StdoutChatRenderer) Confirm(string, bool) (bool, error)       { return false, nil }
-func (r *StdoutChatRenderer) Diff([]DiffHunk)                          {}
-func (r *StdoutChatRenderer) Spec(*SpecView)                           {}
-func (r *StdoutChatRenderer) Close() error                             { return nil }
+func (r *StdoutChatRenderer) SystemNote(kind NoteKind, msg string) {
+	fmt.Fprintf(r.out, "[%s] %s\n", kind, msg)
+}
+
+func (r *StdoutChatRenderer) Confirm(question string, def bool) (bool, error) {
+	suffix := "[y/N]"
+	if def {
+		suffix = "[Y/n]"
+	}
+	fmt.Fprintf(r.out, "%s %s ", question, suffix)
+	if r.reader == nil {
+		return def, nil
+	}
+	line, err := r.reader.ReadString('\n')
+	if err != nil && err != io.EOF {
+		return def, err
+	}
+	line = strings.TrimSpace(strings.ToLower(line))
+	switch line {
+	case "":
+		return def, nil
+	case "y", "yes":
+		return true, nil
+	case "n", "no":
+		return false, nil
+	default:
+		return def, nil
+	}
+}
+
+func (r *StdoutChatRenderer) Diff(hunks []DiffHunk) {
+	if len(hunks) == 0 {
+		fmt.Fprintln(r.out, "(no changes)")
+		return
+	}
+	for _, h := range hunks {
+		fmt.Fprintf(r.out, "  %s  +%d -%d\n", h.Path, h.Added, h.Removed)
+	}
+}
+
+func (r *StdoutChatRenderer) Spec(view *SpecView) {
+	if view == nil {
+		fmt.Fprintln(r.out, "(no spec)")
+		return
+	}
+	fmt.Fprintln(r.out, view.YAML)
+}
+
+func (r *StdoutChatRenderer) Close() error { return nil }

@@ -109,3 +109,57 @@ func TestStdout_StatusStrip_DoneWithFailures(t *testing.T) {
 
 // Silence "imported and not used" if strings isn't referenced yet
 var _ = strings.HasPrefix
+
+func TestStdout_SystemNote_PrefixesByKind(t *testing.T) {
+	r, buf := newStdoutForTest(t)
+	r.SystemNote(NoteSpec, "success_criteria += dark mode toggle")
+	require.Equal(t, "[spec] success_criteria += dark mode toggle\n", buf.String())
+
+	buf.Reset()
+	r.SystemNote(NoteAdversary, "1 medium finding — accessibility contrast not specified")
+	require.Equal(t, "[adversary] 1 medium finding — accessibility contrast not specified\n", buf.String())
+
+	buf.Reset()
+	r.SystemNote(NoteQueued, "agent will see at iter 24")
+	require.Equal(t, "[note] agent will see at iter 24\n", buf.String())
+}
+
+func TestStdout_Confirm_DefaultYes(t *testing.T) {
+	var out bytes.Buffer
+	in := strings.NewReader("\n") // empty input → default
+	r := NewStdoutChatRenderer(&out, in, true, true)
+	ok, err := r.Confirm("Start the run?", true)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Contains(t, out.String(), "Start the run? [Y/n]")
+}
+
+func TestStdout_Confirm_DefaultNo_AcceptsY(t *testing.T) {
+	var out bytes.Buffer
+	in := strings.NewReader("y\n")
+	r := NewStdoutChatRenderer(&out, in, true, true)
+	ok, err := r.Confirm("Apply diff?", false)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Contains(t, out.String(), "Apply diff? [y/N]")
+}
+
+func TestStdout_Diff_SummariesPaths(t *testing.T) {
+	r, buf := newStdoutForTest(t)
+	r.Diff([]DiffHunk{
+		{Path: "src/web/Toggle.tsx", Added: 42, Removed: 0},
+		{Path: "src/web/Settings.tsx", Added: 18, Removed: 4},
+	})
+	out := buf.String()
+	require.Contains(t, out, "src/web/Toggle.tsx")
+	require.Contains(t, out, "+42 -0")
+	require.Contains(t, out, "src/web/Settings.tsx")
+	require.Contains(t, out, "+18 -4")
+}
+
+func TestStdout_Spec_PrintsYAML(t *testing.T) {
+	r, buf := newStdoutForTest(t)
+	r.Spec(&SpecView{YAML: "goal:\n  one_liner: add dark mode\n"})
+	require.Contains(t, buf.String(), "goal:")
+	require.Contains(t, buf.String(), "add dark mode")
+}
