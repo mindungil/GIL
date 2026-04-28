@@ -414,20 +414,51 @@ func renderChatStatus(out io.Writer, g uistyle.Glyphs, p uistyle.Palette, sessio
 // renderChatHelp prints a one-screen capability primer. We keep it
 // conversational rather than reproducing the cobra --help output —
 // users who want the full surface still get it via `gil --help`.
+//
+// Phase 25 A2 — grouped by where the user is in their session
+// (starting / working / recovery) instead of a flat command dump. The
+// flat list optimised for "everything we can do"; the grouped form
+// optimises for "what should I do RIGHT NOW", which matches how the
+// chat surface is actually consulted (mid-task, looking for the next
+// move) rather than browsed.
 func renderChatHelp(out io.Writer, g uistyle.Glyphs, p uistyle.Palette) {
-	lines := []string{
-		"Here's what I can do:",
-		"",
-		"  • Tell me a task in plain English — I'll ask follow-ups, then run autonomously.",
-		"  • Say \"continue\" to resume a previous session.",
-		"  • Say \"status\" to see what's running.",
-		"  • Type /quit (or Ctrl-D) to leave the chat.",
-		"",
-		"Power users: every command behind the chat is also available standalone:",
-		"  gil interview <id>   gil run <id>   gil status   gil events <id> --tail",
+	type group struct {
+		title string
+		items []string
 	}
-	for _, ln := range lines {
-		fmt.Fprintln(out, agentLine(p, g, ln))
+	groups := []group{
+		{
+			"Just starting",
+			[]string{
+				"Tell me a task in plain English — I'll ask follow-ups, then run autonomously.",
+				"Say \"explain\" for a short primer on what gil does.",
+			},
+		},
+		{
+			"Currently working",
+			[]string{
+				"Say \"status\" to see what's running.",
+				"Say \"continue\" to resume a previous session.",
+				"Outside chat:  gil watch <id>   gil events <id> --tail",
+			},
+		},
+		{
+			"Recovery",
+			[]string{
+				"/quit (or Ctrl-D)     leave the chat",
+				"gil doctor            check setup",
+				"gil auth login        (re)register a provider",
+				"gil session rm <id>   delete a stuck session",
+			},
+		},
+	}
+	fmt.Fprintln(out, agentLine(p, g, "Here's what I can do, grouped by where you are."))
+	for _, gr := range groups {
+		fmt.Fprintln(out, agentLine(p, g, ""))
+		fmt.Fprintln(out, agentLine(p, g, p.Surface(gr.title)))
+		for _, it := range gr.items {
+			fmt.Fprintln(out, agentLine(p, g, "  "+p.Dim("•")+" "+it))
+		}
 	}
 }
 

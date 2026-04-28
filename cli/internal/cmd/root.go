@@ -156,29 +156,49 @@ func Root() *cobra.Command {
 	// Off by default so the conversational surface ships as the new
 	// front door.
 	root.PersistentFlags().BoolVar(&noChat, "no-chat", false, "skip the chat REPL on bare gil; always render the summary")
-	root.AddCommand(daemonCmd())
-	root.AddCommand(authCmd())
-	root.AddCommand(initCmd())
-	root.AddCommand(doctorCmd())
-	root.AddCommand(newCmd())
-	root.AddCommand(statusCmd())
-	root.AddCommand(sessionCmd())
-	root.AddCommand(interviewCmd())
-	root.AddCommand(resumeCmd())
-	root.AddCommand(specCmd())
-	root.AddCommand(runCmd())
-	root.AddCommand(eventsCmd())
-	root.AddCommand(watchCmd())
-	root.AddCommand(exportCmd())
-	root.AddCommand(importCmd())
-	root.AddCommand(restoreCmd())
-	root.AddCommand(costCmd())
-	root.AddCommand(statsCmd())
-	root.AddCommand(mcpCmd())
-	root.AddCommand(permissionsCmd())
-	root.AddCommand(clarifyCmd())
-	root.AddCommand(updateCmd())
-	root.AddCommand(chatCmd())
-	root.AddCommand(newCompletionCmd(root))
+	// Phase 25 A2 — surface a stage-based grouping in `gil --help` so
+	// the dump-of-25-commands maps onto the user's mental model: setup
+	// once, then run sessions, then diagnose / maintain. Cobra renders
+	// each group as a header in the help output (commands without a
+	// GroupID fall under "Additional Commands").
+	root.AddGroup(
+		&cobra.Group{ID: "setup", Title: "Setup:"},
+		&cobra.Group{ID: "session", Title: "Sessions & runs:"},
+		&cobra.Group{ID: "diag", Title: "Diagnostics & history:"},
+		&cobra.Group{ID: "tools", Title: "Tools & integration:"},
+		&cobra.Group{ID: "maint", Title: "Maintenance:"},
+	)
+	addCmd := func(c *cobra.Command, group string) {
+		c.GroupID = group
+		root.AddCommand(c)
+	}
+	addCmd(initCmd(), "setup")
+	addCmd(authCmd(), "setup")
+	addCmd(doctorCmd(), "setup")
+
+	addCmd(chatCmd(), "session")
+	addCmd(newCmd(), "session")
+	addCmd(interviewCmd(), "session")
+	addCmd(resumeCmd(), "session")
+	addCmd(runCmd(), "session")
+	addCmd(watchCmd(), "session")
+	addCmd(eventsCmd(), "session")
+	addCmd(specCmd(), "session")
+	addCmd(clarifyCmd(), "session")
+	addCmd(sessionCmd(), "session")
+
+	addCmd(statusCmd(), "diag")
+	addCmd(costCmd(), "diag")
+	addCmd(statsCmd(), "diag")
+	addCmd(restoreCmd(), "diag")
+	addCmd(exportCmd(), "diag")
+	addCmd(importCmd(), "diag")
+
+	addCmd(mcpCmd(), "tools")
+	addCmd(permissionsCmd(), "tools")
+
+	addCmd(daemonCmd(), "maint")
+	addCmd(updateCmd(), "maint")
+	root.AddCommand(newCompletionCmd(root)) // cobra owns this group
 	return root
 }
