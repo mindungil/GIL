@@ -108,7 +108,8 @@ func (c *Compactor) Compact(ctx context.Context, msgs []provider.Message) ([]pro
 		out = append(out, cloneMessage(m))
 	}
 
-	saved := estimateTokens(middle) - estimateTokens([]provider.Message{{Content: resp.Text}})
+	providerID := c.Provider.Name()
+	saved := estimateTokens(providerID, middle) - estimateTokens(providerID, []provider.Message{{Content: resp.Text}})
 	if saved < 0 {
 		saved = 0
 	}
@@ -116,7 +117,7 @@ func (c *Compactor) Compact(ctx context.Context, msgs []provider.Message) ([]pro
 		// Estimate original tokens from the WHOLE input slice (not just middle)
 		// for a meaningful percentage. SavedTokens uses the value already computed.
 		c.History.Record(CompactionEvent{
-			OriginalTokens: estimateTokens(msgs),
+			OriginalTokens: estimateTokens(providerID, msgs),
 			SavedTokens:    saved,
 			Timestamp:      time.Now().UTC(),
 		})
@@ -154,16 +155,18 @@ func cloneMessage(m provider.Message) provider.Message {
 	return out
 }
 
-// estimateTokens: 1 token ≈ 4 chars across all content fields.
-func estimateTokens(msgs []provider.Message) int64 {
+// estimateTokens uses per-provider tokenizer density heuristics to
+// estimate token count. This is provider-aware and replaces the previous
+// uniform 4-chars-per-token approach.
+func estimateTokens(providerID string, msgs []provider.Message) int64 {
 	total := int64(0)
 	for _, m := range msgs {
-		total += int64(len(m.Content)) / 4
+		total += int64(provider.EstimateTokens(providerID, m.Content))
 		for _, tc := range m.ToolCalls {
-			total += int64(len(tc.Input)) / 4
+			total += int64(provider.EstimateTokens(providerID, string(tc.Input)))
 		}
 		for _, tr := range m.ToolResults {
-			total += int64(len(tr.Content)) / 4
+			total += int64(provider.EstimateTokens(providerID, tr.Content))
 		}
 	}
 	return total

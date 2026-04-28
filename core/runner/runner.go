@@ -422,7 +422,7 @@ loop:
 			if maxCtx <= 0 {
 				maxCtx = 200_000
 			}
-			estimated := estimateMessagesTokens(messages)
+			estimated := estimateMessagesTokens(a.Provider.Name(), messages)
 			threshold := int64(float64(maxCtx) * 0.95)
 			forced := a.compactNowRequested
 			a.compactNowRequested = false
@@ -1802,16 +1802,18 @@ func planLine(it plan.Item, indent string) string {
 	return body
 }
 
-// estimateMessagesTokens uses the same 4-chars-per-token heuristic as compact.estimateTokens.
-func estimateMessagesTokens(msgs []provider.Message) int64 {
+// estimateMessagesTokens uses per-provider tokenizer density heuristics to
+// estimate token count. This is provider-aware and replaces the previous
+// uniform 4-chars-per-token approach.
+func estimateMessagesTokens(providerID string, msgs []provider.Message) int64 {
 	var total int64
 	for _, m := range msgs {
-		total += int64(len(m.Content)) / 4
+		total += int64(provider.EstimateTokens(providerID, m.Content))
 		for _, tc := range m.ToolCalls {
-			total += int64(len(tc.Input)) / 4
+			total += int64(provider.EstimateTokens(providerID, string(tc.Input)))
 		}
 		for _, tr := range m.ToolResults {
-			total += int64(len(tr.Content)) / 4
+			total += int64(provider.EstimateTokens(providerID, tr.Content))
 		}
 	}
 	return total
