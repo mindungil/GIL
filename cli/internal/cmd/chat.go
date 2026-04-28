@@ -141,6 +141,21 @@ func runChat(cmd *cobra.Command, socket, providerName, model string) error {
 		}
 
 		switch it.Kind {
+		case intent.KindGreeting:
+			// Mission-briefing tone: terse acknowledgement, immediate
+			// reprompt. No "안녕하세요!" — gil is a precision tool, not
+			// a chatty companion.
+			fmt.Fprintln(out, agentLine(p, g, p.Surface("Acknowledged. Mission?")))
+			continue
+
+		case intent.KindTooVague:
+			// Brief request for detail. Examples in dim.
+			fmt.Fprintln(out, agentLine(p, g, p.Surface("Need more detail.")))
+			fmt.Fprintln(out, agentLine(p, g, p.Dim("e.g.  add dark mode to my React app at ~/myapp")))
+			fmt.Fprintln(out, agentLine(p, g, p.Dim("      fix the failing test in handlers/auth_test.go")))
+			fmt.Fprintln(out, agentLine(p, g, p.Dim("      refactor the retry logic across handlers/{a,b,c}.go")))
+			continue
+
 		case intent.KindUnknown:
 			if msg == "" {
 				fmt.Fprintln(out, p.Dim("Tell me what you want to work on."))
@@ -189,25 +204,51 @@ func runChat(cmd *cobra.Command, socket, providerName, model string) error {
 // note — Phase 24 § E asked us to keep clutter out of the chat preamble
 // without surprising users who expected the full count.
 func renderChatBanner(out io.Writer, g uistyle.Glyphs, p uistyle.Palette, activeCount int) {
-	fmt.Fprintln(out)
-	headLeft := p.Primary("G I L") + "  " + p.Dim(version.Short())
-	headRight := currentUser() + "  " + p.Info(g.Running) + "  " + currentHost()
-	fmt.Fprintf(out, "%s%s%s\n", headLeft, padBetween(headLeft, headRight, 78), headRight)
+	// Mission briefing aesthetic. Title plate + thick rule + subtitle in
+	// tracked uppercase. Status strip sits below — concrete numbers, no
+	// chatty preamble. Agent identity is "precision instrument", not
+	// "friendly assistant".
 	fmt.Fprintln(out)
 
-	fmt.Fprintln(out, "  "+p.Surface("Hi. I'm your autonomous coding agent."))
-	fmt.Fprintln(out, "  "+p.Dim("Tell me what you want to work on. I'll ask follow-ups until I understand,"))
-	fmt.Fprintln(out, "  "+p.Dim("then run on my own — no more interruptions."))
+	// Title plate: letterspaced "G I L" left, meta right, hard-rule under.
+	title := p.Primary("G I L")
+	meta := p.Dim(shortVersionTag()) + "  " + p.Info(g.Running) + "  " + p.Surface(currentUser()+"@"+currentHost())
+	fmt.Fprintf(out, "  %s%s%s\n", title, padBetween("  "+title, meta+"  ", 80), meta)
+	fmt.Fprintln(out, "  "+p.Dim(strings.Repeat("━", 76)))
 
+	// Subtitle in tracked uppercase — declarative.
+	fmt.Fprintln(out, "  "+p.Dim("AUTONOMOUS  CODING  HARNESS"))
+	fmt.Fprintln(out)
+
+	// Status strip — only print numbers worth showing.
 	if activeCount > 0 {
 		noun := "session"
 		if activeCount != 1 {
 			noun = "sessions"
 		}
-		fmt.Fprintln(out)
-		fmt.Fprintln(out, "  "+p.Dim(fmt.Sprintf("%d active %s. Say \"continue\" or \"status\" to pick up.", activeCount, noun)))
+		fmt.Fprintln(out, "  "+p.Surface(fmt.Sprintf("%d active %s.", activeCount, noun))+
+			p.Dim("  ›  resume   ›  status"))
+	} else {
+		fmt.Fprintln(out, "  "+p.Dim("No active sessions."))
 	}
 	fmt.Fprintln(out)
+
+	// Agent prompt — single line, mission-briefing tone.
+	fmt.Fprintln(out, "  "+p.Dim(g.QuoteBar)+" "+p.Surface("Standing by. Describe the mission."))
+	fmt.Fprintln(out, "  "+p.Dim(g.QuoteBar)+" "+p.Dim("(or say \"help\", \"status\", \"continue\", or /quit)"))
+	fmt.Fprintln(out)
+}
+
+// shortVersionTag trims the long "v0.1.0-alpha-95-gXXXXX" form to just
+// "v0.1.0-α" for the banner — long version strings clutter the title.
+func shortVersionTag() string {
+	v := version.Short()
+	if i := strings.Index(v, "-"); i > 0 {
+		// Show release tag (or first segment) — replace -alpha with -α
+		// for visual elegance.
+		return strings.Replace(v[:i], "-alpha", "-α", 1) + "  ●"
+	}
+	return v
 }
 
 // agentLine wraps text in the spec's quote-bar margin (§7 chat aesthetic).
@@ -291,18 +332,60 @@ func handleChatNewTask(ctx context.Context, cmd *cobra.Command, cli *sdk.Client,
 	g := uistyle.NewGlyphs(asciiMode)
 	p := uistyle.NewPalette(false)
 
-	// Stage 1 — show the intent we picked up so the user can correct
-	// us before we burn provider tokens on an interview.
-	if it.Workspace != "" {
-		fmt.Fprintln(out, agentLine(p, g, fmt.Sprintf("Got it. New task in %s.", p.Primary(it.Workspace))))
-	} else {
-		fmt.Fprintln(out, agentLine(p, g, "Got it. Starting a new task."))
+	// Resolve effective provider before showing the manifest — user
+	// must see what we're about to use, not "anthropic" hardcoded.
+	effProv := providerName
+	if effProv == "" {
+		effProv = pickInterviewProvider(cmd)
 	}
-	fmt.Fprintln(out, agentLine(p, g, p.Dim("Goal: "+it.GoalText)))
+	effModel := model
+	if effModel == "" {
+		effModel = defaultModelFor(effProv)
+	}
+	effWorkspace := it.Workspace
+	if effWorkspace == "" {
+		effWorkspace = "(will ask in briefing)"
+	}
 
-	// Stage 2 — create the session. We pass goal hint + working dir so
-	// the spec slot-fill seeds with what we already know, eliminating
-	// at least one redundant question.
+	reader := bufio.NewReader(in)
+
+	// Stage 1 — manifest preview. Show parsed intent in a structured
+	// card so the user can correct us BEFORE we create a session.
+	// Mission-briefing aesthetic: tight key-value layout, dim labels.
+	fmt.Fprintln(out, agentLine(p, g, p.Surface("Mission received.")))
+	fmt.Fprintln(out, agentLine(p, g, ""))
+	fmt.Fprintln(out, agentLine(p, g, p.Dim("  goal       ")+p.Surface(truncRune(it.GoalText, 60))))
+	fmt.Fprintln(out, agentLine(p, g, p.Dim("  workspace  ")+p.Surface(effWorkspace)))
+	fmt.Fprintln(out, agentLine(p, g, p.Dim("  provider   ")+p.Surface(effProv)))
+	if effModel == "" && effProv == "vllm" {
+		// vllm has no canonical default — must ask before we proceed,
+		// otherwise gild errors out mid-interview with "model required".
+		fmt.Fprintln(out, agentLine(p, g, p.Dim("  model      ")+p.Caution("(required for vllm — please specify)")))
+		fmt.Fprintln(out, agentLine(p, g, ""))
+		fmt.Fprint(out, agentLine(p, g, p.Dim("Model name (e.g. qwen3.6-27b): "))+p.Info("› "))
+		modelLine, _ := readLineRaw(reader)
+		effModel = strings.TrimSpace(modelLine)
+		if effModel == "" {
+			fmt.Fprintln(out, agentLine(p, g, p.Dim("Mission aborted. No model specified.")))
+			return nil
+		}
+		model = effModel
+	} else if effModel != "" {
+		fmt.Fprintln(out, agentLine(p, g, p.Dim("  model      ")+p.Surface(effModel)))
+	}
+	fmt.Fprintln(out, agentLine(p, g, ""))
+	fmt.Fprint(out, agentLine(p, g, p.Dim("Begin briefing? "))+p.Info("[Y/n] "))
+
+	confirmLine, _ := readLineRaw(reader)
+	confirm := strings.ToLower(strings.TrimSpace(confirmLine))
+	if confirm == "n" || confirm == "no" || confirm == "q" || confirm == "quit" {
+		fmt.Fprintln(out, agentLine(p, g, p.Dim("Mission aborted. No session created.")))
+		return nil
+	}
+	fmt.Fprintln(out)
+
+	// Stage 2 — NOW create the session (only after user confirms,
+	// preventing empty-session pollution).
 	sess, err := cli.CreateSession(ctx, sdk.CreateOptions{
 		WorkingDir: it.Workspace,
 		GoalHint:   it.GoalText,
@@ -310,7 +393,8 @@ func handleChatNewTask(ctx context.Context, cmd *cobra.Command, cli *sdk.Client,
 	if err != nil {
 		return wrapRPCError(err)
 	}
-	fmt.Fprintln(out, agentLine(p, g, p.Dim(fmt.Sprintf("session %s created", shortID(sess.ID)))))
+	fmt.Fprintln(out, agentLine(p, g, p.Dim(strings.Repeat("─", 76))))
+	fmt.Fprintln(out, agentLine(p, g, p.Dim("session  ")+p.Surface(shortID(sess.ID))+p.Dim("  ·  briefing in progress")))
 	fmt.Fprintln(out)
 
 	// Stage 3 — run the interview. We mirror the inline loop in
@@ -319,7 +403,7 @@ func handleChatNewTask(ctx context.Context, cmd *cobra.Command, cli *sdk.Client,
 	// prompt to copy-paste).
 	prov := providerName
 	if prov == "" {
-		prov = "anthropic"
+		prov = pickInterviewProvider(cmd)
 	}
 	startStream, err := cli.StartInterview(ctx, sess.ID, it.GoalText, prov, model, sdk.InterviewModels{})
 	if err != nil {
@@ -331,7 +415,8 @@ func handleChatNewTask(ctx context.Context, cmd *cobra.Command, cli *sdk.Client,
 		return wrapRPCError(err)
 	}
 
-	reader := bufio.NewReader(in)
+	// reader was already created above for the manifest confirm prompt;
+	// reuse it so we don't drop any buffered bytes mid-session.
 	for !reachedSaturation {
 		fmt.Fprint(out, "\n"+p.Info("›")+" ")
 		line, rerr := reader.ReadString('\n')
@@ -466,7 +551,7 @@ func runResumeForSession(ctx context.Context, cmd *cobra.Command, cli *sdk.Clien
 
 	prov := providerName
 	if prov == "" {
-		prov = "anthropic"
+		prov = pickInterviewProvider(cmd)
 	}
 
 	fmt.Fprintln(out, agentLine(p, g, fmt.Sprintf("Resuming %s — %s", p.Primary(shortID(sess.ID)), truncRune(sess.GoalHint, 56))))
@@ -549,6 +634,76 @@ func drainChatEvents(out io.Writer, p uistyle.Palette, g uistyle.Glyphs, s event
 			return reached, fmt.Errorf("interview error %s: %s", e.Code, e.Message)
 		}
 	}
+}
+
+// defaultModelFor returns the canonical "small" model for a provider
+// when the user did not pass --model. For vllm/local there is no
+// canonical default — the caller (chat manifest) prompts the user.
+func defaultModelFor(providerName string) string {
+	switch providerName {
+	case "anthropic":
+		return "claude-haiku-4-5"
+	case "openai":
+		return "gpt-4o-mini"
+	case "openrouter":
+		return "anthropic/claude-haiku-4-5"
+	case "vllm", "local":
+		return ""
+	case "mock":
+		return "mock-model"
+	}
+	return ""
+}
+
+// pickInterviewProvider returns the provider NAME to drive the
+// interview when --provider flag is empty. Phase 24-fix: replaces the
+// previously-hardcoded "anthropic" fallback so a user who registered
+// only vllm (or only openai/openrouter) gets their own provider —
+// not an "anthropic credentials missing" error.
+//
+// Priority:
+//  1. First credstore entry, in preference order anthropic > openai >
+//     openrouter > vllm — whichever the user actually has.
+//  2. Env-var fallback (ANTHROPIC_API_KEY / OPENAI_API_KEY / etc).
+//  3. "mock" as a last resort so the chat surface stays demoable
+//     offline.
+func pickInterviewProvider(cmd *cobra.Command) string {
+	store := newStoreFor(cmd)
+	ctx := cmd.Context()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if names, err := store.List(ctx); err == nil {
+		preferred := []credstore.ProviderName{
+			credstore.Anthropic,
+			credstore.OpenAI,
+			credstore.OpenRouter,
+			credstore.VLLM,
+		}
+		have := make(map[credstore.ProviderName]bool, len(names))
+		for _, n := range names {
+			have[n] = true
+		}
+		for _, p := range preferred {
+			if have[p] {
+				return string(p)
+			}
+		}
+		if len(names) > 0 {
+			return string(names[0])
+		}
+	}
+	for _, env := range []struct{ envKey, prov string }{
+		{"ANTHROPIC_API_KEY", "anthropic"},
+		{"OPENAI_API_KEY", "openai"},
+		{"OPENROUTER_API_KEY", "openrouter"},
+		{"OPENAI_BASE_URL", "vllm"},
+	} {
+		if os.Getenv(env.envKey) != "" {
+			return env.prov
+		}
+	}
+	return "mock"
 }
 
 // pickIntentProvider resolves the provider used for ambiguous-message

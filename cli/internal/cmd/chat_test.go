@@ -26,8 +26,9 @@ func TestRenderChatBanner(t *testing.T) {
 	renderChatBanner(&buf, g, p, 0)
 	out := buf.String()
 	require.Contains(t, out, "G I L", "letterspaced header")
-	require.Contains(t, out, "Hi. I'm your autonomous coding agent.")
-	require.NotContains(t, out, "active session", "no active line when count=0")
+	require.Contains(t, out, "AUTONOMOUS", "subtitle present")
+	require.Contains(t, out, "Standing by. Describe the mission.", "mission-briefing prompt")
+	require.Contains(t, out, "No active sessions.", "explicit empty-state line when count=0")
 
 	buf.Reset()
 	renderChatBanner(&buf, g, p, 1)

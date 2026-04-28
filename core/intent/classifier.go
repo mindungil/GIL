@@ -67,6 +67,18 @@ const (
 	// confident classification. The REPL falls through to NEW_TASK with
 	// a confirmation prompt.
 	KindUnknown Kind = "UNKNOWN"
+
+	// KindGreeting matches social openers ("hi", "hello", "안녕", "ㅎㅇ").
+	// The REPL responds with a brief acknowledgement and re-prompts —
+	// it does NOT create a session for a greeting (that was the Phase 24
+	// chat surface bug surfaced by the user: "ㅎㅇ" became Goal).
+	KindGreeting Kind = "GREETING"
+
+	// KindTooVague means the input is too short / lacks any task signal
+	// (no verb, no path, no quantifiable noun) to safely treat as
+	// NEW_TASK. The REPL re-prompts asking for detail rather than
+	// creating an empty session.
+	KindTooVague Kind = "TOO_VAGUE"
 )
 
 // Intent is the structured result of classifying a user message.
@@ -101,6 +113,18 @@ var (
 	resumeRE  = regexp.MustCompile(`(?i)^(continue|resume|pick\s+up|keep\s+going|finish)\b`)
 	helpRE    = regexp.MustCompile(`(?i)^(help|what\s+can\s+you\s+do|how\s+do\s+i|commands)\b`)
 	explainRE = regexp.MustCompile(`(?i)^(what\s+is|what['']?s|explain|how\s+does)\b.*\b(gil|interview|session|spec)\b`)
+
+	// greetingRE catches social openers in EN/KR that should NOT be
+	// treated as task descriptions. ㅎㅇ / ㄱㄱ are Korean shortform
+	// internet greetings; 안녕 / 안녕하세요 are formal/informal hello.
+	greetingRE = regexp.MustCompile(`(?i)^(hi|hello|hey|yo|sup|hola|안녕(하세요)?|반갑(습니다|어요)?|ㅎㅇ|ㅎ2|ㄱㄱ|hi\s*there)\s*[!.~?]*$`)
+
+	// taskSignalRE detects words that strongly suggest the user is
+	// describing actual work (verbs of construction/modification, file
+	// extensions, paths). Used to gate the TOO_VAGUE classification —
+	// short input WITH a task signal is fine; short input WITHOUT one
+	// (just a noun or interjection) is not.
+	taskSignalRE = regexp.MustCompile(`(?i)\b(add|fix|build|write|create|make|implement|refactor|update|migrate|test|deploy|debug|remove|delete|rename|move|extract|inline|setup|set\s*up|install|configure)\b|\.(go|py|js|ts|rs|java|cpp|sh|md|yaml|yml|json|toml)\b|\/[\S]+`)
 
 	// pathRE finds the first token that looks like a filesystem path. We
 	// accept ~/..., absolute paths, and ./relative — any standalone token
@@ -177,6 +201,15 @@ func Classify(ctx context.Context, prov provider.Provider, model, userMsg string
 		// network access. The fallthrough below treats it as NEW_TASK.
 	}
 
+	// Last gate before NEW_TASK: refuse to commit to an interview on
+	// inputs that are too vague to describe work. "ㅎㅇ" / "thanks" /
+	// any sub-12-char input lacking a task verb / path / extension
+	// becomes TOO_VAGUE — the chat REPL re-prompts asking for detail
+	// instead of creating an empty session.
+	if isTooVague(trimmed) {
+		return Intent{Kind: KindTooVague, Confidence: 0.85, GoalText: trimmed}, nil
+	}
+
 	// Default: treat as NEW_TASK with low confidence. The chat REPL
 	// confirms before committing to an interview.
 	return Intent{
@@ -187,6 +220,17 @@ func Classify(ctx context.Context, prov provider.Provider, model, userMsg string
 	}, nil
 }
 
+// isTooVague returns true when the input is too short OR has no
+// recognizable task signal. Used to gate session creation.
+func isTooVague(msg string) bool {
+	if len(msg) < 12 {
+		// Short inputs need a task signal. "fix bug" (7 chars) has
+		// "fix" — accept. "ㅎㅇ" (2 chars) doesn't — reject.
+		return !taskSignalRE.MatchString(msg)
+	}
+	return false
+}
+
 // classifyByRegex tries the heuristic patterns in priority order. The order
 // matters — STATUS triggers on "what's running" which would also match the
 // EXPLAIN pattern; we want the action verb to win over the meta-question.
@@ -194,6 +238,10 @@ func Classify(ctx context.Context, prov provider.Provider, model, userMsg string
 // Returns (intent, true) on a match, (zero, false) when no pattern fires.
 func classifyByRegex(msg string) (Intent, bool) {
 	switch {
+	case greetingRE.MatchString(msg):
+		// Greeting wins over everything — "hi" should never become a
+		// NEW_TASK with goal="hi".
+		return Intent{Kind: KindGreeting, Confidence: 0.99}, true
 	case statusRE.MatchString(msg):
 		return Intent{Kind: KindStatus, Confidence: 0.95}, true
 	case resumeRE.MatchString(msg):
