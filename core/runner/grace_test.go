@@ -8,6 +8,9 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/mindungil/gil/core/provider"
+	"github.com/mindungil/gil/core/tool"
+	"github.com/mindungil/gil/core/verify"
+	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
 )
 
 // graceProvider records every Complete call so tests can verify the
@@ -93,4 +96,54 @@ func TestGraceCall_FiresOnlyOnceOnRepeatedCheck(t *testing.T) {
 	_ = loop.checkBudgetAndMaybeGrace(context.Background())
 	_ = loop.checkBudgetAndMaybeGrace(context.Background())
 	require.Equal(t, 1, captured.callCount, "second call must not re-fire grace")
+}
+
+// TestRunner_BudgetExhaustGrace_ResultStatusIsHandoff drives a full Run() that
+// exhausts the token budget and asserts that Result.Status (the PUBLIC API) is
+// "budget_exhausted_with_handoff", not the verify-based variant. This is the
+// contract regression that was broken before the graceStatus override was added
+// to the post-loop finalStatus block.
+func TestRunner_BudgetExhaustGrace_ResultStatusIsHandoff(t *testing.T) {
+	dir := t.TempDir()
+	// budgetTokenProvider emits 50 tokens/iter (in=40, out=10) and keeps
+	// looping via tool_use. Reserve=1 → effective cap=99, so iter2 (100 tokens)
+	// trips the guard. NoGrace is NOT set — grace MUST fire.
+	prov := &budgetTokenProvider{in: 40, out: 10}
+	spec := &gilv1.FrozenSpec{
+		Goal: &gilv1.Goal{OneLiner: "x"},
+		// No Verification checks → verifyResults will be empty, which without
+		// the fix would produce the legacy "budget_exhausted" status. With the
+		// fix graceStatus overrides it to "budget_exhausted_with_handoff".
+		Budget: &gilv1.Budget{MaxIterations: 50, MaxTotalTokens: 100, ReserveTokens: 1},
+	}
+	tools := []tool.Tool{&noopTool{}}
+	loop := NewAgentLoop(spec, prov, "x", tools, verify.NewRunner(dir))
+	// NoGrace intentionally left false so the wrap-up call fires.
+
+	res, err := loop.Run(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "budget_exhausted_with_handoff", res.Status,
+		"graceStatus must propagate into Result.Status (public API), not stay hidden on the struct")
+	require.Equal(t, "tokens", res.BudgetReason)
+}
+
+// TestRunner_BudgetExhaustNoGrace_ResultStatusIsExhausted mirrors the above but
+// with NoGrace=true. The wrap-up call is skipped, so the legacy
+// "budget_exhausted" status (no verify checks) must be preserved.
+func TestRunner_BudgetExhaustNoGrace_ResultStatusIsExhausted(t *testing.T) {
+	dir := t.TempDir()
+	prov := &budgetTokenProvider{in: 40, out: 10}
+	spec := &gilv1.FrozenSpec{
+		Goal:   &gilv1.Goal{OneLiner: "x"},
+		Budget: &gilv1.Budget{MaxIterations: 50, MaxTotalTokens: 100, ReserveTokens: 1},
+	}
+	tools := []tool.Tool{&noopTool{}}
+	loop := NewAgentLoop(spec, prov, "x", tools, verify.NewRunner(dir))
+	loop.NoGrace = true // disable grace → should get legacy status
+
+	res, err := loop.Run(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "budget_exhausted", res.Status,
+		"with NoGrace=true no handoff fires; legacy status must be preserved")
+	require.Equal(t, "tokens", res.BudgetReason)
 }

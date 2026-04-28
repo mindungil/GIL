@@ -1108,6 +1108,13 @@ loop:
 		} else {
 			finalStatus = "budget_exhausted_verify_failed"
 		}
+		// graceStatus, when non-empty, is set by checkBudgetAndMaybeGrace to
+		// signal that the wrap-up turn fired and the run hands off cleanly.
+		// It overrides the verify-based classification so callers can detect
+		// the soft-exit path.
+		if a.graceStatus != "" {
+			finalStatus = a.graceStatus
+		}
 	case "stuck":
 		finalStatus = "stuck"
 	case "max_iter":

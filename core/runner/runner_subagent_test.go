@@ -351,12 +351,12 @@ func TestRunSubagentWithConfig_TokenBudget_Enforced(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NotNil(t, res)
-	// Either "budget_exhausted" (token cap hit cleanly) or "max_iterations"
-	// is acceptable — the exact accounting depends on per-turn token estimates.
-	// What matters is the cap WAS plumbed through and the sub-loop did not
-	// silently run unbounded.
-	require.Contains(t, []string{"budget_exhausted", "max_iterations", "done"}, res.Status)
-	if res.Status == "budget_exhausted" {
+	// Either "budget_exhausted" / "budget_exhausted_with_handoff" (token cap hit
+	// cleanly, with or without grace) or "max_iterations" is acceptable — the
+	// exact accounting depends on per-turn token estimates. What matters is the
+	// cap WAS plumbed through and the sub-loop did not silently run unbounded.
+	require.Contains(t, []string{"budget_exhausted", "budget_exhausted_with_handoff", "max_iterations", "done"}, res.Status)
+	if res.Status == "budget_exhausted" || res.Status == "budget_exhausted_with_handoff" {
 		require.LessOrEqual(t, res.Iterations, 3)
 	}
 }
