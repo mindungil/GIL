@@ -156,7 +156,7 @@ func (g *GRPCClient) SendPrompt(ctx context.Context, prompt string) error {
 // launch, not whatever g.chunkDone happens to be later.
 //
 // Snapshotting prevents a stale goroutine from closing the new turn's
-// done channel after a swap (resetChunkDone).
+// done channel after SendPrompt allocates fresh per-turn channels.
 func (g *GRPCClient) drainInterviewStream(
 	stream interface {
 		Recv() (*gilv1.InterviewEvent, error)
