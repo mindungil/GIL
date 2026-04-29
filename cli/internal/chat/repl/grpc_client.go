@@ -16,18 +16,21 @@ import (
 // GRPCClient adapts sdk.Client to the SessionClient interface.
 //
 // Streaming model:
-//   - Interview turns (Start / Reply) each return a short-lived server-
-//     streaming RPC. The goroutine launched by drainInterviewStream consumes
-//     the entire stream: AgentTurn payloads are forwarded to chunkCh, other
-//     payloads are mapped to TrackerInput and forwarded to eventCh. When the
-//     stream ends chunkDone is closed so NextAssistantChunk callers can tell
-//     the turn is over.
-//   - Run progress events come from RunService.Tail (TailRun). startTailLoop
-//     launches that goroutine; it runs until the context is cancelled.
+//   - Each user turn opens an interview server stream (StartInterview on
+//     the first turn; ReplyInterview on subsequent turns). SendPrompt
+//     allocates a fresh chunkCh and chunkDone for the turn, then launches
+//     drainInterviewStream with those channels captured by value.
+//     AgentTurn payloads flow through chunkCh; other proto events become
+//     TrackerInput on eventCh; chunkDone is closed when the stream ends.
+//     Per-turn channels prevent stale chunks from leaking across turns
+//     and stop a dying goroutine from closing the new turn's done channel.
+//   - Run progress events come from RunService.Tail. startTailLoop runs
+//     until the context is cancelled or the stream ends.
 //
-// chunkDone is reset on each new turn via resetChunkDone; the channel is
-// swapped atomically under a single-goroutine write model (only subscribe
-// methods touch it).
+// Known limitation: drainInterviewStream does not observe ctx; its
+// goroutine outlives /quit until the underlying stream closes. Acceptable
+// for V1 dogfood since process exit closes the gRPC connection. T13/T14
+// follow-up may plumb a per-turn ctx to enable eager cancellation.
 type GRPCClient struct {
 	sdk        *sdk.Client
 	activeSess string
@@ -56,12 +59,6 @@ func NewGRPCClient(s *sdk.Client, workingDir string) *GRPCClient {
 		chunkDone:  make(chan struct{}),
 		eventCh:    make(chan TrackerInput, 64),
 	}
-}
-
-// resetChunkDone replaces chunkDone with a fresh, open channel. Must be
-// called before launching a new drainInterviewStream goroutine.
-func (g *GRPCClient) resetChunkDone() {
-	g.chunkDone = make(chan struct{})
 }
 
 // ActiveSessionID returns the current session ID (empty if none).
@@ -115,41 +112,60 @@ func (g *GRPCClient) ListSessions(ctx context.Context) ([]SessionSummary, error)
 }
 
 // SendPrompt sends the user's text to the server. On the first call to a
-// session it calls StartInterview (which includes the first user turn); on
-// subsequent calls it calls ReplyInterview. If no session is active one is
-// auto-created.
+// session it calls StartInterview (which includes the first user turn);
+// on subsequent calls it calls ReplyInterview. If no session is active
+// one is auto-created.
+//
+// Each turn allocates fresh chunkCh/chunkDone so chunks cannot leak
+// between turns and the previous goroutine cannot close the new turn's
+// done channel.
 func (g *GRPCClient) SendPrompt(ctx context.Context, prompt string) error {
 	if g.activeSess == "" {
 		if err := g.NewSession(ctx); err != nil {
 			return err
 		}
 	}
-	g.resetChunkDone()
+	// Allocate fresh per-turn channels and snapshot for the goroutine.
+	g.chunkCh = make(chan string, 64)
+	g.chunkDone = make(chan struct{})
+	chunkCh := g.chunkCh
+	done := g.chunkDone
+	sessID := g.activeSess
 
 	if !g.inInterview {
-		stream, err := g.sdk.StartInterview(ctx, g.activeSess, prompt, "", "", sdk.InterviewModels{})
+		stream, err := g.sdk.StartInterview(ctx, sessID, prompt, "", "", sdk.InterviewModels{})
 		if err != nil {
 			return err
 		}
 		g.inInterview = true
-		go g.drainInterviewStream(stream)
+		go g.drainInterviewStream(stream, chunkCh, done, sessID)
 	} else {
-		stream, err := g.sdk.ReplyInterview(ctx, g.activeSess, prompt)
+		stream, err := g.sdk.ReplyInterview(ctx, sessID, prompt)
 		if err != nil {
 			return err
 		}
-		go g.drainInterviewStream(stream)
+		go g.drainInterviewStream(stream, chunkCh, done, sessID)
 	}
 	return nil
 }
 
 // drainInterviewStream consumes a server-streaming InterviewEvent stream.
 // AgentTurn payloads are forwarded as chunks; other payloads become
-// TrackerInput events. The stream always ends with a close of chunkDone.
-func (g *GRPCClient) drainInterviewStream(stream interface {
-	Recv() (*gilv1.InterviewEvent, error)
-}) {
-	defer close(g.chunkDone)
+// TrackerInput events. The stream always ends with a close of the
+// supplied done channel — which is the *snapshot* taken at goroutine
+// launch, not whatever g.chunkDone happens to be later.
+//
+// Snapshotting prevents a stale goroutine from closing the new turn's
+// done channel after a swap (resetChunkDone).
+func (g *GRPCClient) drainInterviewStream(
+	stream interface {
+		Recv() (*gilv1.InterviewEvent, error)
+	},
+	chunkCh chan<- string,
+	done chan struct{},
+	sessionID string,
+) {
+	defer close(done)
 	for {
 		ev, err := stream.Recv()
 		if err != nil {
@@ -159,13 +175,13 @@ func (g *GRPCClient) drainInterviewStream(stream interface {
 		switch v := ev.GetPayload().(type) {
 		case *gilv1.InterviewEvent_AgentTurn:
 			if v.AgentTurn != nil && v.AgentTurn.Content != "" {
-				g.chunkCh <- v.AgentTurn.Content
+				chunkCh <- v.AgentTurn.Content
 			}
 		case *gilv1.InterviewEvent_SaturationUpdate:
 			if v.SaturationUpdate != nil {
 				g.eventCh <- TrackerInput{
 					Kind:        "interview.slot_filled",
-					SessionID:   g.activeSess,
+					SessionID:   sessionID,
 					SlotsFilled: int(v.SaturationUpdate.SlotsFilled),
 					SlotsTotal:  int(v.SaturationUpdate.SlotsTotal),
 					Saturation:  v.SaturationUpdate.Saturation,
@@ -175,7 +191,7 @@ func (g *GRPCClient) drainInterviewStream(stream interface {
 			if v.AdversaryFindings != nil {
 				g.eventCh <- TrackerInput{
 					Kind:        "interview.adversary",
-					SessionID:   g.activeSess,
+					SessionID:   sessionID,
 					AdvFindings: int(v.AdversaryFindings.Count),
 				}
 			}
@@ -183,13 +199,13 @@ func (g *GRPCClient) drainInterviewStream(stream interface {
 			if v.Stage != nil && v.Stage.To == "ready_to_freeze" {
 				g.eventCh <- TrackerInput{
 					Kind:      "interview.ready_to_freeze",
-					SessionID: g.activeSess,
+					SessionID: sessionID,
 				}
 			}
 		case *gilv1.InterviewEvent_SpecUpdate:
 			// SpecUpdate events are informational; no TrackerInput mapping.
 		case *gilv1.InterviewEvent_Error:
-			// Error events are logged via the done path; surface at stream close.
+			// Error events surface at stream close via deferred done.
 		}
 	}
 }
@@ -220,26 +236,29 @@ func (g *GRPCClient) startTailLoop(ctx context.Context) {
 	}()
 }
 
-// NextAssistantChunk returns the next text chunk from the current interview
-// turn. Returns ("", false, nil) when the turn is complete (chunkDone closed
-// and chunkCh drained). Returns ("", false, ctx.Err()) on context
-// cancellation.
+// NextAssistantChunk returns the next text chunk from the current
+// interview turn. The caller pulls in a loop until more==false.
+//
+// Contract:
+//   - A chunk received from chunkCh always returns more=true. The caller
+//     keeps pulling.
+//   - When chunkDone is closed AND chunkCh is drained, NextAssistantChunk
+//     returns ("", false, nil) — the turn is over.
+//   - On context cancellation, returns ("", false, ctx.Err()).
 func (g *GRPCClient) NextAssistantChunk(ctx context.Context) (string, bool, error) {
 	select {
 	case <-ctx.Done():
 		return "", false, ctx.Err()
-	case chunk, ok := <-g.chunkCh:
-		if !ok {
-			return "", false, nil
-		}
-		more := len(g.chunkCh) > 0
-		return chunk, more, nil
+	case chunk := <-g.chunkCh:
+		// We don't know if more chunks are coming; the producer signals
+		// completion by closing chunkDone, not by emptying chunkCh.
+		return chunk, true, nil
 	case <-g.chunkDone:
-		// Drain any last chunks that arrived before close.
+		// Producer is done. Drain any chunk that arrived between the
+		// last receive and the close.
 		select {
 		case chunk := <-g.chunkCh:
-			more := len(g.chunkCh) > 0
-			return chunk, more, nil
+			return chunk, true, nil
 		default:
 			return "", false, nil
 		}
@@ -312,7 +331,7 @@ func (g *GRPCClient) Diff(ctx context.Context) ([]render.DiffHunk, error) {
 // Merge is not implemented in the current SDK. It returns an error indicating
 // the user should apply the diff externally.
 //
-// TODO(T14): wire to a server-side apply endpoint when available.
+// TODO(T16): wire to a server-side apply endpoint when available.
 func (g *GRPCClient) Merge(_ context.Context) error {
 	return fmt.Errorf("merge is not yet supported by the server; apply the diff manually or use `git apply`")
 }
