@@ -185,8 +185,12 @@ func dispatchSlash(ctx context.Context, cfg Config, tr *Tracker, cmd, args strin
 			return nil
 		}
 		for i, s := range list {
+			short := s.ID
+			if len(short) > 6 {
+				short = short[:6]
+			}
 			r.SystemNote(render.NoteSystem,
-				fmt.Sprintf("%d. %s  %s  [%s]", i+1, s.ID[:6], s.Name, s.Phase))
+				fmt.Sprintf("%d. %s  %s  [%s]", i+1, short, s.Name, s.Phase))
 		}
 	case "switch":
 		if args == "" {
