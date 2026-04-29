@@ -23,19 +23,20 @@ import (
 // root.go's RunE shim) — calling it directly is for users who want the
 // chat surface even when their stdout is piped (e.g. tee'd into a log).
 //
-// The chat REPL's contract:
-//   - Stage 0 (entry): print a banner, then read the first user message.
-//   - Stage 1 (intent): classify the message via core/intent. Empty input
-//     re-prompts; STATUS / HELP / EXPLAIN render directly; NEW_TASK and
-//     RESUME hand off to the existing interview / resume flows.
-//   - Stage 2 (handoff): for NEW_TASK we create a session pre-filled with
-//     the extracted goal + workspace, then invoke the same interview
-//     loop the standalone `gil interview <id>` uses. For RESUME we hand
-//     the session ID (or a fuzzy-picked one) to that flow.
+// chat is the V1 chat surface for gil. It collapses the previous
+// verb-routing UI into a single REPL: the user types prompts in free
+// text, slash commands manage session lifecycle (/sessions /switch /new
+// /spec /status /diff /merge /run /quit /help), and a tracker maps
+// daemon events to a one-line status strip rendered between turns.
 //
-// The chat surface deliberately reuses existing subcommand implementations
-// rather than re-implementing them — this keeps "gil interview <id>" and
-// "chat" paths bug-for-bug equivalent.
+// Pre-daemon onboarding (no-init / no-creds short-circuit) lives in
+// chat_onboarding.go and is gated by detectPreDaemonState BEFORE the
+// daemon is dialed.
+//
+// The actual REPL lives in cli/internal/chat/repl. This file is the
+// thin cobra entry point that constructs a SessionClient (via
+// repl.NewGRPCClient) and a Renderer (StdoutChatRenderer) and hands
+// off to repl.Run.
 func chatCmd() *cobra.Command {
 	var socket, providerName, model string
 	c := &cobra.Command{
@@ -60,36 +61,14 @@ terminal — gil chat is the explicit form for piped or scripted use.`,
 	return c
 }
 
-// runChat is the testable entrypoint. cmd is used for in/out plumbing so
-// cobra's Execute(args...) test pattern works without poking at the
-// process-wide os.Stdin/Stdout. socket / providerName / model come from
-// the flags or the no-arg shim defaults.
+// runChat is the chat command entry point. After the onboarding gate,
+// it dials the daemon, constructs a gRPC SessionClient and a stdout
+// renderer, then runs repl.Run until the user types /quit or hits EOF.
 //
-// The function returns nil on a clean exit (user typed /quit or sent EOF
-// at the top-level prompt). All other errors propagate so the caller can
-// surface them via cliutil.Exit; this matches every other subcommand's
-// shape.
-//
-// PHASE 24 REDESIGN: The chat dispatcher used to be a switch on a regex
-// classifier (intent.Classify -> Kind -> handler). That worked for clean
-// wordings but committed protests/clarifications as new tasks (real bug:
-// "아니 안녕ㄹ이라니까" = "no, I told you it's hello" got recorded as a
-// goal because it was 12+ chars and didn't match the greeting regex).
-//
-// The new design follows Cline / Codex / aider / opencode: every user
-// turn goes to a small LLM with tool definitions; the LLM decides via
-// tool_use whether to start an interview, show status, resume a session,
-// or just keep talking. Greetings stay greetings because the model
-// doesn't emit a tool call; protests stay protests for the same reason.
-//
-// Regex fast-path is kept ONLY for the literal `/quit` shortcut so users
-// can leave even when the LLM is unreachable. Everything else routes
-// through Conversation.Send.
-//
-// Offline fallback: when no provider can be resolved (no credstore entry,
-// no env var), we degrade to a regex-only "limited mode" surface so the
-// chat is still usable for status/resume/quit; we explicitly tell the
-// user to run `gil auth login` for the full experience.
+// providerName and model parameters are accepted from the cobra command
+// but currently unused — repl.Run drives prompts through the daemon's
+// configured provider. They will return when V1.1 wires runtime prompt
+// echo to a real LLM (see /docs/plans/phase-26-implementation.md T10).
 func runChat(cmd *cobra.Command, socket, providerName, model string) error {
 	out := cmd.OutOrStdout()
 	in := cmd.InOrStdin()
@@ -114,8 +93,6 @@ func runChat(cmd *cobra.Command, socket, providerName, model string) error {
 		return runOnboardingNoCreds(cmd, in, out, p, g)
 	}
 
-	// Daemon up — we need it for ListSessions to seed the conversation
-	// gating ("hasSessions") and for any handoff that follows.
 	if err := ensureDaemon(socket, defaultBase()); err != nil {
 		return err
 	}
@@ -124,15 +101,12 @@ func runChat(cmd *cobra.Command, socket, providerName, model string) error {
 		return fmt.Errorf("dial: %w", err)
 	}
 
-	listCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	allSessions, err := cli.ListSessions(listCtx, 200)
-	cancel()
-	if err != nil {
-		return wrapRPCError(err)
-	}
-	_ = filterActiveSessions(allSessions) // pre-compute to preserve ListSessions side-effects; T13 may remove this block
-
 	workingDir, _ := cmd.Flags().GetString("working-dir")
+	if workingDir == "" {
+		if cwd, err := os.Getwd(); err == nil {
+			workingDir = cwd
+		}
+	}
 	grpcClient := repl.NewGRPCClient(cli, workingDir)
 	defer grpcClient.Close()
 

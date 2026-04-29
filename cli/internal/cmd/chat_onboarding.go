@@ -178,8 +178,8 @@ type onboardStep struct {
 
 // renderOnboardCard prints a focused onboarding panel — title plate +
 // rule + body lines + indented command list. Visually consistent with
-// the chat banner (renderChatBanner) so the user doesn't feel like
-// they've been kicked into a different application.
+// the REPL's chat surface so the user doesn't feel like they've been
+// kicked into a different application.
 func renderOnboardCard(out io.Writer, p uistyle.Palette, g uistyle.Glyphs, title string, body []string, steps []onboardStep) {
 	fmt.Fprintln(out)
 	fmt.Fprintf(out, "  %s  ─  %s\n", p.Primary("G I L"), p.Surface(title))
