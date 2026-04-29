@@ -161,12 +161,14 @@ func Root() *cobra.Command {
 	// once, then run sessions, then diagnose / maintain. Cobra renders
 	// each group as a header in the help output (commands without a
 	// GroupID fall under "Additional Commands").
+	// Phase 26 T14 — add "advanced" group for verb-mode (headless) commands.
 	root.AddGroup(
 		&cobra.Group{ID: "setup", Title: "Setup:"},
 		&cobra.Group{ID: "session", Title: "Sessions & runs:"},
 		&cobra.Group{ID: "diag", Title: "Diagnostics & history:"},
 		&cobra.Group{ID: "tools", Title: "Tools & integration:"},
 		&cobra.Group{ID: "maint", Title: "Maintenance:"},
+		&cobra.Group{ID: "advanced", Title: "Advanced (headless / scripting):"},
 	)
 	addCmd := func(c *cobra.Command, group string) {
 		c.GroupID = group
@@ -178,21 +180,21 @@ func Root() *cobra.Command {
 
 	addCmd(chatCmd(), "session")
 	addCmd(newCmd(), "session")
-	addCmd(interviewCmd(), "session")
+	addCmd(interviewCmd(), "advanced")
 	addCmd(resumeCmd(), "session")
-	addCmd(runCmd(), "session")
-	addCmd(watchCmd(), "session")
-	addCmd(eventsCmd(), "session")
-	addCmd(specCmd(), "session")
+	addCmd(runCmd(), "advanced")
+	addCmd(watchCmd(), "advanced")
+	addCmd(eventsCmd(), "advanced")
+	addCmd(specCmd(), "advanced")
 	addCmd(clarifyCmd(), "session")
 	addCmd(sessionCmd(), "session")
 
 	addCmd(statusCmd(), "diag")
 	addCmd(costCmd(), "diag")
-	addCmd(statsCmd(), "diag")
+	addCmd(statsCmd(), "advanced")
 	addCmd(restoreCmd(), "diag")
-	addCmd(exportCmd(), "diag")
-	addCmd(importCmd(), "diag")
+	addCmd(exportCmd(), "advanced")
+	addCmd(importCmd(), "advanced")
 
 	addCmd(mcpCmd(), "tools")
 	addCmd(permissionsCmd(), "tools")
