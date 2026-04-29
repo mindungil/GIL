@@ -306,3 +306,25 @@ func TestLoop_SlashSessions_ShortID_NoPanic(t *testing.T) {
 	require.Len(t, lines, 1)
 	require.Contains(t, lines[0], " ab ", "short ID should appear verbatim")
 }
+
+func TestLoop_RunPhase_PromptEchoesV11(t *testing.T) {
+	mock := render.NewMockRenderer()
+	fc := &fakeClient{
+		sessionID: "01HQ",
+		events: []TrackerInput{
+			{Kind: "run.started", MaxIter: 100, SessionID: "01HQ"},
+		},
+	}
+	in := strings.NewReader("hey, also add a tooltip\n/quit\n")
+	require.NoError(t, Run(context.Background(), Config{
+		In: in, Renderer: mock, Client: fc,
+	}))
+	require.Empty(t, fc.sentPrompts, "run-phase prompt must not be sent in V1")
+	var foundEcho bool
+	for _, c := range mock.Calls {
+		if c.Method == "SystemNote" && c.Kind == render.NoteV11 {
+			foundEcho = true
+		}
+	}
+	require.True(t, foundEcho)
+}

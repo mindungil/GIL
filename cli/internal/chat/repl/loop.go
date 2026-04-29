@@ -99,6 +99,11 @@ func Run(ctx context.Context, cfg Config) error {
 			}
 
 		case InputPrompt:
+			if tr.State().Phase == render.PhaseRun || tr.State().Phase == render.PhaseStuck {
+				cfg.Renderer.SystemNote(render.NoteV11,
+					"run-time prompts are V1.1; for now wait for done, or `gil stop <id>` from another shell")
+				continue
+			}
 			if err := cfg.Client.SendPrompt(ctx, args); err != nil {
 				cfg.Renderer.SystemNote(render.NoteSystem,
 					fmt.Sprintf("send failed: %v", err))
