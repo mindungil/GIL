@@ -2,6 +2,7 @@ package repl
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -17,6 +18,7 @@ type fakeClient struct {
 	assistantChunks []string
 	events          []TrackerInput
 	sentPrompts     []string
+	eventErr        error
 }
 
 func (f *fakeClient) SendPrompt(_ context.Context, prompt string) error {
@@ -32,6 +34,11 @@ func (f *fakeClient) NextAssistantChunk(_ context.Context) (string, bool, error)
 	return c, len(f.assistantChunks) > 0, nil
 }
 func (f *fakeClient) NextEvent(_ context.Context) (TrackerInput, bool, error) {
+	if f.eventErr != nil {
+		err := f.eventErr
+		f.eventErr = nil // fire once to avoid infinite loop
+		return TrackerInput{}, false, err
+	}
 	if len(f.events) == 0 {
 		return TrackerInput{}, false, nil
 	}
@@ -112,6 +119,70 @@ func TestLoop_SessionScopedSlashWithoutSession_Errors(t *testing.T) {
 	var found bool
 	for _, c := range mock.Calls {
 		if c.Method == "SystemNote" && strings.Contains(c.Text, "no active session") {
+			found = true
+			break
+		}
+	}
+	require.True(t, found)
+}
+
+func TestLoop_ContextCancelled_ReturnsErr(t *testing.T) {
+	mock := render.NewMockRenderer()
+	in := strings.NewReader("hi\n/quit\n")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel before Run starts
+
+	err := Run(ctx, Config{
+		In:       in,
+		Renderer: mock,
+		Client:   &fakeClient{},
+	})
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestLoop_EventStreamError_EmitsNote(t *testing.T) {
+	mock := render.NewMockRenderer()
+	fc := &fakeClient{eventErr: errors.New("boom")}
+	in := strings.NewReader("/quit\n")
+
+	err := Run(context.Background(), Config{
+		In:       in,
+		Renderer: mock,
+		Client:   fc,
+	})
+	require.NoError(t, err)
+	var found bool
+	for _, c := range mock.Calls {
+		if c.Method == "SystemNote" && strings.Contains(c.Text, "event stream error") {
+			found = true
+			break
+		}
+	}
+	require.True(t, found)
+}
+
+func TestLoop_DrainEvents_SlotFilled_EmitsSpecNote(t *testing.T) {
+	mock := render.NewMockRenderer()
+	fc := &fakeClient{
+		events: []TrackerInput{{
+			Kind:        "interview.slot_filled",
+			SessionID:   "sess-1",
+			SlotsFilled: 3,
+			SlotsTotal:  7,
+			Saturation:  0.42,
+		}},
+	}
+	in := strings.NewReader("/quit\n")
+
+	err := Run(context.Background(), Config{
+		In:       in,
+		Renderer: mock,
+		Client:   fc,
+	})
+	require.NoError(t, err)
+	var found bool
+	for _, c := range mock.Calls {
+		if c.Method == "SystemNote" && strings.Contains(c.Text, "slot filled (3/7") {
 			found = true
 			break
 		}

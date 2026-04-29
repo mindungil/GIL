@@ -35,7 +35,12 @@ func Run(ctx context.Context, cfg Config) error {
 	cfg.Renderer.Banner(tr.State())
 
 	scanner := bufio.NewScanner(cfg.In)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1<<20)
 	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
 		// Drain any pending events into the tracker before drawing strip.
 		drainEvents(ctx, cfg, tr)
 
@@ -43,6 +48,11 @@ func Run(ctx context.Context, cfg Config) error {
 		cfg.Renderer.PromptCue()
 
 		if !scanner.Scan() {
+			if err := scanner.Err(); err != nil {
+				cfg.Renderer.SystemNote(render.NoteSystem,
+					fmt.Sprintf("input error: %v", err))
+				return err
+			}
 			return nil // EOF
 		}
 		line := scanner.Text()
@@ -100,7 +110,12 @@ func Run(ctx context.Context, cfg Config) error {
 func drainEvents(ctx context.Context, cfg Config, tr *Tracker) {
 	for {
 		in, ok, err := cfg.Client.NextEvent(ctx)
-		if err != nil || !ok {
+		if err != nil {
+			cfg.Renderer.SystemNote(render.NoteSystem,
+				fmt.Sprintf("event stream error: %v", err))
+			return
+		}
+		if !ok {
 			return
 		}
 		prev := tr.State()
