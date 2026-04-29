@@ -3,7 +3,6 @@ package cmd
 import (
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"strings"
 	"time"
@@ -14,7 +13,6 @@ import (
 	"github.com/mindungil/gil/cli/internal/chat/render"
 	"github.com/mindungil/gil/cli/internal/chat/repl"
 	"github.com/mindungil/gil/cli/internal/cmd/uistyle"
-	"github.com/mindungil/gil/core/credstore"
 	"github.com/mindungil/gil/sdk"
 )
 
@@ -127,169 +125,6 @@ func agentLine(p uistyle.Palette, g uistyle.Glyphs, text string) string {
 	return p.Dim(g.QuoteBar) + " " + text
 }
 
-// renderChatStatus is the chat-flavoured rendering of the session list.
-// Differs from runSummary in that we drop the noisy header and budget
-// columns — the chat surface is conversational, so a tighter list reads
-// better between turns.
-func renderChatStatus(out io.Writer, g uistyle.Glyphs, p uistyle.Palette, sessions []*sdk.Session) {
-	if len(sessions) == 0 {
-		fmt.Fprintln(out, agentLine(p, g, "No sessions yet."))
-		return
-	}
-	fmt.Fprintln(out, agentLine(p, g, fmt.Sprintf("%d session(s):", len(sessions))))
-	for i, s := range sessions {
-		if i >= 10 {
-			fmt.Fprintln(out, agentLine(p, g, p.Dim(fmt.Sprintf("  + %d more (run `gil status` for the full list)", len(sessions)-10))))
-			break
-		}
-		marker, role := sessionStatusGlyph(g, s.Status)
-		coloured := colourMarker(p, marker, role)
-		goal := truncRune(s.GoalHint, 56)
-		fmt.Fprintf(out, "%s   %s  %-22s %s\n",
-			agentLine(p, g, ""), coloured, p.Dim(displayName(s)), goal)
-	}
-}
-
-// renderChatHelp prints a one-screen capability primer. We keep it
-// conversational rather than reproducing the cobra --help output —
-// users who want the full surface still get it via `gil --help`.
-//
-// Phase 25 A2 — grouped by where the user is in their session
-// (starting / working / recovery) instead of a flat command dump. The
-// flat list optimised for "everything we can do"; the grouped form
-// optimises for "what should I do RIGHT NOW", which matches how the
-// chat surface is actually consulted (mid-task, looking for the next
-// move) rather than browsed.
-func renderChatHelp(out io.Writer, g uistyle.Glyphs, p uistyle.Palette) {
-	type group struct {
-		title string
-		items []string
-	}
-	groups := []group{
-		{
-			"Just starting",
-			[]string{
-				"Tell me a task in plain English — I'll ask follow-ups, then run autonomously.",
-				"Say \"explain\" for a short primer on what gil does.",
-			},
-		},
-		{
-			"Currently working",
-			[]string{
-				"Say \"status\" to see what's running.",
-				"Say \"continue\" to resume a previous session.",
-				"Outside chat:  gil watch <id>   gil events <id> --tail",
-			},
-		},
-		{
-			"Recovery",
-			[]string{
-				"/quit (or Ctrl-D)     leave the chat",
-				"gil doctor            check setup",
-				"gil auth login        (re)register a provider",
-				"gil session rm <id>   delete a stuck session",
-			},
-		},
-	}
-	fmt.Fprintln(out, agentLine(p, g, "Here's what I can do, grouped by where you are."))
-	for _, gr := range groups {
-		fmt.Fprintln(out, agentLine(p, g, ""))
-		fmt.Fprintln(out, agentLine(p, g, p.Surface(gr.title)))
-		for _, it := range gr.items {
-			fmt.Fprintln(out, agentLine(p, g, "  "+p.Dim("•")+" "+it))
-		}
-	}
-}
-
-// renderChatExplain prints a short "what is gil?" primer. Used when the
-// classifier identifies a meta-question.
-func renderChatExplain(out io.Writer, g uistyle.Glyphs, p uistyle.Palette) {
-	lines := []string{
-		"gil is an autonomous coding harness. The flow:",
-		"",
-		"  1. Interview — I ask you about the task until I have enough to lock a spec.",
-		"  2. Freeze — the spec becomes immutable; the agent loop reads from it.",
-		"  3. Run — the agent edits, runs verifiers, and self-corrects until done or stuck.",
-		"",
-		"You only talk to me at step 1. Steps 2-3 happen on their own.",
-	}
-	for _, ln := range lines {
-		fmt.Fprintln(out, agentLine(p, g, ln))
-	}
-}
-
-// credentialFor reads the named credstore entry; returns nil on miss.
-func credentialFor(cmd *cobra.Command, name credstore.ProviderName) *credstore.Credential {
-	store := newStoreFor(cmd)
-	ctx := cmd.Context()
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	cred, err := store.Get(ctx, name)
-	if err != nil {
-		return nil
-	}
-	return cred
-}
-
-// intentModelFor returns the model name to use for intent classification
-// given a provider. When the user supplied an explicit --model we honour
-// it; otherwise we pick the smallest model the provider exposes so a
-// classification call costs well under a cent.
-//
-// PHASE 25 CHANGE: previously hardcoded "qwen3.6-27b" as a vllm default
-// — that was the dev's local model, not a general one. The new
-// resolution order is:
-//
-//  1. --model flag (userModel) — explicit user pick wins.
-//  2. credstore.Credential.Model — set by the wizard at registration.
-//  3. GIL_VLLM_MODEL env var (vllm only) — legacy override.
-//  4. Hardcoded sensible default for paid providers; "" for vllm so
-//     the chat surface refuses to start the LLM-driven path and tells
-//     the user to run `gil auth login vllm` to pick a model.
-//
-// The two-arg form preserved here goes through resolveIntentModel with
-// no cmd — it doesn't read credstore. The cmd-aware form is what
-// pickIntentProvider actually calls in production.
-func intentModelFor(providerName, userModel string) string {
-	return resolveIntentModel(nil, providerName, userModel)
-}
-
-// resolveIntentModel is the cmd-aware variant of intentModelFor. The
-// wizard-set credstore.Model takes precedence over hardcoded defaults
-// so a vllm user who registered "qwen3-32b" via `gil auth login vllm`
-// actually gets that, not a fallback that ignores their setup.
-func resolveIntentModel(cmd *cobra.Command, providerName, userModel string) string {
-	if userModel != "" {
-		return userModel
-	}
-	if cmd != nil {
-		if cred := credentialFor(cmd, credstore.ProviderName(providerName)); cred != nil && cred.Model != "" {
-			return cred.Model
-		}
-	}
-	switch providerName {
-	case "anthropic":
-		return "claude-haiku-4-5"
-	case "openai":
-		return "gpt-4o-mini"
-	case "openrouter":
-		return "anthropic/claude-haiku-4-5"
-	case "vllm":
-		// vllm has no canonical default. Honour the legacy env var
-		// override; otherwise return "" — the caller (chat surface)
-		// will refuse the LLM-driven path and point the user at the
-		// wizard. The previous hardcoded "qwen3.6-27b" was the dev's
-		// local model and broke "general user" assumptions.
-		if v := os.Getenv("GIL_VLLM_MODEL"); v != "" {
-			return v
-		}
-		return ""
-	default:
-		return ""
-	}
-}
-
 // filterActiveSessions hides abandoned sessions from the chat preamble.
 // Phase 24 § E rule: a session created more than a day ago that's still
 // in the CREATED status with zero events is almost certainly a dummy
@@ -318,43 +153,6 @@ func filterActiveSessions(in []*sdk.Session) []*sdk.Session {
 		out = append(out, s)
 	}
 	return out
-}
-
-// matchSessionByPrefix finds sessions whose ID starts with the given
-// prefix (case-insensitive). Returns all matches so the caller can
-// disambiguate when the prefix is too short.
-func matchSessionByPrefix(sessions []*sdk.Session, prefix string) []*sdk.Session {
-	var out []*sdk.Session
-	for _, s := range sessions {
-		if s == nil {
-			continue
-		}
-		if strings.HasPrefix(strings.ToLower(s.ID), prefix) {
-			out = append(out, s)
-		}
-	}
-	return out
-}
-
-// isQuitWord returns true for the chat surface's exit lexicon.
-// Includes "/quit" (matches run.go's interactive REPL) and bare
-// "quit"/"exit"/"bye" because users don't usually type a leading slash.
-func isQuitWord(s string) bool {
-	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "/quit", "/q", "/exit", "quit", "exit", "bye":
-		return true
-	}
-	return false
-}
-
-// shortHex returns the first 12 chars of a hex string for display. Used
-// by the freeze confirmation line where the full SHA-256 would be
-// overwhelming.
-func shortHex(h string) string {
-	if len(h) <= 12 {
-		return h
-	}
-	return h[:12]
 }
 
 // stdoutIsTTY reports whether stdout is connected to a terminal. Used
