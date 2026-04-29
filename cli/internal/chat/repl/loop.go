@@ -9,6 +9,12 @@ import (
 	"github.com/mindungil/gil/cli/internal/chat/render"
 )
 
+// SessionSummary carries the display-relevant fields for a single session
+// in the /sessions listing.
+type SessionSummary struct {
+	ID, Name, Phase string
+}
+
 // SessionClient abstracts the gRPC session boundary so loop tests
 // don't need a live daemon. The cmd/chat.go integration provides a
 // real implementation backed by sdk.Client.
@@ -16,6 +22,17 @@ type SessionClient interface {
 	SendPrompt(ctx context.Context, prompt string) error
 	NextAssistantChunk(ctx context.Context) (chunk string, more bool, err error)
 	NextEvent(ctx context.Context) (in TrackerInput, ok bool, err error)
+
+	ActiveSessionID() string
+	Spec(ctx context.Context) (*render.SpecView, error)
+	Status(ctx context.Context) (string, error)
+	Diff(ctx context.Context) ([]render.DiffHunk, error)
+	Merge(ctx context.Context) error
+	StartRun(ctx context.Context) error
+	ListSessions(ctx context.Context) ([]SessionSummary, error)
+	SwitchSession(ctx context.Context, idOrName string) error
+	NewSession(ctx context.Context) error
+
 	Close() error
 }
 
@@ -71,7 +88,7 @@ func Run(ctx context.Context, cfg Config) error {
 			if cmd == "quit" {
 				return nil
 			}
-			if SlashRequiresSession(cmd) && tr.State().SessionID == "" {
+			if SlashRequiresSession(cmd) && cfg.Client.ActiveSessionID() == "" {
 				cfg.Renderer.SystemNote(render.NoteSystem,
 					"no active session — start one with a prompt or /sessions")
 				continue
@@ -149,13 +166,67 @@ func emitDeltaNotes(r render.Renderer, prev, cur render.SessionState, ev Tracker
 	}
 }
 
-// dispatchSlash is a stub at this stage; Task 9 fills in real
-// behaviors. We return nil so unknown-but-valid slashes don't crash.
-func dispatchSlash(_ context.Context, cfg Config, _ *Tracker, cmd, _ string) error {
+// dispatchSlash routes each known slash command to the appropriate
+// SessionClient call or renderer method.
+func dispatchSlash(ctx context.Context, cfg Config, tr *Tracker, cmd, args string) error {
+	r := cfg.Renderer
+	c := cfg.Client
 	switch cmd {
 	case "help":
-		cfg.Renderer.SystemNote(render.NoteSystem,
+		r.SystemNote(render.NoteSystem,
 			"slash commands: /sessions /switch /new /spec /status /diff /merge /run /quit /help")
+	case "sessions":
+		list, err := c.ListSessions(ctx)
+		if err != nil {
+			return err
+		}
+		if len(list) == 0 {
+			r.SystemNote(render.NoteSystem, "no sessions — type a prompt to start one")
+			return nil
+		}
+		for i, s := range list {
+			r.SystemNote(render.NoteSystem,
+				fmt.Sprintf("%d. %s  %s  [%s]", i+1, s.ID[:6], s.Name, s.Phase))
+		}
+	case "switch":
+		if args == "" {
+			r.SystemNote(render.NoteSystem, "/switch <id|name>")
+			return nil
+		}
+		return c.SwitchSession(ctx, args)
+	case "new":
+		return c.NewSession(ctx)
+	case "spec":
+		v, err := c.Spec(ctx)
+		if err != nil {
+			return err
+		}
+		r.Spec(v)
+	case "status":
+		s, err := c.Status(ctx)
+		if err != nil {
+			return err
+		}
+		r.SystemNote(render.NoteSystem, s)
+	case "diff":
+		h, err := c.Diff(ctx)
+		if err != nil {
+			return err
+		}
+		r.Diff(h)
+	case "merge":
+		ok, err := r.Confirm("Apply diff to working tree?", false)
+		if err != nil || !ok {
+			return err
+		}
+		return c.Merge(ctx)
+	case "run":
+		if tr.State().Phase != render.PhaseAwaitingConfirm {
+			r.SystemNote(render.NoteSystem,
+				"spec is not ready to freeze yet — keep iterating with prompts")
+			return nil
+		}
+		return c.StartRun(ctx)
 	}
 	return nil
 }

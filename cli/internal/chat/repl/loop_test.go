@@ -19,6 +19,12 @@ type fakeClient struct {
 	events          []TrackerInput
 	sentPrompts     []string
 	eventErr        error
+	sessionID       string
+	spec            *render.SpecView
+	statusText      string
+	diffHunks       []render.DiffHunk
+	merged          bool
+	runStarted      bool
 }
 
 func (f *fakeClient) SendPrompt(_ context.Context, prompt string) error {
@@ -46,7 +52,16 @@ func (f *fakeClient) NextEvent(_ context.Context) (TrackerInput, bool, error) {
 	f.events = f.events[1:]
 	return e, true, nil
 }
-func (f *fakeClient) Close() error { return nil }
+func (f *fakeClient) Close() error                                                { return nil }
+func (f *fakeClient) ActiveSessionID() string                                     { return f.sessionID }
+func (f *fakeClient) Spec(_ context.Context) (*render.SpecView, error)            { return f.spec, nil }
+func (f *fakeClient) Status(_ context.Context) (string, error)                    { return f.statusText, nil }
+func (f *fakeClient) Diff(_ context.Context) ([]render.DiffHunk, error)           { return f.diffHunks, nil }
+func (f *fakeClient) Merge(_ context.Context) error                               { f.merged = true; return nil }
+func (f *fakeClient) StartRun(_ context.Context) error                            { f.runStarted = true; return nil }
+func (f *fakeClient) ListSessions(_ context.Context) ([]SessionSummary, error)    { return nil, nil }
+func (f *fakeClient) SwitchSession(_ context.Context, _ string) error             { f.sessionID = "switched"; return nil }
+func (f *fakeClient) NewSession(_ context.Context) error                          { f.sessionID = "new"; return nil }
 
 func TestLoop_BarePrompt_SendsAndRendersAssistant(t *testing.T) {
 	mock := render.NewMockRenderer()
@@ -188,4 +203,78 @@ func TestLoop_DrainEvents_SlotFilled_EmitsSpecNote(t *testing.T) {
 		}
 	}
 	require.True(t, found)
+}
+
+func TestLoop_SlashSpec_RendersSpec(t *testing.T) {
+	mock := render.NewMockRenderer()
+	fc := &fakeClient{
+		spec:      &render.SpecView{YAML: "goal:\n  one_liner: x\n"},
+		sessionID: "01HQ",
+	}
+	in := strings.NewReader("/spec\n/quit\n")
+	require.NoError(t, Run(context.Background(), Config{
+		In: in, Renderer: mock, Client: fc,
+	}))
+	var found bool
+	for _, c := range mock.Calls {
+		if c.Method == "Spec" && c.Spec != nil && strings.Contains(c.Spec.YAML, "one_liner") {
+			found = true
+		}
+	}
+	require.True(t, found)
+}
+
+func TestLoop_SlashDiff_RendersHunks(t *testing.T) {
+	mock := render.NewMockRenderer()
+	fc := &fakeClient{
+		diffHunks: []render.DiffHunk{{Path: "a.go", Added: 3, Removed: 1}},
+		sessionID: "01HQ",
+	}
+	in := strings.NewReader("/diff\n/quit\n")
+	require.NoError(t, Run(context.Background(), Config{
+		In: in, Renderer: mock, Client: fc,
+	}))
+	var found bool
+	for _, c := range mock.Calls {
+		if c.Method == "Diff" && len(c.Hunks) == 1 && c.Hunks[0].Path == "a.go" {
+			found = true
+		}
+	}
+	require.True(t, found)
+}
+
+func TestLoop_SlashMerge_PromptsConfirm(t *testing.T) {
+	mock := render.NewMockRenderer()
+	mock.ConfirmAnswers = []bool{true}
+	fc := &fakeClient{sessionID: "01HQ"}
+	in := strings.NewReader("/merge\n/quit\n")
+	require.NoError(t, Run(context.Background(), Config{
+		In: in, Renderer: mock, Client: fc,
+	}))
+	var foundConfirm bool
+	for _, c := range mock.Calls {
+		if c.Method == "Confirm" && strings.Contains(c.Text, "Apply") {
+			foundConfirm = true
+		}
+	}
+	require.True(t, foundConfirm)
+	require.True(t, fc.merged, "client.Merge should have been called after Y")
+}
+
+func TestLoop_SlashRun_RequiresAwaitingConfirmPhase(t *testing.T) {
+	mock := render.NewMockRenderer()
+	fc := &fakeClient{sessionID: "01HQ"}
+	in := strings.NewReader("/run\n/quit\n")
+	require.NoError(t, Run(context.Background(), Config{
+		In: in, Renderer: mock, Client: fc,
+	}))
+	// Phase is idle (no awaiting-confirm event), so /run should refuse.
+	var found bool
+	for _, c := range mock.Calls {
+		if c.Method == "SystemNote" && strings.Contains(c.Text, "spec is not ready") {
+			found = true
+		}
+	}
+	require.True(t, found)
+	require.False(t, fc.runStarted)
 }
