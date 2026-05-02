@@ -59,7 +59,38 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		m.input.ti.Width = msg.Width - 8 // panel inner width minus › prefix gutter
 		return m, nil
+
+	case tea.KeyMsg:
+		switch msg.Type {
+		case tea.KeyCtrlC:
+			return m, tea.Quit
+		case tea.KeyUp:
+			m.input.historyUp()
+			return m, nil
+		case tea.KeyDown:
+			m.input.historyDown()
+			return m, nil
+		case tea.KeyEnter:
+			text := m.input.submit()
+			if text == "" {
+				return m, nil
+			}
+			if text == "/quit" || text == "/exit" {
+				return m, tea.Quit
+			}
+			// Echo to transcript so the user sees what they sent.
+			m.transcript = append(m.transcript, "›  "+text)
+			m.firstTurnDone = true
+			// Stream dispatch wired in Task 8.
+			return m, nil
+		default:
+			// Forward to the textinput so typing works.
+			var cmd tea.Cmd
+			m.input.ti, cmd = m.input.ti.Update(msg)
+			return m, cmd
+		}
 	}
 	return m, nil
 }

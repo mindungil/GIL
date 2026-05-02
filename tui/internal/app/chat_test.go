@@ -193,3 +193,54 @@ func TestChatSession_FormatRow_NarrowMode(t *testing.T) {
 		t.Fatalf("narrow row should not include phase column, got %q", narrow)
 	}
 }
+
+func TestChatUpdate_EnterSubmitsAndAppendsToTranscript(t *testing.T) {
+	m := newChatModel("/tmp/test.sock")
+	m.width = 100
+	m.height = 32
+	m.input.ti.SetValue("hi there")
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	cm := updated.(*chatModel)
+	// Buffer cleared.
+	if cm.input.ti.Value() != "" {
+		t.Fatalf("buffer should clear on submit, got %q", cm.input.ti.Value())
+	}
+	// Transcript has the user line.
+	if len(cm.transcript) == 0 || !strings.Contains(cm.transcript[len(cm.transcript)-1], "hi there") {
+		t.Fatalf("transcript missing user line: %v", cm.transcript)
+	}
+	// firstTurnDone flips on first submit.
+	if !cm.firstTurnDone {
+		t.Fatalf("expected firstTurnDone=true after first submit")
+	}
+}
+
+func TestChatUpdate_CtrlC_ReturnsQuitCmd(t *testing.T) {
+	m := newChatModel("/tmp/test.sock")
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	if cmd == nil {
+		t.Fatalf("Ctrl+C should return a Quit cmd")
+	}
+}
+
+func TestChatUpdate_SlashQuit_ReturnsQuitCmd(t *testing.T) {
+	m := newChatModel("/tmp/test.sock")
+	m.input.ti.SetValue("/quit")
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatalf("/quit should return a Quit cmd")
+	}
+}
+
+func TestChatUpdate_Up_RecallsHistory(t *testing.T) {
+	m := newChatModel("/tmp/test.sock")
+	m.input.history = []string{"first", "second"}
+	m.input.histIdx = -1
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	cm := updated.(*chatModel)
+	if cm.input.ti.Value() != "second" {
+		t.Fatalf("up → want \"second\", got %q", cm.input.ti.Value())
+	}
+}
