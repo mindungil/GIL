@@ -6,6 +6,7 @@ require (
 	github.com/mindungil/gil/core v0.0.0-00010101000000-000000000000
 	github.com/mindungil/gil/proto v0.0.0
 	github.com/mindungil/gil/sdk v0.0.0-00010101000000-000000000000
+	github.com/mindungil/gil/tui v0.0.0-00010101000000-000000000000
 	github.com/oklog/ulid/v2 v2.1.1
 	github.com/spf13/cobra v1.10.2
 	github.com/stretchr/testify v1.11.1
@@ -33,4 +34,5 @@ replace (
 	github.com/mindungil/gil/core => ../core
 	github.com/mindungil/gil/proto => ../proto
 	github.com/mindungil/gil/sdk => ../sdk
+	github.com/mindungil/gil/tui => ../tui
 )

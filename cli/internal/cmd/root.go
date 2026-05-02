@@ -5,6 +5,7 @@ import (
 
 	"github.com/mindungil/gil/core/paths"
 	"github.com/mindungil/gil/core/version"
+	tuirun "github.com/mindungil/gil/tui/run"
 )
 
 // outputFormat is the value of the persistent `--output` flag wired in
@@ -123,7 +124,11 @@ func Root() *cobra.Command {
 		// where stdout points.
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if !noChat && stdoutIsTTY() {
-				return runChat(cmd, defaultSocket(), "", "")
+				// Phase 26.6: TTY chat surface lives in the tui module —
+				// a persistent panel layout with a magenta-bordered prompt
+				// panel as the visual focal point. Non-TTY and --no-chat
+				// continue to fall through to the line-based summary.
+				return tuirun.Chat(cmd.Context(), defaultSocket())
 			}
 			return runSummary(cmd.OutOrStdout(), defaultSocket(), defaultBase(), asciiMode)
 		},
