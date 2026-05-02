@@ -30,7 +30,9 @@ func TestStyle_NoColorStripsANSI(t *testing.T) {
 		"alert":    styleAlert,
 		"emphasis": styleEmphasis,
 		"critical": styleCritical,
-		"selBg":    styleSelectedBg,
+		"selBg":              styleSelectedBg,
+		"stylePromptBorder":    stylePromptBorder,
+		"stylePromptBorderDim": stylePromptBorderDim,
 	} {
 		out := fn("hello " + name)
 		require.False(t, hasANSI(out), "expected no ANSI in NO_COLOR mode for %s, got %q", name, out)
@@ -76,8 +78,9 @@ func stripANSI(s string) string {
 
 func TestPromptBorderStyles(t *testing.T) {
 	// Force TrueColor so lipgloss emits ANSI even outside a real TTY.
+	prevProfile := lipgloss.ColorProfile()
 	lipgloss.SetColorProfile(termenv.TrueColor)
-	defer lipgloss.SetColorProfile(termenv.Ascii)
+	defer lipgloss.SetColorProfile(prevProfile)
 	// Active style is magenta — verifies a foreground SGR code is set.
 	got := stylePromptBorder("╔══╗")
 	if !strings.Contains(got, "\x1b[") {
