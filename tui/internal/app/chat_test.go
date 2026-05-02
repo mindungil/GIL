@@ -244,3 +244,30 @@ func TestChatUpdate_Up_RecallsHistory(t *testing.T) {
 		t.Fatalf("up → want \"second\", got %q", cm.input.ti.Value())
 	}
 }
+
+func TestChatStream_AssistantChunkAppendsToTranscript(t *testing.T) {
+	m := newChatModel("/tmp/test.sock")
+	m.firstTurnDone = true
+
+	updated, _ := m.Update(chatAssistantChunkMsg{text: "hello "})
+	cm := updated.(*chatModel)
+	if len(cm.transcript) == 0 || !strings.HasSuffix(cm.transcript[len(cm.transcript)-1], "hello ") {
+		t.Fatalf("expected last transcript line to end in \"hello \", got %v", cm.transcript)
+	}
+
+	updated, _ = cm.Update(chatAssistantChunkMsg{text: "world"})
+	cm = updated.(*chatModel)
+	last := cm.transcript[len(cm.transcript)-1]
+	if !strings.Contains(last, "hello world") {
+		t.Fatalf("expected coalesced \"hello world\", got %q", last)
+	}
+}
+
+func TestChatStream_PhaseChangeMsg_UpdatesPhase(t *testing.T) {
+	m := newChatModel("/tmp/test.sock")
+	updated, _ := m.Update(chatPhaseMsg{phase: ChatPhaseRun})
+	cm := updated.(*chatModel)
+	if cm.phase != ChatPhaseRun {
+		t.Fatalf("expected phase=run, got %v", cm.phase)
+	}
+}

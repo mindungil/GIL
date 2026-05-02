@@ -139,6 +139,9 @@ func (m *chatModel) renderStatusStrip() string {
 	g := Glyphs()
 	rule := styleDim(strings.Repeat(g.HSep, m.width))
 	body := fmt.Sprintf("%s  %s  agent ready", string(m.phase), g.Dot)
+	if m.err != "" {
+		body = styleAlert("error: " + m.err)
+	}
 	right := styleMeta(body)
 	left := strings.Repeat(" ", 6)
 	row := padBetween(left, right, m.width)

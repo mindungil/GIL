@@ -1,6 +1,8 @@
 package app
 
 import (
+	"strings"
+
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/mindungil/gil/sdk"
@@ -78,28 +80,82 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			if text == "/quit" || text == "/exit" {
+				if m.stream.cancel != nil {
+					m.stream.cancel()
+				}
 				return m, tea.Quit
 			}
-			// Echo to transcript so the user sees what they sent.
 			m.transcript = append(m.transcript, "›  "+text)
 			m.firstTurnDone = true
-			// Stream dispatch wired in Task 8.
-			return m, nil
+			if m.client == nil {
+				return m, nil // test mode — no stream dispatch
+			}
+			if m.activeID == "" {
+				m.err = "no active session — daemon must allocate one before chat"
+				return m, nil
+			}
+			// Cancel any in-flight stream from a previous turn so the
+			// new submit takes priority.
+			if m.stream.cancel != nil {
+				m.stream.cancel()
+				m.stream = chatStreamState{}
+			}
+			return m, startInterviewCmd(m.client, m.activeID, text)
 		default:
 			// Forward to the textinput so typing works.
 			var cmd tea.Cmd
 			m.input.ti, cmd = m.input.ti.Update(msg)
 			return m, cmd
 		}
+
+	case chatStreamStartedMsg:
+		m.stream.stream = msg.stream
+		m.stream.cancel = msg.cancel
+		return m, nextChatEventCmd(msg.stream)
+
+	case chatAssistantChunkMsg:
+		// Coalesce consecutive assistant chunks onto the same line so
+		// the user sees a flowing reply rather than one `‹` header
+		// per chunk.
+		if len(m.transcript) > 0 && strings.HasPrefix(m.transcript[len(m.transcript)-1], "‹") {
+			m.transcript[len(m.transcript)-1] += msg.text
+		} else {
+			m.transcript = append(m.transcript, "‹  "+msg.text)
+		}
+		// Keep draining.
+		if m.stream.stream != nil {
+			return m, nextChatEventCmd(m.stream.stream)
+		}
+		return m, nil
+
+	case chatPhaseMsg:
+		m.phase = msg.phase
+		if m.stream.stream != nil {
+			return m, nextChatEventCmd(m.stream.stream)
+		}
+		return m, nil
+
+	case chatStreamEventSkipMsg:
+		if m.stream.stream != nil {
+			return m, nextChatEventCmd(m.stream.stream)
+		}
+		return m, nil
+
+	case chatStreamDoneMsg:
+		// Turn complete. Reset stream cursor; keep cancel so quit
+		// path can call it harmlessly.
+		m.stream.stream = nil
+		return m, nil
+
+	case chatStreamErrMsg:
+		m.err = msg.err
+		m.stream.stream = nil
+		return m, nil
 	}
 	return m, nil
 }
 
 func (m *chatModel) View() string { return m.chatView() }
-
-// chatStreamState is filled in by Task 8.
-// Empty placeholder here keeps the package buildable until that task lands.
-type chatStreamState struct{}
 
 // newChatModel constructs a chatModel ready for tea.NewProgram.
 // socket is dialed lazily by the stream layer (Task 8).
