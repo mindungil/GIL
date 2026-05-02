@@ -71,8 +71,16 @@ func (m *chatModel) View() string {
 	return ""
 }
 
-// chatInputState and chatStreamState are filled in by Tasks 4 and 8.
-// Empty placeholders here keep the package buildable until those tasks
-// land their concrete definitions.
-type chatInputState struct{}
+// chatStreamState is filled in by Task 8.
+// Empty placeholder here keeps the package buildable until that task lands.
 type chatStreamState struct{}
+
+// newChatModel constructs a chatModel ready for tea.NewProgram.
+// socket is dialed lazily by the stream layer (Task 8).
+func newChatModel(socket string) *chatModel {
+	return &chatModel{
+		socket: socket,
+		phase:  ChatPhaseIdle,
+		input:  newChatInput(),
+	}
+}
