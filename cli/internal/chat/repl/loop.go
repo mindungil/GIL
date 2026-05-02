@@ -5,14 +5,20 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
+	"time"
 
 	"github.com/mindungil/gil/cli/internal/chat/render"
 )
 
 // SessionSummary carries the display-relevant fields for a single session
-// in the /sessions listing.
+// in the /sessions listing. Name is a short human label (typically the
+// truncated GoalHint); GoalHint is the full hint for fallback rendering;
+// CreatedAt drives the relative-age column.
 type SessionSummary struct {
 	ID, Name, Phase string
+	GoalHint        string
+	CreatedAt       time.Time
 }
 
 // SessionClient abstracts the gRPC session boundary so loop tests
@@ -50,6 +56,13 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 	tr := NewTracker()
 	cfg.Renderer.Banner(tr.State())
+
+	// §2.6 self-disclose: surface recent sessions inline at entry so the
+	// user doesn't need to know /sessions to find prior work. Soft-fails
+	// on errors — the status strip still prints the idle hint.
+	if cfg.Client != nil && cfg.Client.ActiveSessionID() == "" {
+		emitWelcomeDisclosure(ctx, cfg)
+	}
 
 	scanner := bufio.NewScanner(cfg.In)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1<<20)
@@ -114,7 +127,7 @@ func Run(ctx context.Context, cfg Config) error {
 				chunk, more, err := cfg.Client.NextAssistantChunk(ctx)
 				if err != nil {
 					cfg.Renderer.SystemNote(render.NoteSystem,
-						fmt.Sprintf("stream error: %v", err))
+						"stream error: "+humanizeStreamErr(err))
 					break
 				}
 				if chunk != "" {
@@ -186,16 +199,11 @@ func dispatchSlash(ctx context.Context, cfg Config, tr *Tracker, cmd, args strin
 			return err
 		}
 		if len(list) == 0 {
-			r.SystemNote(render.NoteSystem, "no sessions — type a prompt to start one")
+			r.SystemNote(render.NoteSystem, "no sessions — describe what you want to build")
 			return nil
 		}
 		for i, s := range list {
-			short := s.ID
-			if len(short) > 6 {
-				short = short[:6]
-			}
-			r.SystemNote(render.NoteSystem,
-				fmt.Sprintf("%d. %s  %s  [%s]", i+1, short, s.Name, s.Phase))
+			r.SystemNote(render.NoteSystem, formatSessionRow(i+1, s))
 		}
 	case "switch":
 		if args == "" {
@@ -238,4 +246,94 @@ func dispatchSlash(ctx context.Context, cfg Config, tr *Tracker, cmd, args strin
 		return c.StartRun(ctx)
 	}
 	return nil
+}
+
+// formatSessionRow renders one session as a numbered listing row used by
+// both the entry self-disclosure and /sessions. Single source of truth
+// for the row layout: short ID (10 chars covers full ms-precision ULID
+// timestamp), relative age, phase tag, label.
+func formatSessionRow(n int, s SessionSummary) string {
+	short := s.ID
+	if len(short) > 10 {
+		short = short[:10]
+	}
+	label := s.Name
+	if label == "" {
+		label = "—"
+	}
+	return fmt.Sprintf("%d. %-10s  %-6s  [%s]  %s",
+		n, short, formatAge(s.CreatedAt), s.Phase, label)
+}
+
+// emitWelcomeDisclosure prints a one-line lead-in plus up to topN recent
+// sessions as system notes, called once at REPL entry when there's no
+// active session. Soft-fails on ListSessions errors (daemon not ready,
+// transient gRPC issue) so chat entry never blocks on a stale daemon.
+func emitWelcomeDisclosure(ctx context.Context, cfg Config) {
+	const topN = 5
+	list, err := cfg.Client.ListSessions(ctx)
+	if err != nil {
+		return
+	}
+	if len(list) == 0 {
+		cfg.Renderer.SystemNote(render.NoteSystem,
+			"no past sessions — describe what you want to build")
+		return
+	}
+	shown := list
+	if len(shown) > topN {
+		shown = shown[:topN]
+	}
+	var lead string
+	if len(list) == 1 {
+		lead = "1 past session — pick it below or describe a new task"
+	} else if len(list) <= topN {
+		lead = fmt.Sprintf("%d past sessions — pick one below or describe a new task", len(list))
+	} else {
+		lead = fmt.Sprintf("%d past sessions — most recent %d below, describe a new task or resume one",
+			len(list), topN)
+	}
+	cfg.Renderer.SystemNote(render.NoteSystem, lead)
+	for i, s := range shown {
+		cfg.Renderer.SystemNote(render.NoteSystem, formatSessionRow(i+1, s))
+	}
+}
+
+// formatAge renders a CreatedAt timestamp as a compact relative-age
+// string (e.g. "4m", "2h", "3d"). Zero / future timestamps render as "—"
+// so the listing column doesn't flash a 57-year offset for mocked rows.
+func formatAge(t time.Time) string {
+	if t.IsZero() {
+		return "—"
+	}
+	d := time.Since(t)
+	if d < 0 {
+		return "—"
+	}
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd", int(d.Hours()/24))
+	}
+}
+
+// humanizeStreamErr extracts the user-relevant part of a gRPC error for
+// chat-surface display. Strips the "rpc error: code = ... desc = " prefix
+// the gRPC client wraps every status with, leaving just the server-supplied
+// message. When the message is unrecognized, returns the original error
+// string so we never lose information.
+func humanizeStreamErr(err error) string {
+	if err == nil {
+		return ""
+	}
+	s := err.Error()
+	if i := strings.Index(s, "desc = "); i >= 0 {
+		s = s[i+len("desc = "):]
+	}
+	return s
 }

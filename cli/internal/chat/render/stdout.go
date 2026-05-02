@@ -49,7 +49,10 @@ func (r *StdoutChatRenderer) StatusStrip(s SessionState) {
 	var body string
 	switch s.Phase {
 	case PhaseIdle:
-		body = "idle · type a prompt to start, or /sessions to resume"
+		// §2.6: keep the idle strip free of slash-jargon. Discovery of
+		// past sessions is handled by the entry self-disclosure, not by
+		// telling the user to memorize a slash command.
+		body = "idle · type a prompt to start a new session"
 	case PhaseInterview:
 		body = formatInterviewStrip(s)
 	case PhaseAwaitingConfirm:

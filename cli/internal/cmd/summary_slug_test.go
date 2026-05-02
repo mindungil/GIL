@@ -46,12 +46,14 @@ func TestDisplayName_FromGoal(t *testing.T) {
 
 func TestDisplayName_FallsBackToShortID(t *testing.T) {
 	// Korean-only goal → slug is empty → falls back to shortID.
+	// 10-char prefix covers the full ms-precision ULID timestamp so two
+	// fallback rows don't render identically when created in the same minute.
 	s := &sdk.Session{
 		ID:        "01HQXY7G8H9JMQRSV9XYZW000A",
 		GoalHint:  "안녕 다크모드 추가",
 		CreatedAt: time.Date(2026, 4, 28, 10, 0, 0, 0, time.UTC),
 	}
-	require.Equal(t, "01hqxy", displayName(s))
+	require.Equal(t, "01hqxy7g8h", displayName(s))
 }
 
 func TestDisplayName_NilSession(t *testing.T) {

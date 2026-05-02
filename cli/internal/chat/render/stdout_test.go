@@ -37,7 +37,7 @@ func TestStdout_AssistantText_AppendsAsIs(t *testing.T) {
 func TestStdout_StatusStrip_Idle(t *testing.T) {
 	r, buf := newStdoutForTest(t)
 	r.StatusStrip(SessionState{Phase: PhaseIdle})
-	require.Equal(t, "[idle · type a prompt to start, or /sessions to resume]\n", buf.String())
+	require.Equal(t, "[idle · type a prompt to start a new session]\n", buf.String())
 }
 
 func TestStdout_StatusStrip_Interview(t *testing.T) {

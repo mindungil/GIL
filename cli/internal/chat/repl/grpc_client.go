@@ -2,8 +2,11 @@ package repl
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"strings"
+	"sync"
 
 	"google.golang.org/protobuf/encoding/protojson"
 
@@ -45,6 +48,10 @@ type GRPCClient struct {
 	chunkCh chan string
 	// chunkDone is closed when the current interview stream ends.
 	chunkDone chan struct{}
+	// streamErr captures the terminating error from the interview
+	// stream (non-EOF only). Read after chunkDone closes.
+	streamErrMu sync.Mutex
+	streamErr   error
 	// eventCh receives tracker events from both interview and run streams.
 	eventCh chan TrackerInput
 }
@@ -65,15 +72,38 @@ func NewGRPCClient(s *sdk.Client, workingDir string) *GRPCClient {
 func (g *GRPCClient) ActiveSessionID() string { return g.activeSess }
 
 // NewSession creates a new session on the server and sets it as active.
-// Any prior subscription state is discarded.
+// Any prior subscription state is discarded. Equivalent to newSession with
+// an empty hint — used by the /new slash command, where no first prompt
+// is available yet.
 func (g *GRPCClient) NewSession(ctx context.Context) error {
-	sess, err := g.sdk.CreateSession(ctx, sdk.CreateOptions{WorkingDir: g.workingDir})
+	return g.newSession(ctx, "")
+}
+
+// newSession is the internal session-create that accepts an optional
+// GoalHint. SendPrompt uses this to seed the hint from the user's first
+// message so /sessions has a human-readable label per row instead of two
+// columns of identical ULID prefixes.
+func (g *GRPCClient) newSession(ctx context.Context, hint string) error {
+	sess, err := g.sdk.CreateSession(ctx, sdk.CreateOptions{
+		WorkingDir: g.workingDir,
+		GoalHint:   truncateHint(hint, 80),
+	})
 	if err != nil {
 		return err
 	}
 	g.activeSess = sess.ID
 	g.inInterview = false
 	return nil
+}
+
+// truncateHint trims a free-form prompt to fit a single listing column.
+// Whitespace-collapses then cuts at max runes with an ellipsis when needed.
+func truncateHint(s string, max int) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if max <= 0 || len(s) <= max {
+		return s
+	}
+	return s[:max-1] + "…"
 }
 
 // SwitchSession makes the session identified by idOrName active. idOrName
@@ -102,10 +132,15 @@ func (g *GRPCClient) ListSessions(ctx context.Context) ([]SessionSummary, error)
 	}
 	out := make([]SessionSummary, 0, len(list))
 	for _, s := range list {
+		// Name is the human label for the listing column; use the
+		// session's GoalHint (the first prompt, captured at create time).
+		// Falls back to empty so the renderer can show "—".
 		out = append(out, SessionSummary{
-			ID:    s.ID,
-			Name:  shortID(s.ID),
-			Phase: s.Status,
+			ID:        s.ID,
+			Name:      truncateHint(s.GoalHint, 60),
+			Phase:     s.Status,
+			GoalHint:  s.GoalHint,
+			CreatedAt: s.CreatedAt,
 		})
 	}
 	return out, nil
@@ -121,7 +156,7 @@ func (g *GRPCClient) ListSessions(ctx context.Context) ([]SessionSummary, error)
 // done channel.
 func (g *GRPCClient) SendPrompt(ctx context.Context, prompt string) error {
 	if g.activeSess == "" {
-		if err := g.NewSession(ctx); err != nil {
+		if err := g.newSession(ctx, prompt); err != nil {
 			return err
 		}
 	}
@@ -169,7 +204,15 @@ func (g *GRPCClient) drainInterviewStream(
 	for {
 		ev, err := stream.Recv()
 		if err != nil {
-			// EOF or transport error — turn is over.
+			// EOF is the normal end-of-turn signal. Any other error
+			// (transport, gRPC status) is a real failure — record it so
+			// NextAssistantChunk can surface it to the chat user instead
+			// of silently looping back to idle.
+			if !errors.Is(err, io.EOF) {
+				g.streamErrMu.Lock()
+				g.streamErr = err
+				g.streamErrMu.Unlock()
+			}
 			return
 		}
 		switch v := ev.GetPayload().(type) {
@@ -255,13 +298,23 @@ func (g *GRPCClient) NextAssistantChunk(ctx context.Context) (string, bool, erro
 		return chunk, true, nil
 	case <-g.chunkDone:
 		// Producer is done. Drain any chunk that arrived between the
-		// last receive and the close.
+		// last receive and the close, then surface any captured stream
+		// error so chat REPL can render it instead of silently looping.
 		select {
 		case chunk := <-g.chunkCh:
 			return chunk, true, nil
 		default:
-			return "", false, nil
 		}
+		// Reset the in-interview flag on transport-level failure so the
+		// next prompt can rebuild a fresh stream.
+		g.streamErrMu.Lock()
+		serr := g.streamErr
+		g.streamErr = nil
+		g.streamErrMu.Unlock()
+		if serr != nil {
+			g.inInterview = false
+		}
+		return "", false, serr
 	}
 }
 
@@ -389,10 +442,13 @@ func mapRunEventToTracker(sessionID string, ev *gilv1.Event) TrackerInput {
 	return in
 }
 
-// shortID returns the first 6 characters of an ID, or the full ID if shorter.
+// shortID returns the first 10 characters of an ID, or the full ID if
+// shorter. 10 covers the full ms-precision ULID timestamp prefix; 6
+// (the previous default) bins to ~30s windows and collided in /sessions
+// listings whenever multiple sessions were created in the same minute.
 func shortID(id string) string {
-	if len(id) >= 6 {
-		return id[:6]
+	if len(id) >= 10 {
+		return id[:10]
 	}
 	return id
 }

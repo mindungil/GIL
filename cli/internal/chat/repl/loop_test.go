@@ -3,6 +3,7 @@ package repl
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -278,6 +279,107 @@ func TestLoop_SlashRun_RequiresAwaitingConfirmPhase(t *testing.T) {
 	}
 	require.True(t, found)
 	require.False(t, fc.runStarted)
+}
+
+func TestLoop_EntryDisclosure_ListsRecentSessions(t *testing.T) {
+	mock := render.NewMockRenderer()
+	fc := &fakeClient{
+		// sessionID empty → no active session → disclosure should fire.
+		sessionList: []SessionSummary{
+			{ID: "01HQXYZ001", Name: "add dark mode", Phase: "interview"},
+			{ID: "01HQXYZ002", Name: "fix oauth", Phase: "done"},
+		},
+	}
+	in := strings.NewReader("/quit\n")
+	require.NoError(t, Run(context.Background(), Config{
+		In: in, Renderer: mock, Client: fc,
+	}))
+	// Lead line + 2 rows, all before any PromptCue (entry disclosure runs
+	// once at REPL start, not inside the input loop).
+	var leadIdx, dark, oauth int = -1, -1, -1
+	var promptIdx int = -1
+	for i, c := range mock.Calls {
+		switch {
+		case c.Method == "SystemNote" && strings.Contains(c.Text, "2 past sessions"):
+			leadIdx = i
+		case c.Method == "SystemNote" && strings.Contains(c.Text, "add dark mode"):
+			dark = i
+		case c.Method == "SystemNote" && strings.Contains(c.Text, "fix oauth"):
+			oauth = i
+		case c.Method == "PromptCue" && promptIdx < 0:
+			promptIdx = i
+		}
+	}
+	require.GreaterOrEqual(t, leadIdx, 0, "expected lead-in note")
+	require.GreaterOrEqual(t, dark, 0, "expected first session row")
+	require.GreaterOrEqual(t, oauth, 0, "expected second session row")
+	require.GreaterOrEqual(t, promptIdx, 0, "expected at least one prompt cue")
+	require.Less(t, leadIdx, promptIdx, "lead must precede first prompt cue")
+	require.Less(t, dark, promptIdx, "rows must precede first prompt cue")
+}
+
+func TestLoop_EntryDisclosure_NoSessions_ShowsHint(t *testing.T) {
+	mock := render.NewMockRenderer()
+	in := strings.NewReader("/quit\n")
+	require.NoError(t, Run(context.Background(), Config{
+		In: in, Renderer: mock, Client: &fakeClient{},
+	}))
+	var found bool
+	for _, c := range mock.Calls {
+		if c.Method == "SystemNote" && strings.Contains(c.Text, "no past sessions") {
+			found = true
+		}
+	}
+	require.True(t, found, "empty session list should yield a natural-language welcome")
+}
+
+func TestLoop_EntryDisclosure_ActiveSession_Skipped(t *testing.T) {
+	mock := render.NewMockRenderer()
+	fc := &fakeClient{
+		sessionID: "01HQ", // already active → no entry disclosure
+		sessionList: []SessionSummary{
+			{ID: "01HQXYZ001", Name: "irrelevant", Phase: "idle"},
+		},
+	}
+	in := strings.NewReader("/quit\n")
+	require.NoError(t, Run(context.Background(), Config{
+		In: in, Renderer: mock, Client: fc,
+	}))
+	for _, c := range mock.Calls {
+		if c.Method == "SystemNote" && strings.Contains(c.Text, "past session") {
+			t.Fatalf("entry disclosure should not fire when a session is active: %q", c.Text)
+		}
+	}
+}
+
+func TestLoop_EntryDisclosure_TopNCap(t *testing.T) {
+	mock := render.NewMockRenderer()
+	var seven []SessionSummary
+	for i := 0; i < 7; i++ {
+		seven = append(seven, SessionSummary{
+			ID:    fmt.Sprintf("01HQXYZ%03d", i),
+			Name:  fmt.Sprintf("task-%d", i),
+			Phase: "idle",
+		})
+	}
+	in := strings.NewReader("/quit\n")
+	require.NoError(t, Run(context.Background(), Config{
+		In: in, Renderer: mock, Client: &fakeClient{sessionList: seven},
+	}))
+	var leadFound, sixth int = 0, 0
+	for _, c := range mock.Calls {
+		if c.Method != "SystemNote" {
+			continue
+		}
+		if strings.Contains(c.Text, "7 past sessions") && strings.Contains(c.Text, "most recent 5") {
+			leadFound++
+		}
+		if strings.Contains(c.Text, "task-5") || strings.Contains(c.Text, "task-6") {
+			sixth++
+		}
+	}
+	require.Equal(t, 1, leadFound, "lead should mention 7 total / 5 shown")
+	require.Equal(t, 0, sixth, "6th and 7th rows should be capped off")
 }
 
 func TestLoop_SlashSessions_ShortID_NoPanic(t *testing.T) {

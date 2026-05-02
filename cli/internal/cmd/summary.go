@@ -392,15 +392,17 @@ func loadSessionPlanNext(sessionID string) string {
 	return ""
 }
 
-// shortID returns the first 6 chars of the ULID lowercased — enough
-// to disambiguate within a working set, narrow enough for the table.
-// (Same convention the spec mockups use.) Lowercasing keeps the
-// rendering uniform whether the ID came in as upper or mixed case.
+// shortID returns the first 10 chars of the ULID lowercased. 10 chars
+// covers the full 48-bit ms-precision ULID timestamp prefix; the prior
+// 6-char default bins to ~30s windows and produced collision-heavy
+// listings (e.g. nine sessions all rendering as "01kqep" when created
+// inside the same minute). Lowercasing keeps rendering uniform whether
+// the ID came in as upper or mixed case.
 func shortID(id string) string {
-	if len(id) <= 6 {
+	if len(id) <= 10 {
 		return strings.ToLower(id)
 	}
-	return strings.ToLower(id[:6])
+	return strings.ToLower(id[:10])
 }
 
 // displayName returns a human-friendly label for a session — a slug
