@@ -71,3 +71,26 @@ func TestGlyphs_DetectAscii_UTF8Locale(t *testing.T) {
 	t.Setenv("LANG", "en_US.UTF-8")
 	require.False(t, detectAscii())
 }
+
+func TestBoxGlyphs_UnicodeAndAscii(t *testing.T) {
+	prev := IsAsciiMode()
+	defer SetAsciiMode(prev)
+
+	SetAsciiMode(false)
+	g := Glyphs()
+	if g.BoxHeavyTL != "╔" || g.BoxHeavyTR != "╗" || g.BoxHeavyHRule != "═" || g.BoxHeavyVRule != "║" {
+		t.Fatalf("unicode heavy box glyphs missing: %+v", g)
+	}
+	if g.BoxLightTL != "╭" || g.BoxLightHRule != "─" {
+		t.Fatalf("unicode light box glyphs missing: %+v", g)
+	}
+
+	SetAsciiMode(true)
+	a := Glyphs()
+	if a.BoxHeavyTL != "+" || a.BoxHeavyHRule != "=" || a.BoxHeavyVRule != "|" {
+		t.Fatalf("ascii heavy box fallback wrong: %+v", a)
+	}
+	if a.BoxLightTL != "+" || a.BoxLightHRule != "-" {
+		t.Fatalf("ascii light box fallback wrong: %+v", a)
+	}
+}

@@ -31,6 +31,19 @@ type Glyph struct {
 	Spinner    []string // 10-frame Braille spinner
 	Ellipsis   string // …
 	Dot        string // · (footer separator)
+
+	BoxHeavyTL    string // ╔ — top-left corner of prompt panel
+	BoxHeavyTR    string // ╗
+	BoxHeavyBL    string // ╚
+	BoxHeavyBR    string // ╝
+	BoxHeavyHRule string // ═
+	BoxHeavyVRule string // ║
+	BoxLightTL    string // ╭ — header rounded corner (top-left)
+	BoxLightTR    string // ╮
+	BoxLightBL    string // ╰
+	BoxLightBR    string // ╯
+	BoxLightHRule string // ─
+	BoxLightVRule string // │
 }
 
 // unicodeGlyphs returns the canonical glyph set per spec §3.
@@ -59,6 +72,11 @@ func unicodeGlyphs() Glyph {
 		},
 		Ellipsis: "…",
 		Dot:      "·",
+
+		BoxHeavyTL: "╔", BoxHeavyTR: "╗", BoxHeavyBL: "╚", BoxHeavyBR: "╝",
+		BoxHeavyHRule: "═", BoxHeavyVRule: "║",
+		BoxLightTL: "╭", BoxLightTR: "╮", BoxLightBL: "╰", BoxLightBR: "╯",
+		BoxLightHRule: "─", BoxLightVRule: "│",
 	}
 }
 
@@ -90,6 +108,11 @@ func asciiGlyphs() Glyph {
 		},
 		Ellipsis: "...",
 		Dot:      ".",
+
+		BoxHeavyTL: "+", BoxHeavyTR: "+", BoxHeavyBL: "+", BoxHeavyBR: "+",
+		BoxHeavyHRule: "=", BoxHeavyVRule: "|",
+		BoxLightTL: "+", BoxLightTR: "+", BoxLightBL: "+", BoxLightBR: "+",
+		BoxLightHRule: "-", BoxLightVRule: "|",
 	}
 }
 
