@@ -1,6 +1,7 @@
 package app
 
 import (
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -72,5 +73,47 @@ func TestChatInput_HistoryNavigation_UpDown(t *testing.T) {
 	in.historyDown()
 	if v := in.ti.Value(); v != "" {
 		t.Fatalf("down past end → want empty, got %q", v)
+	}
+}
+
+func TestChatView_RendersAllRegions_AtFullSize(t *testing.T) {
+	prevNoColor := IsNoColor()
+	SetNoColor(true)
+	defer SetNoColor(prevNoColor)
+
+	m := newChatModel("/tmp/test.sock")
+	m.width = 100
+	m.height = 32
+	m.phase = ChatPhaseIdle
+
+	out := m.View()
+
+	if !strings.Contains(out, "G  I  L") && !strings.Contains(out, "G I L") {
+		t.Errorf("header missing logo: %q", out)
+	}
+	if !strings.Contains(out, "idle") {
+		t.Errorf("status strip missing phase: %q", out)
+	}
+	if !strings.Contains(out, "describe a task") {
+		t.Errorf("affordance subtitle missing: %q", out)
+	}
+	if !strings.Contains(out, "═") && !strings.Contains(out, "=") {
+		t.Errorf("prompt panel border missing: %q", out)
+	}
+}
+
+func TestChatView_NarrowMode_DegradesGracefully(t *testing.T) {
+	prevNoColor := IsNoColor()
+	SetNoColor(true)
+	defer SetNoColor(prevNoColor)
+
+	m := newChatModel("/tmp/test.sock")
+	m.width = 50
+	m.height = 18
+	m.phase = ChatPhaseIdle
+
+	out := m.View()
+	if out == "" {
+		t.Fatalf("narrow mode produced empty view")
 	}
 }
