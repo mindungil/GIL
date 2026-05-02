@@ -6,7 +6,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/lipgloss"
 	"github.com/mindungil/gil/core/version"
+	"github.com/muesli/termenv"
 )
 
 var snapshotSizes = []struct {
@@ -66,4 +68,81 @@ func stripDynamic(s string) string {
 		s = strings.ReplaceAll(s, cwd, "<cwd>")
 	}
 	return s
+}
+
+func TestChatView_AsciiSnapshot(t *testing.T) {
+	prevNoColor := IsNoColor()
+	prevAscii := IsAsciiMode()
+	SetNoColor(true)
+	SetAsciiMode(true)
+	defer SetNoColor(prevNoColor)
+	defer SetAsciiMode(prevAscii)
+
+	m := newChatModel("/tmp/test.sock")
+	m.width = 80
+	m.height = 24
+	m.phase = ChatPhaseIdle
+
+	got := stripDynamic(m.View())
+	path := filepath.Join("testdata", "chat_idle_80x24_ascii.txt")
+
+	if os.Getenv("UPDATE_SNAPSHOTS") == "1" {
+		_ = os.WriteFile(path, []byte(got), 0o644)
+		return
+	}
+	want, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("missing snapshot %s — run UPDATE_SNAPSHOTS=1", path)
+	}
+	if got != string(want) {
+		t.Errorf("ASCII snapshot mismatch:\n--- want ---\n%s\n--- got ---\n%s", string(want), got)
+	}
+	// Verify no Unicode box chars leaked through.
+	for _, ch := range []string{"╔", "╗", "═", "╭", "╮", "─"} {
+		if strings.Contains(got, ch) {
+			t.Errorf("ASCII output contained unicode box char %q", ch)
+		}
+	}
+}
+
+func TestChatView_ColorSnapshot(t *testing.T) {
+	// Inverse of the NO_COLOR snapshot — verifies magenta SGR is
+	// emitted on the prompt panel border when colors are on.
+	// Force TrueColor so lipgloss emits ANSI even outside a real TTY
+	// (matches the pattern in TestPromptBorderStyles).
+	prevProfile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	defer lipgloss.SetColorProfile(prevProfile)
+
+	prevNoColor := IsNoColor()
+	prevAscii := IsAsciiMode()
+	SetNoColor(false)
+	SetAsciiMode(false)
+	defer SetNoColor(prevNoColor)
+	defer SetAsciiMode(prevAscii)
+
+	m := newChatModel("/tmp/test.sock")
+	m.width = 80
+	m.height = 24
+	m.phase = ChatPhaseIdle
+
+	got := stripDynamic(m.View())
+	// Magenta SGR is `\x1b[38;2;...` (truecolor) — at least once on the
+	// prompt panel.
+	if !strings.Contains(got, "\x1b[") {
+		t.Fatalf("color mode produced no ANSI escapes")
+	}
+	path := filepath.Join("testdata", "chat_idle_80x24_color.txt")
+
+	if os.Getenv("UPDATE_SNAPSHOTS") == "1" {
+		_ = os.WriteFile(path, []byte(got), 0o644)
+		return
+	}
+	want, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("missing snapshot %s — run UPDATE_SNAPSHOTS=1", path)
+	}
+	if got != string(want) {
+		t.Errorf("color snapshot mismatch")
+	}
 }
