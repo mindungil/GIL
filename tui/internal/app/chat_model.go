@@ -166,3 +166,12 @@ func newChatModel(socket string) *chatModel {
 		input:  newChatInput(),
 	}
 }
+
+// NewChatModelForRun is the public constructor used by tui/run.Chat.
+// Returns a tea.Model so the unexported chatModel type doesn't leak
+// across the package boundary.
+func NewChatModelForRun(socket string, client *sdk.Client) tea.Model {
+	m := newChatModel(socket)
+	m.client = client
+	return m
+}
