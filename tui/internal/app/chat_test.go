@@ -3,8 +3,11 @@ package app
 import (
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/mindungil/gil/sdk"
 )
 
 func TestChatModel_InitialPhase_IsIdle(t *testing.T) {
@@ -115,5 +118,46 @@ func TestChatView_NarrowMode_DegradesGracefully(t *testing.T) {
 	out := m.View()
 	if out == "" {
 		t.Fatalf("narrow mode produced empty view")
+	}
+}
+
+func TestChatSession_PreFirstTurn_RendersList(t *testing.T) {
+	prevNoColor := IsNoColor()
+	SetNoColor(true)
+	defer SetNoColor(prevNoColor)
+
+	m := newChatModel("/tmp/test.sock")
+	m.width = 100
+	m.height = 32
+	m.sessions = []*sdk.Session{
+		{ID: "01HQXYZ001", GoalHint: "add dark mode", Status: "INTERVIEWING", CreatedAt: time.Now().Add(-4 * time.Minute)},
+		{ID: "01HQXYZ002", GoalHint: "fix oauth", Status: "DONE", CreatedAt: time.Now().Add(-2 * time.Hour)},
+	}
+
+	got := m.renderPreFirstTurn(20)
+
+	if !strings.Contains(got, "2 past sessions") {
+		t.Errorf("missing lead-in: %q", got)
+	}
+	if !strings.Contains(got, "add dark mode") {
+		t.Errorf("session 1 not rendered: %q", got)
+	}
+	if !strings.Contains(got, "fix oauth") {
+		t.Errorf("session 2 not rendered: %q", got)
+	}
+}
+
+func TestChatSession_NoSessions_FallsBackToInvite(t *testing.T) {
+	prevNoColor := IsNoColor()
+	SetNoColor(true)
+	defer SetNoColor(prevNoColor)
+
+	m := newChatModel("/tmp/test.sock")
+	m.width = 100
+	m.height = 32
+
+	got := m.renderPreFirstTurn(20)
+	if !strings.Contains(got, "no past sessions") {
+		t.Errorf("expected empty-state invite, got %q", got)
 	}
 }

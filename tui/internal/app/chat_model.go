@@ -1,8 +1,6 @@
 package app
 
 import (
-	"strings"
-
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/mindungil/gil/sdk"
@@ -67,11 +65,6 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *chatModel) View() string { return m.chatView() }
-
-// TEMPORARY stub — replaced in Task 6 (chat_session.go).
-func (m *chatModel) renderPreFirstTurn(convH int) string {
-	return strings.Repeat("\n", convH-1)
-}
 
 // chatStreamState is filled in by Task 8.
 // Empty placeholder here keeps the package buildable until that task lands.
