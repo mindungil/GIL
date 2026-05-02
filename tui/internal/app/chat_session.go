@@ -63,38 +63,45 @@ func chatLeadIn(total, topN int) string {
 // formatChatSessionRow renders one row: glyph, slug (truncated), age,
 // phase. Width-aware so narrow terminals don't tear.
 func formatChatSessionRow(s *sdk.Session, termWidth int) string {
-	g := Glyphs()
-	glyph := g.Idle
-	if strings.EqualFold(s.Status, "RUNNING") {
-		glyph = g.Running
-	}
+	glyph := statusGlyph(Glyphs(), strings.ToUpper(s.Status))
 	slug := s.GoalHint
 	if slug == "" {
-		// fall back to ID prefix
-		slug = strings.ToLower(s.ID)
-		if len(slug) > 10 {
-			slug = slug[:10]
-		}
+		// fall back to ID prefix (rune-aware so non-ASCII IDs survive)
+		slug = truncRunes(strings.ToLower(s.ID), 10, false)
 	}
-	if len(slug) > 32 {
-		slug = slug[:31] + g.Ellipsis
-	}
+	slug = truncRunes(slug, 32, true)
 	age := relAgeShort(s.CreatedAt)
 	phase := strings.ToLower(s.Status)
 
 	// Fixed columns: glyph(1) + 2sp + slug(32) + 4sp + age(5) + 4sp + phase
 	row := fmt.Sprintf("%s  %-32s    %-5s    %s",
-		styleDim(glyph), styleSurface(slug), styleMeta(age), styleMeta(phase))
-	if termWidth < 60 {
-		// Narrow: drop phase, shorten slug.
-		shortSlug := slug
-		if len(shortSlug) > 18 {
-			shortSlug = shortSlug[:17] + g.Ellipsis
-		}
+		glyph, styleSurface(slug), styleMeta(age), styleMeta(phase))
+	if termWidth < 80 {
+		// Narrow: drop phase, shorten slug. Match package-wide narrow
+		// threshold (see view.go: narrow := m.width < 80).
+		shortSlug := truncRunes(slug, 18, true)
 		row = fmt.Sprintf("%s  %-18s  %s",
-			styleDim(glyph), styleSurface(shortSlug), styleMeta(age))
+			glyph, styleSurface(shortSlug), styleMeta(age))
 	}
 	return row
+}
+
+// truncRunes shortens s to at most max runes, optionally appending the
+// active ellipsis glyph (taking 1 rune of the budget) when truncation
+// occurs. Operates on runes, not bytes, so multi-byte UTF-8 sequences
+// (Korean, CJK, emoji) are never split mid-rune.
+func truncRunes(s string, max int, withEllipsis bool) string {
+	if max <= 0 {
+		return ""
+	}
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	if !withEllipsis || max <= 1 {
+		return string(r[:max])
+	}
+	return string(r[:max-1]) + Glyphs().Ellipsis
 }
 
 func relAgeShort(t time.Time) string {

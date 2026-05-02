@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -159,5 +160,36 @@ func TestChatSession_NoSessions_FallsBackToInvite(t *testing.T) {
 	got := m.renderPreFirstTurn(20)
 	if !strings.Contains(got, "no past sessions") {
 		t.Errorf("expected empty-state invite, got %q", got)
+	}
+}
+
+func TestChatSession_FormatRow_KoreanSlugDoesNotSplitRune(t *testing.T) {
+	prevNoColor := IsNoColor()
+	SetNoColor(true)
+	defer SetNoColor(prevNoColor)
+
+	// 35-rune Korean slug; byte-length is ~105.
+	long := strings.Repeat("가", 35)
+	s := &sdk.Session{ID: "01HQ", GoalHint: long, Status: "INTERVIEWING", CreatedAt: time.Now()}
+	row := formatChatSessionRow(s, 100)
+	if !utf8.ValidString(row) {
+		t.Fatalf("row contains invalid UTF-8: %q", row)
+	}
+}
+
+func TestChatSession_FormatRow_NarrowMode(t *testing.T) {
+	prevNoColor := IsNoColor()
+	SetNoColor(true)
+	defer SetNoColor(prevNoColor)
+
+	s := &sdk.Session{ID: "01HQ", GoalHint: "add dark mode toggle to settings page", Status: "DONE", CreatedAt: time.Now()}
+	wide := formatChatSessionRow(s, 100)
+	narrow := formatChatSessionRow(s, 70) // < 80 → narrow branch
+	if wide == narrow {
+		t.Fatalf("expected narrow rendering at width 70, got identical strings")
+	}
+	// Narrow mode drops phase column.
+	if strings.Contains(narrow, "done") {
+		t.Fatalf("narrow row should not include phase column, got %q", narrow)
 	}
 }
