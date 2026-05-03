@@ -1,10 +1,12 @@
 package app
 
 import (
+	"context"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/mindungil/gil/core/intent"
 	"github.com/mindungil/gil/sdk"
 )
 
@@ -52,6 +54,11 @@ type chatModel struct {
 	firstTurnDone bool
 
 	err string
+
+	// router classifies natural-language prompts into verb dispatches
+	// per design.md §2.6(b). When nil the model forwards every prompt
+	// directly (matches --no-intent-router on the cli surface).
+	router *intent.Router
 }
 
 func (m *chatModel) Init() tea.Cmd { return nil }
@@ -87,6 +94,42 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.transcript = append(m.transcript, "›  "+text)
 			m.firstTurnDone = true
+
+			// §2.6(b) intent router. Slash-prefixed inputs skip the
+			// router (deterministic escape hatch). Verbs surface as a
+			// transcript note; full verb-dispatch in the TUI is
+			// followup #253b — for now non-quit verbs land a "use gil
+			// chat for this verb" hint so the routing is at least
+			// visible.
+			if m.router != nil && !strings.HasPrefix(text, "/") {
+				ctx := intent.SessionContext{
+					Phase:           string(m.phase),
+					ActiveSessionID: m.activeID,
+					RecentSessions:  toIntentRefs(m.sessions),
+				}
+				cl := m.router.Classify(context.Background(), text, ctx)
+				switch cl.Kind {
+				case intent.KindVerb:
+					if cl.Verb == intent.VerbQuit {
+						if m.stream.cancel != nil {
+							m.stream.cancel()
+						}
+						return m, tea.Quit
+					}
+					m.transcript = append(m.transcript,
+						"   → "+cl.Rationale+"  (verb dispatch in TUI lands in followup; use `gil chat` for now)")
+					return m, nil
+				case intent.KindAmbiguous:
+					m.transcript = append(m.transcript, "   ?  "+cl.Clarification)
+					return m, nil
+				case intent.KindTooVague:
+					m.transcript = append(m.transcript, "   ?  "+cl.Clarification)
+					return m, nil
+				case intent.KindForward:
+					// fall through to the daemon dispatch below
+				}
+			}
+
 			if m.client == nil {
 				return m, nil // test mode — no stream dispatch
 			}
@@ -157,6 +200,19 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m *chatModel) View() string { return m.chatView() }
 
+// toIntentRefs flattens the chatModel's session list into the slim
+// SessionRef shape the intent router uses for slug matching.
+func toIntentRefs(in []*sdk.Session) []intent.SessionRef {
+	out := make([]intent.SessionRef, 0, len(in))
+	for _, s := range in {
+		if s == nil {
+			continue
+		}
+		out = append(out, intent.SessionRef{ID: s.ID, Slug: s.GoalHint})
+	}
+	return out
+}
+
 // newChatModel constructs a chatModel ready for tea.NewProgram.
 // socket is dialed lazily by the stream layer (Task 8).
 func newChatModel(socket string) *chatModel {
@@ -164,6 +220,7 @@ func newChatModel(socket string) *chatModel {
 		socket: socket,
 		phase:  ChatPhaseIdle,
 		input:  newChatInput(),
+		router: intent.NewRouter(),
 	}
 }
 

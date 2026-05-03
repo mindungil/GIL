@@ -198,7 +198,9 @@ func TestChatUpdate_EnterSubmitsAndAppendsToTranscript(t *testing.T) {
 	m := newChatModel("/tmp/test.sock")
 	m.width = 100
 	m.height = 32
-	m.input.ti.SetValue("hi there")
+	// Use a substantive prompt so the §2.6(b) router forwards it
+	// (KindForward) instead of catching it as too-vague.
+	m.input.ti.SetValue("add a fibonacci function to the math package")
 
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	cm := updated.(*chatModel)
@@ -206,13 +208,69 @@ func TestChatUpdate_EnterSubmitsAndAppendsToTranscript(t *testing.T) {
 	if cm.input.ti.Value() != "" {
 		t.Fatalf("buffer should clear on submit, got %q", cm.input.ti.Value())
 	}
-	// Transcript has the user line.
-	if len(cm.transcript) == 0 || !strings.Contains(cm.transcript[len(cm.transcript)-1], "hi there") {
+	// Transcript has the user echo line (router forwarded; the user
+	// line is present even if downstream dispatch was skipped because
+	// no client/active session in test mode).
+	var foundEcho bool
+	for _, line := range cm.transcript {
+		if strings.Contains(line, "add a fibonacci function") {
+			foundEcho = true
+			break
+		}
+	}
+	if !foundEcho {
 		t.Fatalf("transcript missing user line: %v", cm.transcript)
 	}
 	// firstTurnDone flips on first submit.
 	if !cm.firstTurnDone {
 		t.Fatalf("expected firstTurnDone=true after first submit")
+	}
+}
+
+func TestChatUpdate_NLVerb_AppendsArrowNote(t *testing.T) {
+	m := newChatModel("/tmp/test.sock")
+	m.width = 100
+	m.height = 32
+	m.input.ti.SetValue("show me the spec")
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	cm := updated.(*chatModel)
+
+	var foundArrow bool
+	for _, line := range cm.transcript {
+		if strings.Contains(line, "→") && strings.Contains(line, "spec") {
+			foundArrow = true
+			break
+		}
+	}
+	if !foundArrow {
+		t.Fatalf("expected → spec note in transcript, got %v", cm.transcript)
+	}
+}
+
+func TestChatUpdate_NLVerbQuit_ReturnsQuitCmd(t *testing.T) {
+	m := newChatModel("/tmp/test.sock")
+	m.input.ti.SetValue("goodbye")
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatalf("NL 'goodbye' should resolve to quit verb and return tea.Quit")
+	}
+}
+
+func TestChatUpdate_TooVague_AppendsClarification(t *testing.T) {
+	m := newChatModel("/tmp/test.sock")
+	m.input.ti.SetValue("hi")
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	cm := updated.(*chatModel)
+	var foundQ bool
+	for _, line := range cm.transcript {
+		if strings.Contains(line, "?") && strings.Contains(line, "tell me what you want") {
+			foundQ = true
+			break
+		}
+	}
+	if !foundQ {
+		t.Fatalf("expected too-vague clarification in transcript, got %v", cm.transcript)
 	}
 }
 
