@@ -24,10 +24,13 @@ var snapshotSizes = []struct {
 func TestChatView_Snapshots(t *testing.T) {
 	prevNoColor := IsNoColor()
 	prevAscii := IsAsciiMode()
+	prevCwd := chatCwd
 	SetNoColor(true)
 	SetAsciiMode(false)
+	chatCwd = func() string { return "/snap/cwd" }
 	defer SetNoColor(prevNoColor)
 	defer SetAsciiMode(prevAscii)
+	defer func() { chatCwd = prevCwd }()
 
 	for _, sz := range snapshotSizes {
 		t.Run(sz.name, func(t *testing.T) {
@@ -73,10 +76,13 @@ func stripDynamic(s string) string {
 func TestChatView_AsciiSnapshot(t *testing.T) {
 	prevNoColor := IsNoColor()
 	prevAscii := IsAsciiMode()
+	prevCwd := chatCwd
 	SetNoColor(true)
 	SetAsciiMode(true)
+	chatCwd = func() string { return "/snap/cwd" }
 	defer SetNoColor(prevNoColor)
 	defer SetAsciiMode(prevAscii)
+	defer func() { chatCwd = prevCwd }()
 
 	m := newChatModel("/tmp/test.sock")
 	m.width = 80
@@ -116,10 +122,13 @@ func TestChatView_ColorSnapshot(t *testing.T) {
 
 	prevNoColor := IsNoColor()
 	prevAscii := IsAsciiMode()
+	prevCwd := chatCwd
 	SetNoColor(false)
 	SetAsciiMode(false)
+	chatCwd = func() string { return "/snap/cwd" }
 	defer SetNoColor(prevNoColor)
 	defer SetAsciiMode(prevAscii)
+	defer func() { chatCwd = prevCwd }()
 
 	m := newChatModel("/tmp/test.sock")
 	m.width = 80

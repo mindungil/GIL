@@ -47,15 +47,24 @@ func (m *chatModel) chatView() string {
 	)
 }
 
+// chatCwd is indirected through a package var so snapshot tests can
+// pin it to a stable value across machines (real cwd length varies and
+// would otherwise change where the header right-side gets truncated).
+var chatCwd = func() string {
+	cwd, _ := os.Getwd()
+	return cwd
+}
+
 // renderChatHeader is the rounded box at the top per design §3.
 func (m *chatModel) renderChatHeader() string {
 	g := Glyphs()
-	cwd, _ := os.Getwd()
+	cwd := chatCwd()
 	if cwd == "" {
 		cwd = "?"
 	}
 	left := styleDim(g.QuoteBar) + "  " + styleHeader("G  I  L")
 	right := styleDim(cwd) + "   " + styleMeta("claude-opus-4-7  "+g.Dot+"  "+version.String())
+	left, right = fitTwoColumn(left, right, m.width-4)
 	body := padBetween(left, right, m.width-4)
 
 	tl, tr := g.BoxLightTL, g.BoxLightTR
@@ -110,6 +119,7 @@ func (m *chatModel) renderAffordanceLine() string {
 		version.String(), Glyphs().Dot, "↑↓", "/")
 	left := "      " + styleMeta(subtitle)
 	right := styleMeta(hints)
+	left, right = fitTwoColumn(left, right, m.width)
 	return padBetween(left, right, m.width)
 }
 
@@ -173,4 +183,22 @@ func (m *chatModel) renderConversation(convH int) string {
 // False during run/stuck phases.
 func (m *chatModel) inputEnabled() bool {
 	return m.phase != ChatPhaseRun && m.phase != ChatPhaseStuck
+}
+
+// fitTwoColumn shrinks left/right so their combined visual width plus a
+// 1-cell gap fits inside total. Right is sacrificed first; if left
+// still doesn't fit, it is truncated and right is dropped.
+func fitTwoColumn(left, right string, total int) (string, string) {
+	lw := lipgloss.Width(left)
+	rw := lipgloss.Width(right)
+	if lw+rw+1 <= total {
+		return left, right
+	}
+	if room := total - lw - 1; room >= 0 {
+		if room == 0 {
+			return left, ""
+		}
+		return left, truncate(right, room)
+	}
+	return truncate(left, total), ""
 }

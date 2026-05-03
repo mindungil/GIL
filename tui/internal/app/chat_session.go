@@ -19,15 +19,14 @@ func (m *chatModel) renderPreFirstTurn(convH int) string {
 	b.WriteString("\n") // 1 row of breathing space
 
 	if len(m.sessions) == 0 {
+		empty := truncRunes("no past sessions  — describe what you want to build below", max(0, m.width-6), true)
 		b.WriteString("      ")
-		b.WriteString(styleSurface("no past sessions"))
-		b.WriteString("  ")
-		b.WriteString(styleMeta("— describe what you want to build below"))
+		b.WriteString(styleSurface(empty))
 		b.WriteString("\n")
 		return padToHeight(b.String(), convH)
 	}
 
-	lead := chatLeadIn(len(m.sessions), topN)
+	lead := truncRunes(chatLeadIn(len(m.sessions), topN), max(0, m.width-6), true)
 	b.WriteString("      ")
 	b.WriteString(styleSurface(lead))
 	b.WriteString("\n\n")
@@ -43,7 +42,7 @@ func (m *chatModel) renderPreFirstTurn(convH int) string {
 	}
 	b.WriteString("\n")
 	b.WriteString("         ")
-	b.WriteString(styleMeta("›  describe a new task, or resume one above by name"))
+	b.WriteString(styleMeta(truncRunes("›  describe a new task, or resume one above by name", max(0, m.width-9), true)))
 	b.WriteString("\n")
 	return padToHeight(b.String(), convH)
 }

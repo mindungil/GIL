@@ -1,14 +1,14 @@
-╭──────────────────────────────────────╮                                                      
-│ ▏  G  I  L <cwd>   claude-opus-4-7  ·  <version> │                
-╰──────────────────────────────────────╯                                                      
-                                                                                              
-      no past sessions  — describe what you want to build below                               
-                                                                                              
-                                                                                              
-                                                                                              
-────────────────────────────────────────                                                      
-                    idle  ·  agent ready                                                      
-╔══════════════════════════════════════╗                                                      
-║  ›                                   ║                                                      
-╚══════════════════════════════════════╝                                                      
-      describe a task, resume by slug, or ask what's running <version>  ·  ↑↓ history  /  / cmds
+╭──────────────────────────────────────╮ 
+│ ▏  G  I  L /snap/cwd   claude-opus-… │ 
+╰──────────────────────────────────────╯ 
+                                         
+      no past sessions  — describe what… 
+                                         
+                                         
+                                         
+──────────────────────────────────────── 
+                    idle  ·  agent ready 
+╔══════════════════════════════════════╗ 
+║  ›                                   ║ 
+╚══════════════════════════════════════╝ 
+      describe a task, resume by slug, … 
