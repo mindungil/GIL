@@ -39,6 +39,13 @@ type GRPCClient struct {
 	activeSess string
 	workingDir string
 
+	// providerName / model are forwarded to StartInterview when set.
+	// Empty values fall through to the daemon's workspace-config
+	// defaults (server/internal/service/interview.go applies layered
+	// workspace.Resolve when both are empty).
+	providerName string
+	model        string
+
 	// inInterview tracks whether StartInterview has been called for the
 	// current session. Once true, subsequent SendPrompt calls use
 	// ReplyInterview instead of StartInterview.
@@ -66,6 +73,13 @@ func NewGRPCClient(s *sdk.Client, workingDir string) *GRPCClient {
 		chunkDone:  make(chan struct{}),
 		eventCh:    make(chan TrackerInput, 64),
 	}
+}
+
+// SetProvider sets the provider/model to forward in StartInterview.
+// Empty strings fall through to the daemon's workspace-config defaults.
+func (g *GRPCClient) SetProvider(name, model string) {
+	g.providerName = name
+	g.model = model
 }
 
 // ActiveSessionID returns the current session ID (empty if none).
@@ -168,7 +182,7 @@ func (g *GRPCClient) SendPrompt(ctx context.Context, prompt string) error {
 	sessID := g.activeSess
 
 	if !g.inInterview {
-		stream, err := g.sdk.StartInterview(ctx, sessID, prompt, "", "", sdk.InterviewModels{})
+		stream, err := g.sdk.StartInterview(ctx, sessID, prompt, g.providerName, g.model, sdk.InterviewModels{})
 		if err != nil {
 			return err
 		}

@@ -161,6 +161,12 @@ func Run(ctx context.Context, cfg Config) error {
 				continue
 			}
 			// Stream assistant chunks until the client signals done.
+			// A 30s watchdog converts a silent hang (gild waiting on a
+			// dead provider, no events ever) into a visible note so the
+			// user knows to ctrl+c rather than staring at an idle prompt.
+			gotAnyChunk := false
+			turnStart := time.Now()
+			warned := false
 			for {
 				chunk, more, err := cfg.Client.NextAssistantChunk(ctx)
 				if err != nil {
@@ -170,10 +176,20 @@ func Run(ctx context.Context, cfg Config) error {
 				}
 				if chunk != "" {
 					cfg.Renderer.AssistantText(chunk)
+					gotAnyChunk = true
 				}
 				if !more {
 					break
 				}
+				if !warned && !gotAnyChunk && time.Since(turnStart) > 30*time.Second {
+					cfg.Renderer.SystemNote(render.NoteSystem,
+						"no response after 30s — daemon may be hung on a provider call. check `tail /tmp/gild.log`, ctrl+c to abort")
+					warned = true
+				}
+			}
+			if !gotAnyChunk {
+				cfg.Renderer.SystemNote(render.NoteSystem,
+					"empty stream — interview produced no output (provider misconfigured or auth missing?)")
 			}
 			cfg.Renderer.AssistantText("\n")
 		}

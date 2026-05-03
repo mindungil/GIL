@@ -69,10 +69,11 @@ terminal — gil chat is the explicit form for piped or scripted use.`,
 // it dials the daemon, constructs a gRPC SessionClient and a stdout
 // renderer, then runs repl.Run until the user types /quit or hits EOF.
 //
-// providerName and model parameters are accepted from the cobra command
-// but currently unused — repl.Run drives prompts through the daemon's
-// configured provider. They will return when V1.1 wires runtime prompt
-// echo to a real LLM (see /docs/plans/phase-26-implementation.md T10).
+// providerName and model are forwarded into the GRPCClient via
+// SetProvider so they reach the daemon's StartInterview RPC. Empty
+// values defer to the daemon's layered workspace-config defaults
+// (server/internal/service/interview.go applies workspace.Resolve when
+// both are empty).
 func runChat(cmd *cobra.Command, socket, providerName, model string) error {
 	out := cmd.OutOrStdout()
 	in := cmd.InOrStdin()
@@ -112,6 +113,7 @@ func runChat(cmd *cobra.Command, socket, providerName, model string) error {
 		}
 	}
 	grpcClient := repl.NewGRPCClient(cli, workingDir)
+	grpcClient.SetProvider(providerName, model)
 	defer grpcClient.Close()
 
 	noColor := os.Getenv("NO_COLOR") != ""
