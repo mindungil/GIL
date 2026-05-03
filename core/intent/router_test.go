@@ -82,6 +82,8 @@ func TestRouter_Forward(t *testing.T) {
 		"the OAuth flow should redirect to /callback",
 		"actually let me think about that",
 		"why does the test fail when I run go test ./pkg/foo?",
+		"help me debug this OAuth flow",   // not the help verb
+		"can you run the tests for me",    // not the run verb (no session-action signal)
 		"",
 	}
 	for _, in := range conversational {
@@ -135,6 +137,33 @@ func TestRouter_SwitchAmbiguous_NoMatch(t *testing.T) {
 	}
 	if got.Clarification == "" {
 		t.Error("ambiguous classification must include clarification")
+	}
+}
+
+func TestRouter_SwitchBare_AsksForTarget(t *testing.T) {
+	r := NewRouter()
+	got := r.Classify(context.Background(), "switch", SessionContext{
+		RecentSessions: []SessionRef{{ID: "01KQEP000001", Slug: "add dark mode"}},
+	})
+	if got.Kind != KindAmbiguous {
+		t.Errorf("bare 'switch' should ask for target, got kind=%d verb=%q", got.Kind, got.Verb)
+	}
+}
+
+func TestRouter_SwitchDoesNotMatchVerbAsSlug(t *testing.T) {
+	// Regression: a session happening to be slugged "switch" must not
+	// match the "switch" keyword in every switch prompt.
+	r := NewRouter()
+	ctx := SessionContext{
+		RecentSessions: []SessionRef{
+			{ID: "01KQEP000001", Slug: "switch"},
+			{ID: "01KQEP000002", Slug: "fix oauth"},
+		},
+	}
+	got := r.Classify(context.Background(), "switch to oauth", ctx)
+	if got.Kind != KindVerb || got.Args["target"] != "01KQEP000002" {
+		t.Errorf("expected switch → oauth (01KQEP000002), got kind=%d target=%q rationale=%q",
+			got.Kind, got.Args["target"], got.Rationale)
 	}
 }
 

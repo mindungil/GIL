@@ -181,10 +181,11 @@ var verbPatterns = []verbPattern{
 	{VerbNew, regexp.MustCompile(`\b(start|create|begin|open)\b.*\b(new|fresh|another)\b.*\b(session|task|mission|job|one)\b`), "start a new session"},
 	{VerbNew, regexp.MustCompile(`\b(new\s+(session|task|mission)|fresh\s+(session|task|mission)|start\s+over)\b`), "start a new session"},
 	{VerbRun, regexp.MustCompile(`\b(start\s+the\s+run|begin\s+the\s+run|kick\s+off|run\s+it|let'?s\s+(go|run)|freeze\s+(it|and\s+run))\b`), "start the run"},
-	{VerbSwitch, regexp.MustCompile(`\b(switch|resume|reopen|jump|pick\s+up)\s+(to|back\s+to|into|on)?\b`), "switch sessions"},
+	{VerbSwitch, regexp.MustCompile(`^(switch|resume|reopen|jump|pick\s+up)\s*$`), "switch sessions"},
+	{VerbSwitch, regexp.MustCompile(`\b(switch|resume|reopen|jump|pick\s+up)\s+(to|back\s+to|into|on)\b`), "switch sessions"},
 	{VerbSwitch, regexp.MustCompile(`\bcontinue\s+(the|that|with|on|where)\b`), "switch sessions"},
 	{VerbSwitch, regexp.MustCompile(`\b(use|open|load)\b.*\b(session|task|mission|the\s+\w+\s+one)\b`), "switch sessions"},
-	{VerbHelp, regexp.MustCompile(`\b(help|what\s+can\s+you\s+do|how\s+do\s+i)\b`), "help"},
+	{VerbHelp, regexp.MustCompile(`^(what\s+can\s+(you|gil)\s+do|how\s+do\s+i\s+use\s+(this|gil)|what'?s?\s+possible|halp)\b`), "help"},
 	{VerbQuit, regexp.MustCompile(`\b(quit|exit|leave|bye|goodbye|see\s+ya)\b`), "exit"},
 }
 
@@ -200,7 +201,13 @@ func resolveSwitch(orig, lower string, ctx SessionContext) Classification {
 		return verbClassification(VerbSwitch, map[string]string{"target": id}, "switch by id")
 	}
 
-	// Slug match.
+	// Strip the switch verb itself from the haystack so a session
+	// happening to be slugged "switch" doesn't get matched on every
+	// `switch to X` prompt. Same for the natural-language connectors —
+	// "to", "back to", "into", "on" — and "the"/"that" articles.
+	stripped := switchStripRE.ReplaceAllString(lower, " ")
+
+	// Slug match against the cleaned prompt.
 	type hit struct {
 		id   string
 		slug string
@@ -210,7 +217,7 @@ func resolveSwitch(orig, lower string, ctx SessionContext) Classification {
 		if s.Slug == "" {
 			continue
 		}
-		if substringMatch(lower, strings.ToLower(s.Slug)) {
+		if substringMatch(stripped, strings.ToLower(s.Slug)) {
 			hits = append(hits, hit{s.ID, s.Slug})
 		}
 	}
@@ -255,6 +262,11 @@ func substringMatch(haystack, candidate string) bool {
 }
 
 var ulidLooseRE = regexp.MustCompile(`(?i)\b[0-9A-HJKMNP-TV-Z]{6,26}\b`)
+
+// switchStripRE removes the switch verb itself + connectors + articles
+// before slug matching so prompts like "switch to the dark one" don't
+// match a session happening to be slugged "switch" or "the".
+var switchStripRE = regexp.MustCompile(`\b(switch|resume|reopen|jump|continue|pick\s+up|to|back\s+to|into|on|the|that|a|an)\b`)
 
 // extractSessionIDLoose returns the first ULID-shaped token in s.
 // Crockford alphabet — no I, L, O, U.
