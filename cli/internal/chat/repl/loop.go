@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/mindungil/gil/cli/internal/chat/render"
+	"github.com/mindungil/gil/core/intent"
 )
 
 // SessionSummary carries the display-relevant fields for a single session
@@ -46,6 +47,10 @@ type Config struct {
 	In       io.Reader
 	Renderer render.Renderer
 	Client   SessionClient
+	// Router classifies natural-language prompts into verb dispatches
+	// per design.md §2.6(b). When nil the loop forwards every
+	// InputPrompt directly (pre-26.6 behavior, --no-intent-router).
+	Router *intent.Router
 }
 
 // Run executes the chat REPL until the user types /quit, EOF, or an
@@ -117,6 +122,36 @@ func Run(ctx context.Context, cfg Config) error {
 					"run-time prompts are V1.1; for now wait for done, or `gil stop <id>` from another shell")
 				continue
 			}
+			// §2.6(b): natural-language verb routing. Slash-prefixed
+			// inputs are handled in InputSlash above and skip this path.
+			if cfg.Router != nil {
+				cl := cfg.Router.Classify(ctx, args, buildSessionContext(ctx, cfg, tr))
+				switch cl.Kind {
+				case intent.KindVerb:
+					if cl.Rationale != "" {
+						cfg.Renderer.SystemNote(render.NoteSystem, "→ "+cl.Rationale)
+					}
+					verbCmd, verbArgs := verbToSlashArgs(cl)
+					if SlashRequiresSession(verbCmd) && cfg.Client.ActiveSessionID() == "" {
+						cfg.Renderer.SystemNote(render.NoteSystem,
+							"need an active session for "+verbCmd+" — start one with a prompt or 'sessions'")
+						continue
+					}
+					if verbCmd == "quit" {
+						return nil
+					}
+					if err := dispatchSlash(ctx, cfg, tr, verbCmd, verbArgs); err != nil {
+						cfg.Renderer.SystemNote(render.NoteSystem,
+							fmt.Sprintf("%s failed: %v", verbCmd, err))
+					}
+					continue
+				case intent.KindAmbiguous:
+					cfg.Renderer.SystemNote(render.NoteSystem, "?  "+cl.Clarification)
+					continue
+				case intent.KindForward:
+					// fall through to SendPrompt below
+				}
+			}
 			if err := cfg.Client.SendPrompt(ctx, args); err != nil {
 				cfg.Renderer.SystemNote(render.NoteSystem,
 					fmt.Sprintf("send failed: %v", err))
@@ -184,6 +219,42 @@ func emitDeltaNotes(r render.Renderer, prev, cur render.SessionState, ev Tracker
 	}
 }
 
+// buildSessionContext snapshots the runtime state the router needs.
+// Pulls the recent-session list from the client (best-effort — empty on
+// error) so "switch to the dark one"-style prompts can be resolved.
+func buildSessionContext(ctx context.Context, cfg Config, tr *Tracker) intent.SessionContext {
+	out := intent.SessionContext{
+		Phase:           string(tr.State().Phase),
+		ActiveSessionID: cfg.Client.ActiveSessionID(),
+	}
+	list, err := cfg.Client.ListSessions(ctx)
+	if err != nil {
+		return out
+	}
+	const topN = 10
+	if len(list) > topN {
+		list = list[:topN]
+	}
+	for _, s := range list {
+		out.RecentSessions = append(out.RecentSessions, intent.SessionRef{
+			ID:   s.ID,
+			Slug: s.GoalHint,
+		})
+	}
+	return out
+}
+
+// verbToSlashArgs maps an intent.Classification verb to the same
+// (cmd, args) shape dispatchSlash already accepts. The router's verb
+// names are deliberately the slash names so this is a 1:1 hop.
+func verbToSlashArgs(cl intent.Classification) (string, string) {
+	cmd := string(cl.Verb)
+	if cl.Verb == intent.VerbSwitch {
+		return cmd, cl.Args["target"]
+	}
+	return cmd, ""
+}
+
 // dispatchSlash routes each known slash command to the appropriate
 // SessionClient call or renderer method.
 func dispatchSlash(ctx context.Context, cfg Config, tr *Tracker, cmd, args string) error {
@@ -192,7 +263,7 @@ func dispatchSlash(ctx context.Context, cfg Config, tr *Tracker, cmd, args strin
 	switch cmd {
 	case "help":
 		r.SystemNote(render.NoteSystem,
-			"slash commands: /sessions /switch /new /spec /status /diff /merge /run /quit /help")
+			"talk in plain language — gil routes it. slash escape-hatch: /sessions /switch /new /spec /status /diff /merge /run /quit /help")
 	case "sessions":
 		list, err := c.ListSessions(ctx)
 		if err != nil {

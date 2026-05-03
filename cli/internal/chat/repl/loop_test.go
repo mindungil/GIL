@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/mindungil/gil/cli/internal/chat/render"
+	"github.com/mindungil/gil/core/intent"
 )
 
 // fakeClient simulates the SessionClient interface. Tests pre-load
@@ -141,6 +142,90 @@ func TestLoop_SessionScopedSlashWithoutSession_Errors(t *testing.T) {
 		}
 	}
 	require.True(t, found)
+}
+
+func TestLoop_Router_NLVerb_DispatchesAndEmitsArrowNote(t *testing.T) {
+	mock := render.NewMockRenderer()
+	fc := &fakeClient{sessionID: "01KQEP000001"}
+	in := strings.NewReader("show me the spec\n/quit\n")
+	err := Run(context.Background(), Config{
+		In:       in,
+		Renderer: mock,
+		Client:   fc,
+		Router:   intent.NewRouter(),
+	})
+	require.NoError(t, err)
+
+	// Router should have classified → emitted "→ <rationale>" SystemNote …
+	var foundArrow bool
+	for _, c := range mock.Calls {
+		if c.Method == "SystemNote" && strings.HasPrefix(c.Text, "→ ") {
+			foundArrow = true
+			break
+		}
+	}
+	require.True(t, foundArrow, "expected router to emit a → routing note")
+
+	// … and the prompt should NOT have been sent to the daemon.
+	require.Empty(t, fc.sentPrompts, "verb prompts must not forward to SendPrompt")
+}
+
+func TestLoop_Router_Forward_StillSendsPrompt(t *testing.T) {
+	mock := render.NewMockRenderer()
+	fc := &fakeClient{
+		assistantChunks: []string{"ok"},
+	}
+	in := strings.NewReader("add a dark mode toggle to the settings page\n/quit\n")
+	err := Run(context.Background(), Config{
+		In:       in,
+		Renderer: mock,
+		Client:   fc,
+		Router:   intent.NewRouter(),
+	})
+	require.NoError(t, err)
+	require.Equal(t, []string{"add a dark mode toggle to the settings page"}, fc.sentPrompts)
+}
+
+func TestLoop_Router_AmbiguousSwitch_AsksAndDoesNotDispatch(t *testing.T) {
+	mock := render.NewMockRenderer()
+	fc := &fakeClient{
+		sessionList: []SessionSummary{
+			{ID: "01KQEP000001", GoalHint: "dark mode toggle"},
+			{ID: "01KQEP000002", GoalHint: "dark theme refactor"},
+		},
+	}
+	in := strings.NewReader("switch to the dark one\n/quit\n")
+	err := Run(context.Background(), Config{
+		In:       in,
+		Renderer: mock,
+		Client:   fc,
+		Router:   intent.NewRouter(),
+	})
+	require.NoError(t, err)
+
+	var foundQ bool
+	for _, c := range mock.Calls {
+		if c.Method == "SystemNote" && strings.HasPrefix(c.Text, "?  ") {
+			foundQ = true
+			break
+		}
+	}
+	require.True(t, foundQ, "ambiguous switch should emit a clarifying SystemNote")
+	require.Equal(t, "", fc.sessionID, "ambiguous switch must not commit")
+}
+
+func TestLoop_Router_NilRouter_PreservesLegacyForward(t *testing.T) {
+	mock := render.NewMockRenderer()
+	fc := &fakeClient{}
+	in := strings.NewReader("show me the spec\n/quit\n")
+	err := Run(context.Background(), Config{
+		In:       in,
+		Renderer: mock,
+		Client:   fc,
+		// Router intentionally nil — --no-intent-router behavior.
+	})
+	require.NoError(t, err)
+	require.Equal(t, []string{"show me the spec"}, fc.sentPrompts)
 }
 
 func TestLoop_ContextCancelled_ReturnsErr(t *testing.T) {

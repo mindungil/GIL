@@ -13,8 +13,14 @@ import (
 	"github.com/mindungil/gil/cli/internal/chat/render"
 	"github.com/mindungil/gil/cli/internal/chat/repl"
 	"github.com/mindungil/gil/cli/internal/cmd/uistyle"
+	intentpkg "github.com/mindungil/gil/core/intent"
 	"github.com/mindungil/gil/sdk"
 )
+
+// noIntentRouter, when true, bypasses the §2.6(b) verb router and
+// forwards every prompt straight to the daemon. Set by the
+// --no-intent-router flag on bare gil. Defaults false (router on).
+var noIntentRouter bool
 
 // chatCmd returns the explicit `gil chat` entrypoint. It is also the
 // implementation behind bare `gil` invocation when stdout is a TTY (see
@@ -54,7 +60,7 @@ terminal — gil chat is the explicit form for piped or scripted use.`,
 		},
 	}
 	c.Flags().StringVar(&socket, "socket", defaultSocket(), "gild UDS socket path")
-	c.Flags().StringVar(&providerName, "provider", "", "LLM provider for intent classification + interview (anthropic|openai|openrouter|vllm|mock)")
+	c.Flags().StringVar(&providerName, "provider", "", "LLM provider for the interview (anthropic|openai|openrouter|vllm|mock)")
 	c.Flags().StringVar(&model, "model", "", "LLM model id for the interview engine (empty → provider default)")
 	return c
 }
@@ -112,10 +118,15 @@ func runChat(cmd *cobra.Command, socket, providerName, model string) error {
 	renderer := render.NewStdoutChatRenderer(out, in, asciiMode, noColor)
 	defer renderer.Close()
 
+	var router *intentpkg.Router
+	if !noIntentRouter {
+		router = intentpkg.NewRouter()
+	}
 	return repl.Run(ctx, repl.Config{
 		In:       in,
 		Renderer: renderer,
 		Client:   grpcClient,
+		Router:   router,
 	})
 }
 
