@@ -148,6 +148,9 @@ func Run(ctx context.Context, cfg Config) error {
 				case intent.KindAmbiguous:
 					cfg.Renderer.SystemNote(render.NoteSystem, "?  "+cl.Clarification)
 					continue
+				case intent.KindTooVague:
+					cfg.Renderer.SystemNote(render.NoteSystem, "?  "+cl.Clarification)
+					continue
 				case intent.KindForward:
 					// fall through to SendPrompt below
 				}

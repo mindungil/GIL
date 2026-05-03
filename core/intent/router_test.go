@@ -181,6 +181,61 @@ func TestRouter_SwitchAmbiguous_MultipleMatches(t *testing.T) {
 	}
 }
 
+func TestRouter_TooVague_NoActiveSession(t *testing.T) {
+	r := NewRouter()
+	cases := []string{
+		"안녕",
+		"ㅎㅇ",
+		"hi",
+		"hello",
+		"ok",
+		"thanks",
+		"asdf",
+		"🎉",
+	}
+	for _, in := range cases {
+		got := r.Classify(context.Background(), in, SessionContext{})
+		if got.Kind != KindTooVague {
+			t.Errorf("Classify(%q) on idle should be too-vague, got kind=%d verb=%q",
+				in, got.Kind, got.Verb)
+		}
+		if got.Clarification == "" {
+			t.Errorf("Classify(%q) too-vague should include a clarification", in)
+		}
+	}
+}
+
+func TestRouter_TooVague_DoesNotFireDuringActiveSession(t *testing.T) {
+	r := NewRouter()
+	// During an active session a one-word reply ("yes", "postgres") is
+	// the interview's payload — must forward, never block as vague.
+	ctx := SessionContext{ActiveSessionID: "01KQEPABCXYZ", Phase: "interview"}
+	for _, in := range []string{"yes", "no", "postgres", "안녕"} {
+		got := r.Classify(context.Background(), in, ctx)
+		if got.Kind == KindTooVague {
+			t.Errorf("Classify(%q) during active session should never be too-vague", in)
+		}
+	}
+}
+
+func TestRouter_TooVague_TaskSignalEscapes(t *testing.T) {
+	r := NewRouter()
+	cases := []string{
+		"fix bug",                // verb
+		"add api",                // verb
+		"main.go",                // file extension
+		"~/myproj",               // path
+		"refactor auth",          // verb
+		"swap postgres for sqlite migration", // long enough anyway
+	}
+	for _, in := range cases {
+		got := r.Classify(context.Background(), in, SessionContext{})
+		if got.Kind == KindTooVague {
+			t.Errorf("Classify(%q) should not be too-vague (has task signal or length)", in)
+		}
+	}
+}
+
 func TestRouter_RationaleAlwaysPresent(t *testing.T) {
 	r := NewRouter()
 	got := r.Classify(context.Background(), "show me the spec", SessionContext{})

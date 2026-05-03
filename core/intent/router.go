@@ -26,7 +26,7 @@ const (
 	VerbHelp     Verb = "help"
 )
 
-// ClassificationKind discriminates the three buckets §2.6(b) defines.
+// ClassificationKind discriminates the buckets §2.6(b) defines.
 type ClassificationKind int
 
 const (
@@ -43,6 +43,14 @@ const (
 	// is missing or the target is not unique. Clarification holds the
 	// short follow-up question to show the user.
 	KindAmbiguous
+
+	// KindTooVague means the input is too short / lacks any task signal
+	// to safely commit to a new interview session. Used as a guard on
+	// idle-phase forwards so greetings ("hi", "안녕"), one-word
+	// non-verbs ("ok", "yeah"), and emoji don't pollute the session
+	// list. Caller emits Clarification and re-prompts. During active
+	// sessions the caller skips the vague check (every reply matters).
+	KindTooVague
 )
 
 // Classification is what the Router returns for a single prompt.
@@ -117,8 +125,40 @@ func (r *Router) Classify(_ context.Context, prompt string, ctx SessionContext) 
 		}
 	}
 
-	// 3. Nothing fired — forward.
+	// 3. No verb. Decide forward vs too-vague.
+	//    Vague check only applies on idle (no active session) — once
+	//    we're inside a session every reply matters and may be a single
+	//    word ("yes", "postgres") that the interview engine needs to
+	//    consume.
+	if ctx.ActiveSessionID == "" && isTooVague(trimmed) {
+		return Classification{
+			Kind:          KindTooVague,
+			Clarification: "tell me what you want to build (a feature, a fix, a refactor) — short is fine, but 'hi' or 'asdf' won't start a useful session",
+		}
+	}
 	return Classification{Kind: KindForward}
+}
+
+// taskSignalRE matches words/tokens that indicate the user is
+// describing actual work — verbs of construction, file extensions,
+// path-like tokens. Used by isTooVague to gate session creation.
+var taskSignalRE = regexp.MustCompile(`(?i)\b(add|fix|build|write|create|make|implement|refactor|update|migrate|test|deploy|debug|remove|delete|rename|move|extract|inline|setup|set\s*up|install|configure|wire|connect|hook|generate|stub|port|swap|replace)\b|\.(go|py|js|jsx|ts|tsx|rs|java|cpp|c|h|hpp|sh|md|yaml|yml|json|toml|sql|html|css|proto|rb|php|swift|kt|scala|clj|lua)\b|\/[\S]+`)
+
+// isTooVague returns true when the input is too short OR has no
+// recognizable task signal — a deliberate floor below which we don't
+// commit to creating a session. Korean greetings (안녕, ㅎㅇ) and
+// English greetings (hi, hello) get caught by the length floor; one-
+// word non-verbs ("ok", "thanks") get caught by the missing-signal
+// check.
+func isTooVague(msg string) bool {
+	r := []rune(msg)
+	if len(r) < 12 {
+		// Short inputs need a task signal to count.
+		// "fix bug" (7 chars, has "fix") → not vague.
+		// "안녕" (2 chars, no verb) → vague.
+		return !taskSignalRE.MatchString(msg)
+	}
+	return false
 }
 
 func verbClassification(v Verb, args map[string]string, rationale string) Classification {
