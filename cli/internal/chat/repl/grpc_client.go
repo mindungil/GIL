@@ -2,6 +2,7 @@ package repl
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -445,8 +446,35 @@ func mapRunEventToTracker(sessionID string, ev *gilv1.Event) TrackerInput {
 		if ev.GetMetrics() != nil {
 			in.CostUSD = ev.GetMetrics().CostUsd
 		}
-	case "run.stuck":
+	// The runner emits "stuck_detected" / "stuck_recovered" (see
+	// core/runner/runner.go ~727,746). Earlier the adapter listened
+	// for "run.stuck", so the user never saw the stuck signal —
+	// every stuck loop appeared as a generic hang. Internal Kind
+	// stays as "run.stuck" / "run.recovered" so state.go and loop.go
+	// taxonomies don't shift.
+	case "stuck_detected":
 		in.Kind = "run.stuck"
+		// Pattern + detail enrich the SystemNote so the user sees
+		// WHICH of the 6 detector patterns triggered, not just
+		// "stuck". Best-effort parse — bail to bare phase change if
+		// the payload shape is unexpected.
+		var d map[string]any
+		if jerr := json.Unmarshal(ev.GetDataJson(), &d); jerr == nil {
+			if p, ok := d["pattern"].(string); ok {
+				in.StuckPattern = p
+			}
+			if dt, ok := d["detail"].(string); ok {
+				in.StuckDetail = dt
+			}
+		}
+	case "stuck_recovered":
+		in.Kind = "run.recovered"
+		var d map[string]any
+		if jerr := json.Unmarshal(ev.GetDataJson(), &d); jerr == nil {
+			if e, ok := d["explanation"].(string); ok {
+				in.StuckDetail = e
+			}
+		}
 	case "run.done":
 		in.Kind = "run.done"
 		if ev.GetMetrics() != nil {

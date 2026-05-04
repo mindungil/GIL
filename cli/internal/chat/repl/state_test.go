@@ -89,6 +89,20 @@ func TestTracker_StuckSignal(t *testing.T) {
 	require.Equal(t, render.PhaseStuck, tr.State().Phase)
 }
 
+func TestTracker_RecoveredFlipsBackToRun(t *testing.T) {
+	// Stuck-then-recovered must restore PhaseRun so the strip stops
+	// showing the alarming stuck state. Without this, the chat
+	// surface would keep saying "stuck" forever after the recovery
+	// strategy succeeded — the user would think something's broken
+	// when in fact the agent moved on.
+	tr := NewTracker()
+	tr.Apply(fakeEvent{Kind: "run.started", MaxIter: 100}.ToTrackerInput())
+	tr.Apply(fakeEvent{Kind: "run.stuck", Iter: 45, MaxIter: 100}.ToTrackerInput())
+	require.Equal(t, render.PhaseStuck, tr.State().Phase)
+	tr.Apply(TrackerInput{Kind: "run.recovered"})
+	require.Equal(t, render.PhaseRun, tr.State().Phase)
+}
+
 func TestTracker_DoneWithChecks(t *testing.T) {
 	tr := NewTracker()
 	tr.Apply(fakeEvent{Kind: "run.done", Iter: 87, CostUSD: 2.34, ChecksOK: 4, ChecksTot: 4}.ToTrackerInput())

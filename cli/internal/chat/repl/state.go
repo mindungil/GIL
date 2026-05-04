@@ -21,6 +21,13 @@ type TrackerInput struct {
 	ChecksPassed int
 	ChecksTotal  int
 	Autonomy     string
+
+	// Stuck-detector payload, populated when Kind is "run.stuck" or
+	// "run.recovered" — see grpc_client.go's mapping of the runner's
+	// stuck_detected / stuck_recovered events. Pattern names mirror
+	// core/stuck/detector.go (PatternRepeatedActionObservation, …).
+	StuckPattern string
+	StuckDetail  string
 }
 
 type Tracker struct {
@@ -83,6 +90,12 @@ func (t *Tracker) Apply(in TrackerInput) {
 		if in.MaxIter > 0 {
 			t.s.MaxIter = in.MaxIter
 		}
+
+	case "run.recovered":
+		// Strategy actually unblocked the loop — flip back to PhaseRun
+		// so the strip stops showing the alarming "stuck" state. The
+		// SystemNote in loop.go carries the explanation text.
+		t.s.Phase = render.PhaseRun
 
 	case "run.done":
 		t.s.Phase = render.PhaseDone

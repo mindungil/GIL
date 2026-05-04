@@ -236,8 +236,26 @@ func emitDeltaNotes(r render.Renderer, prev, cur render.SessionState, ev Tracker
 	case "interview.ready_to_freeze":
 		r.SystemNote(render.NoteSaturation, "ready to freeze — /run to start")
 	case "run.stuck":
-		r.SystemNote(render.NoteSystem,
-			"stuck after recovery — V1.1 will offer /interrupt; for now `gil stop <id>` from another shell")
+		// Surface WHICH pattern fired so the user can decide whether
+		// to wait for the auto-recovery strategy or step in. Reads
+		// from ev (the unmuted TrackerInput payload) since the
+		// tracker keeps SessionState renderer-shaped and doesn't
+		// retain the stuck details.
+		msg := "stuck — agent loop detected"
+		if ev.StuckPattern != "" {
+			msg = "stuck — " + humanStuckPattern(ev.StuckPattern)
+			if ev.StuckDetail != "" {
+				msg += " (" + ev.StuckDetail + ")"
+			}
+		}
+		msg += ". recovery in progress; if it persists, `gil stop <id>` from another shell"
+		r.SystemNote(render.NoteSystem, msg)
+	case "run.recovered":
+		msg := "recovered — agent unblocked"
+		if ev.StuckDetail != "" {
+			msg += ": " + ev.StuckDetail
+		}
+		r.SystemNote(render.NoteSystem, msg)
 	case "run.done":
 		r.SystemNote(render.NoteSystem, "done — /diff to review, /merge to apply")
 	}
@@ -422,6 +440,27 @@ func formatAge(t time.Time) string {
 // the gRPC client wraps every status with, leaving just the server-supplied
 // message. When the message is unrecognized, returns the original error
 // string so we never lose information.
+// humanStuckPattern maps a core/stuck/detector.go pattern name into a
+// short user-facing phrase. Returns the input unchanged for unknown
+// patterns so a future detector pattern still surfaces SOMETHING.
+func humanStuckPattern(p string) string {
+	switch p {
+	case "PatternRepeatedActionObservation":
+		return "same tool result loop"
+	case "PatternRepeatedActionError":
+		return "same tool error loop"
+	case "PatternMonologue":
+		return "talking without acting"
+	case "PatternPingPong":
+		return "alternating tool ping-pong"
+	case "PatternContextWindowError":
+		return "context window overflow"
+	case "PatternNoProgress":
+		return "no file progress"
+	}
+	return p
+}
+
 func humanizeStreamErr(err error) string {
 	if err == nil {
 		return ""
