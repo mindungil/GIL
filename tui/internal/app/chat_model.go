@@ -48,6 +48,11 @@ type chatModel struct {
 	// Streaming state owned by chat_stream.go.
 	stream chatStreamState
 
+	// Run-tail state owned by chat_run.go. Non-nil while a
+	// RunService.Tail subscription is active; lets /quit cancel the
+	// stream cleanly and lets a second /run replace the prior tail.
+	runTail chatRunTailState
+
 	// firstTurnDone flips true the moment the user submits the first
 	// prompt; that's the cue for chat_view.go to stop rendering the
 	// session list above the conversation viewport.
@@ -74,6 +79,7 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		switch msg.Type {
 		case tea.KeyCtrlC:
+			m.cancelAllStreams()
 			return m, tea.Quit
 		case tea.KeyUp:
 			m.input.historyUp()
@@ -87,9 +93,7 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			if text == "/quit" || text == "/exit" {
-				if m.stream.cancel != nil {
-					m.stream.cancel()
-				}
+				m.cancelAllStreams()
 				return m, tea.Quit
 			}
 			m.transcript = append(m.transcript, "›  "+text)
@@ -207,8 +211,79 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.transcript = append(m.transcript,
 			"   ‹  created "+shortChatID(msg.session.ID)+" — describe the task to begin")
 		return m, nil
+
+	case chatRunStartedMsg:
+		// StartRun returned ok; flip phase and open the Tail
+		// subscription so the run becomes visible in the transcript.
+		// A second /run replaces the prior tail (cancel first).
+		if m.runTail.handle != nil {
+			m.runTail.handle.cancel()
+			m.runTail = chatRunTailState{}
+		}
+		m.phase = ChatPhaseRun
+		m.transcript = append(m.transcript, "   ‹  run started — tailing")
+		if m.client == nil {
+			return m, nil
+		}
+		return m, startChatRunTailCmd(m.client, msg.sessionID)
+
+	case chatRunStartFailedMsg:
+		m.transcript = append(m.transcript, "   !  run: "+msg.err)
+		return m, nil
+
+	case chatRunTailStartedMsg:
+		m.runTail.handle = msg.handle
+		return m, nextChatRunEventCmd(msg.handle)
+
+	case chatRunEventMsg:
+		phase, lines, keep := formatChatRunEvent(msg.ev)
+		if phase != "" {
+			m.phase = phase
+		}
+		// Coalesce consecutive agent_turn chunks the same way the
+		// interview path does — if the new line starts with "‹" and
+		// the prior transcript line also starts with "‹", append in
+		// place. Other glyphs (   ‹, !, ?) stay as separate entries.
+		for _, line := range lines {
+			if strings.HasPrefix(line, "‹  ") && len(m.transcript) > 0 &&
+				strings.HasPrefix(m.transcript[len(m.transcript)-1], "‹  ") {
+				m.transcript[len(m.transcript)-1] += strings.TrimPrefix(line, "‹  ")
+				continue
+			}
+			m.transcript = append(m.transcript, line)
+		}
+		if !keep {
+			// Terminal event (run.done) — close the tail and let
+			// chatRunTailDoneMsg arrive naturally on the next Recv.
+			return m, nextChatRunEventCmd(msg.handle)
+		}
+		if m.runTail.handle != nil {
+			return m, nextChatRunEventCmd(m.runTail.handle)
+		}
+		return m, nil
+
+	case chatRunTailDoneMsg:
+		m.runTail = chatRunTailState{}
+		return m, nil
+
+	case chatRunTailErrMsg:
+		m.transcript = append(m.transcript, "   !  run tail error: "+msg.err)
+		m.runTail = chatRunTailState{}
+		return m, nil
 	}
 	return m, nil
+}
+
+// cancelAllStreams cancels every in-flight gRPC stream owned by the
+// chat model. Called from /quit, /exit, and Ctrl+C so we don't leave
+// goroutines waiting on Recv after the bubbletea program exits.
+func (m *chatModel) cancelAllStreams() {
+	if m.stream.cancel != nil {
+		m.stream.cancel()
+	}
+	if m.runTail.handle != nil {
+		m.runTail.handle.cancel()
+	}
 }
 
 func (m *chatModel) View() string { return m.chatView() }

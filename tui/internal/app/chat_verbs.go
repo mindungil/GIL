@@ -236,15 +236,25 @@ func fetchDiffCmd(client *sdk.Client, sessionID string) tea.Cmd {
 	}
 }
 
+// chatRunStartedMsg fires after a successful StartRun so chatModel
+// can kick off the Tail subscription. Carries the sessionID separately
+// from the verb-result text so Update knows where to dial.
+type chatRunStartedMsg struct{ sessionID string }
+
+// chatRunStartFailedMsg surfaces a StartRun error to the transcript;
+// the caller treats this just like chatVerbResultMsg{kind:"err"} but
+// the typed shape lets future error UX (retry button, etc.) hook in.
+type chatRunStartFailedMsg struct{ err string }
+
 func startRunCmd(client *sdk.Client, sessionID string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), verbCmdTimeout)
 		defer cancel()
 		_, err := client.StartRun(ctx, sessionID, "", "", false)
 		if err != nil {
-			return chatVerbResultMsg{kind: "err", text: "run: " + err.Error()}
+			return chatRunStartFailedMsg{err: err.Error()}
 		}
-		return chatVerbResultMsg{kind: "ok", text: "run started — switching to run phase"}
+		return chatRunStartedMsg{sessionID: sessionID}
 	}
 }
 
