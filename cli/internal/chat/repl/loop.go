@@ -165,6 +165,7 @@ func Run(ctx context.Context, cfg Config) error {
 			// dead provider, no events ever) into a visible note so the
 			// user knows to ctrl+c rather than staring at an idle prompt.
 			gotAnyChunk := false
+			streamErrored := false
 			turnStart := time.Now()
 			warned := false
 			for {
@@ -172,6 +173,7 @@ func Run(ctx context.Context, cfg Config) error {
 				if err != nil {
 					cfg.Renderer.SystemNote(render.NoteSystem,
 						"stream error: "+humanizeStreamErr(err))
+					streamErrored = true
 					break
 				}
 				if chunk != "" {
@@ -187,7 +189,10 @@ func Run(ctx context.Context, cfg Config) error {
 					warned = true
 				}
 			}
-			if !gotAnyChunk {
+			if !gotAnyChunk && !streamErrored {
+				// Clean stream close with no events — daemon path
+				// completed silently. Surface so the user knows their
+				// turn produced nothing rather than staring at idle.
 				cfg.Renderer.SystemNote(render.NoteSystem,
 					"empty stream — interview produced no output (provider misconfigured or auth missing?)")
 			}
