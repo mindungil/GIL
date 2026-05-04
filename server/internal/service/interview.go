@@ -12,10 +12,12 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/mindungil/gil/core/interview"
+	"github.com/mindungil/gil/core/paths"
 	"github.com/mindungil/gil/core/provider"
 	"github.com/mindungil/gil/core/session"
 	"github.com/mindungil/gil/core/spec"
 	"github.com/mindungil/gil/core/specstore"
+	"github.com/mindungil/gil/core/workspace"
 	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
 )
 
@@ -104,13 +106,35 @@ func (s *InterviewService) Start(req *gilv1.StartInterviewRequest, stream gilv1.
 		return status.Errorf(codes.Internal, "update status: %v", err)
 	}
 
+	// Apply layered workspace defaults so empty req.Provider/req.Model
+	// inherit from the user's project- or global-scoped config.toml.
+	// Mirrors run.go's behavior; without this an empty req.Provider
+	// would fall through to the providerFactory's hard-coded "anthropic"
+	// default even when the user has only configured another provider.
+	provName, modelName := req.Provider, req.Model
+	if provName == "" || modelName == "" {
+		wsRoot, _ := workspace.Discover(sess.WorkingDir)
+		var globalCfgPath string
+		if layout, lerr := paths.FromEnv(); lerr == nil {
+			globalCfgPath = layout.ConfigFile()
+		}
+		if wsCfg, cfgErr := workspace.Resolve(globalCfgPath, workspace.LocalConfigFile(wsRoot)); cfgErr == nil {
+			if provName == "" {
+				provName = wsCfg.Provider
+			}
+			if modelName == "" {
+				modelName = wsCfg.Model
+			}
+		}
+	}
+
 	// Build provider + engines with per-stage model selection.
 	// Each sub-engine uses its dedicated model, falling back to mainModel when empty.
-	prov, defaultModel, err := s.providerFactory(req.Provider)
+	prov, defaultModel, err := s.providerFactory(provName)
 	if err != nil {
 		return status.Errorf(codes.InvalidArgument, "provider: %v", err)
 	}
-	mainModel := chooseModel(req.Model, defaultModel)
+	mainModel := chooseModel(modelName, defaultModel)
 	slotModel := chooseModel(req.SlotModel, mainModel)
 	adversaryModel := chooseModel(req.AdversaryModel, mainModel)
 	auditModel := chooseModel(req.AuditModel, mainModel)
