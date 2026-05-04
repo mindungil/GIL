@@ -2,6 +2,8 @@ package intent
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -178,6 +180,32 @@ func TestRouter_SwitchAmbiguous_MultipleMatches(t *testing.T) {
 	got := r.Classify(context.Background(), "switch to the dark one", ctx)
 	if got.Kind != KindAmbiguous {
 		t.Errorf("expected ambiguous, got kind=%d verb=%q", got.Kind, got.Verb)
+	}
+	// Each option must include the short ID so identical-slug sessions
+	// remain distinguishable.
+	for _, want := range []string{"01KQEP0000", "dark mode toggle", "dark theme refactor"} {
+		if !strings.Contains(got.Clarification, want) {
+			t.Errorf("clarification %q missing %q", got.Clarification, want)
+		}
+	}
+}
+
+func TestRouter_SwitchAmbiguous_ManyMatches_Caps(t *testing.T) {
+	r := NewRouter()
+	var refs []SessionRef
+	for i := 0; i < 12; i++ {
+		refs = append(refs, SessionRef{
+			ID:   fmt.Sprintf("01KQEP%06d", i),
+			Slug: "implement bubblesort in Go",
+		})
+	}
+	got := r.Classify(context.Background(), "switch to bubblesort", SessionContext{RecentSessions: refs})
+	if got.Kind != KindAmbiguous {
+		t.Fatalf("expected ambiguous, got kind=%d", got.Kind)
+	}
+	// Must mention the tail count, not enumerate all 12.
+	if !strings.Contains(got.Clarification, "7 more") {
+		t.Errorf("expected '7 more' in clarification, got %q", got.Clarification)
 	}
 }
 

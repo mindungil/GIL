@@ -2,6 +2,7 @@ package intent
 
 import (
 	"context"
+	"fmt"
 	"regexp"
 	"sort"
 	"strings"
@@ -272,18 +273,44 @@ func resolveSwitch(orig, lower string, ctx SessionContext) Classification {
 			Clarification: "which session — name a slug or paste an id",
 		}
 	default:
-		// Multiple hits — ask user to disambiguate.
+		// Multiple hits — ask user to disambiguate. Always show the
+		// short ID so identical-slug duplicates remain distinguishable
+		// (chat creates many "implement bubblesort" sessions on
+		// repeated dogfood; listing identical names ten times is
+		// useless). Cap at 5; surface the count of any tail.
 		sort.SliceStable(hits, func(i, j int) bool { return hits[i].slug < hits[j].slug })
-		var names []string
-		for _, h := range hits {
-			names = append(names, `"`+h.slug+`"`)
+		const showMax = 5
+		shown := hits
+		extra := 0
+		if len(hits) > showMax {
+			shown = hits[:showMax]
+			extra = len(hits) - showMax
 		}
+		var names []string
+		for _, h := range shown {
+			names = append(names, shortIDPrefix(h.id)+` "`+h.slug+`"`)
+		}
+		clar := "which one — " + strings.Join(names, ", ")
+		if extra > 0 {
+			clar += fmt.Sprintf(", or %d more", extra)
+		}
+		clar += "? paste an id to pick"
 		return Classification{
 			Kind:          KindAmbiguous,
 			Verb:          VerbSwitch,
-			Clarification: "which one — " + strings.Join(names, " or ") + "?",
+			Clarification: clar,
 		}
 	}
+}
+
+// shortIDPrefix returns the first 10 chars of a ULID — enough to
+// distinguish sessions created in different ms windows without making
+// the disambiguation prompt unwieldy.
+func shortIDPrefix(id string) string {
+	if len(id) <= 10 {
+		return id
+	}
+	return id[:10]
 }
 
 // substringMatch returns true when any whitespace-delimited token of
