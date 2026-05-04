@@ -233,6 +233,17 @@ func emitDeltaNotes(r render.Renderer, prev, cur render.SessionState, ev Tracker
 			r.SystemNote(render.NoteAdversary,
 				fmt.Sprintf("%d finding(s)", cur.AdvFindings))
 		}
+	case "interview.started":
+		// Sensing → conversation. The Reason payload looks like
+		// "domain=cli-tooling confidence=0.85" — show it so the user
+		// knows what the engine inferred about their request.
+		msg := "interview started"
+		if ev.Reason != "" {
+			msg += " — " + ev.Reason
+		}
+		r.SystemNote(render.NoteSystem, msg)
+	case "interview.resumed":
+		r.SystemNote(render.NoteSystem, "resumed in-progress interview")
 	case "interview.ready_to_freeze":
 		r.SystemNote(render.NoteSaturation, "ready to freeze — /run to start")
 	case "run.stuck":

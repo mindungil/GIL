@@ -28,6 +28,12 @@ type TrackerInput struct {
 	// core/stuck/detector.go (PatternRepeatedActionObservation, …).
 	StuckPattern string
 	StuckDetail  string
+
+	// Reason is the StageTransition.Reason payload — e.g.
+	// "domain=cli-tooling confidence=0.85" on interview.started, or
+	// the audit's "ready" reason on interview.ready_to_freeze. Empty
+	// for events that don't carry one.
+	Reason string
 }
 
 type Tracker struct {
@@ -64,6 +70,9 @@ func (t *Tracker) Apply(in TrackerInput) {
 	case "interview.adversary":
 		// Phase stays whatever it was; only update count.
 		t.s.AdvFindings = in.AdvFindings
+
+	case "interview.started", "interview.resumed":
+		t.s.Phase = render.PhaseInterview
 
 	case "interview.ready_to_freeze":
 		t.s.Phase = render.PhaseAwaitingConfirm

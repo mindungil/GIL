@@ -89,6 +89,21 @@ func TestTracker_StuckSignal(t *testing.T) {
 	require.Equal(t, render.PhaseStuck, tr.State().Phase)
 }
 
+func TestTracker_InterviewStarted_FlipsToInterviewPhase(t *testing.T) {
+	// sensing → conversation transition. Before #39's fix this was
+	// silently dropped; now it must flip the phase so the strip
+	// stops saying "idle" while the engine is actively interviewing.
+	tr := NewTracker()
+	tr.Apply(TrackerInput{Kind: "interview.started", Reason: "domain=cli-tooling confidence=0.85"})
+	require.Equal(t, render.PhaseInterview, tr.State().Phase)
+}
+
+func TestTracker_InterviewResumed_FlipsToInterviewPhase(t *testing.T) {
+	tr := NewTracker()
+	tr.Apply(TrackerInput{Kind: "interview.resumed"})
+	require.Equal(t, render.PhaseInterview, tr.State().Phase)
+}
+
 func TestTracker_RecoveredFlipsBackToRun(t *testing.T) {
 	// Stuck-then-recovered must restore PhaseRun so the strip stops
 	// showing the alarming stuck state. Without this, the chat

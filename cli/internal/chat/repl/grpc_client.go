@@ -254,10 +254,33 @@ func (g *GRPCClient) drainInterviewStream(
 				}
 			}
 		case *gilv1.InterviewEvent_Stage:
-			if v.Stage != nil && v.Stage.To == "ready_to_freeze" {
-				g.eventCh <- TrackerInput{
-					Kind:      "interview.ready_to_freeze",
-					SessionID: sessionID,
+			// Earlier this branch only forwarded To=="ready_to_freeze",
+			// but nothing in the server emits that string — the actual
+			// stage names are "sensing"/"conversation"/"confirm" plus
+			// the synthetic "resume" From-marker. Net result: every
+			// stage transition was silently dropped except the dead
+			// "ready_to_freeze" path. Forward all transitions and let
+			// the tracker / loop note layer decide what's worth
+			// surfacing to the user.
+			if v.Stage != nil {
+				kind := ""
+				switch {
+				case v.Stage.From == "resume":
+					kind = "interview.resumed"
+				case v.Stage.To == "conversation":
+					kind = "interview.started"
+				case v.Stage.To == "confirm":
+					// Keep the internal Kind that state.go and loop.go
+					// already taxonomy-bind to (PhaseAwaitingConfirm
+					// + the "ready to freeze — /run to start" note).
+					kind = "interview.ready_to_freeze"
+				}
+				if kind != "" {
+					g.eventCh <- TrackerInput{
+						Kind:      kind,
+						SessionID: sessionID,
+						Reason:    v.Stage.Reason,
+					}
 				}
 			}
 		case *gilv1.InterviewEvent_SpecUpdate:
