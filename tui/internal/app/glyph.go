@@ -12,25 +12,25 @@ import (
 // Selection happens once at process start through SelectGlyphs. Tests
 // can override by calling NewGlyphSet directly.
 type Glyph struct {
-	Running    string // ●
-	Idle       string // ○
-	Paused     string // ◐
-	Done       string // ✓
-	Failed     string // ✗
-	Warn       string // ⚠
-	TrendUp    string // ▲
-	TrendDown  string // ▼
-	Arrow      string // › (next-step / selected-row marker in modals)
-	Bullet     string // » (list bullet)
-	QuoteBar   string // ▏ (left margin on quote/log lines)
-	HSep       string // ─ (light horizontal divider)
-	HSepHeavy  string // ━ (heavy horizontal — section divider)
-	BarFill    string // ▰ (progress filled cell)
-	BarEmpty   string // ▱ (progress empty cell)
+	Running    string   // ●
+	Idle       string   // ○
+	Paused     string   // ◐
+	Done       string   // ✓
+	Failed     string   // ✗
+	Warn       string   // ⚠
+	TrendUp    string   // ▲
+	TrendDown  string   // ▼
+	Arrow      string   // › (next-step / selected-row marker in modals)
+	Bullet     string   // » (list bullet)
+	QuoteBar   string   // ▏ (left margin on quote/log lines)
+	HSep       string   // ─ (light horizontal divider)
+	HSepHeavy  string   // ━ (heavy horizontal — section divider)
+	BarFill    string   // ▰ (progress filled cell)
+	BarEmpty   string   // ▱ (progress empty cell)
 	BarPartial []string // sub-cell smoothing: 8 widths from ▏ to █
 	Spinner    []string // 10-frame Braille spinner
-	Ellipsis   string // …
-	Dot        string // · (footer separator)
+	Ellipsis   string   // …
+	Dot        string   // · (footer separator)
 
 	BoxHeavyTL    string // ╔ — top-left corner of prompt panel
 	BoxHeavyTR    string // ╗
@@ -123,8 +123,8 @@ var asciiMode = detectAscii()
 // detectAscii returns true when the environment doesn't safely support
 // Unicode glyphs. Heuristics, in order:
 //
-//   1. GIL_ASCII=1 (explicit override)
-//   2. LANG/LC_ALL/LC_CTYPE in {"C", "POSIX"}
+//  1. GIL_ASCII=1 (explicit override)
+//  2. LANG/LC_ALL/LC_CTYPE in {"C", "POSIX"}
 //
 // Empty locale → assume Unicode (most modern terminals work; falsely
 // degrading to ASCII looks worse than risking a glyph fallback). The
