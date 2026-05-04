@@ -238,6 +238,91 @@ func TestChatUpdate_Adversary_ZeroCountStaysSilent(t *testing.T) {
 	}
 }
 
+// --- tool_call / tool_result rendering ---
+
+func TestFormatChatRunEvent_ToolCall_RendersNameAndInput(t *testing.T) {
+	ev := &gilv1.Event{
+		Type:     "tool_call",
+		DataJson: []byte(`{"name":"Read","input":"/home/ubuntu/main.go"}`),
+	}
+	_, lines, keep := formatChatRunEvent(ev)
+	if !keep {
+		t.Error("tool_call must keep draining")
+	}
+	if len(lines) != 1 || !strings.Contains(lines[0], "Read") || !strings.Contains(lines[0], "main.go") {
+		t.Errorf("lines = %v; want one line with Read + main.go", lines)
+	}
+}
+
+func TestFormatChatRunEvent_ToolCall_TruncatesLongInput(t *testing.T) {
+	long := strings.Repeat("a", 200)
+	ev := &gilv1.Event{
+		Type:     "tool_call",
+		DataJson: []byte(`{"name":"Bash","input":"` + long + `"}`),
+	}
+	_, lines, _ := formatChatRunEvent(ev)
+	if len(lines) == 0 {
+		t.Fatal("expected one line")
+	}
+	// Truncation marker present, full payload absent.
+	if !strings.Contains(lines[0], "…") {
+		t.Errorf("expected truncation marker; got %q", lines[0])
+	}
+	if strings.Contains(lines[0], long) {
+		t.Errorf("expected truncation; got full %d-char input", len(long))
+	}
+}
+
+func TestFormatChatRunEvent_ToolResult_OkShowsCheckmark(t *testing.T) {
+	ev := &gilv1.Event{
+		Type:     "tool_result",
+		DataJson: []byte(`{"name":"Read","is_error":false,"content":"file contents..."}`),
+	}
+	_, lines, _ := formatChatRunEvent(ev)
+	if len(lines) == 0 || !strings.Contains(lines[0], "Read") || !strings.Contains(lines[0], "ok") {
+		t.Errorf("lines = %v; want Read + ok", lines)
+	}
+	if strings.Contains(lines[0], "!") {
+		t.Errorf("ok result should NOT use ! glyph; got %q", lines[0])
+	}
+}
+
+func TestFormatChatRunEvent_ToolResult_ErrorShowsBangAndMsg(t *testing.T) {
+	ev := &gilv1.Event{
+		Type:     "tool_result",
+		DataJson: []byte(`{"name":"Bash","is_error":true,"content":"command not found"}`),
+	}
+	_, lines, _ := formatChatRunEvent(ev)
+	if len(lines) == 0 {
+		t.Fatal("expected line")
+	}
+	if !strings.Contains(lines[0], "!") {
+		t.Errorf("error tool_result should use ! glyph; got %q", lines[0])
+	}
+	if !strings.Contains(lines[0], "command not found") {
+		t.Errorf("error message should be surfaced; got %q", lines[0])
+	}
+}
+
+func TestFormatChatRunEvent_ToolCall_NoName_PassesSilently(t *testing.T) {
+	ev := &gilv1.Event{Type: "tool_call", DataJson: []byte(`{"input":"x"}`)}
+	_, lines, _ := formatChatRunEvent(ev)
+	if len(lines) != 0 {
+		t.Errorf("nameless tool_call should produce no line; got %v", lines)
+	}
+}
+
+func TestTruncateChat_RuneAware(t *testing.T) {
+	// 10 Korean characters = 30 bytes UTF-8. Truncating at 5 runes
+	// must NOT split a rune.
+	in := strings.Repeat("가", 10)
+	got := truncateChat(in, 5)
+	wantPrefix := strings.Repeat("가", 5)
+	if !strings.HasPrefix(got, wantPrefix) || !strings.HasSuffix(got, "…") {
+		t.Errorf("got %q; want %q + ellipsis", got, wantPrefix)
+	}
+}
+
 // --- updateChatRunTelemetry + chatStatusBody (status strip) ---
 
 func TestUpdateRunTelemetry_IterAndCost(t *testing.T) {

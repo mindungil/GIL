@@ -159,6 +159,43 @@ func formatChatRunEvent(ev *gilv1.Event) (phase ChatPhase, lines []string, keepD
 			}
 		}
 		return "", nil, true
+	case "tool_call":
+		var d map[string]any
+		_ = json.Unmarshal(ev.GetDataJson(), &d)
+		name, _ := d["name"].(string)
+		if name == "" {
+			return "", nil, true
+		}
+		// Surface input compactly so the user sees WHICH file is
+		// being read/edited without drowning in JSON. Input is
+		// already truncated to 512B server-side (runner.go) but
+		// often that's still too long for one line — clip to 60
+		// runes for the chat strip.
+		input, _ := d["input"].(string)
+		input = truncateChat(input, 60)
+		line := "   ‹  ⚒ " + name
+		if input != "" {
+			line += "  " + input
+		}
+		return "", []string{line}, true
+	case "tool_result":
+		var d map[string]any
+		_ = json.Unmarshal(ev.GetDataJson(), &d)
+		name, _ := d["name"].(string)
+		isErr, _ := d["is_error"].(bool)
+		if name == "" {
+			return "", nil, true
+		}
+		status := "ok"
+		glyph := "‹"
+		if isErr {
+			status = "error"
+			glyph = "!"
+			if content, ok := d["content"].(string); ok && content != "" {
+				status = "error: " + truncateChat(content, 80)
+			}
+		}
+		return "", []string{"   " + glyph + "  ⚒ " + name + " → " + status}, true
 	}
 	// Unknown / not-yet-rendered event types pass silently — keep
 	// draining so the next event arrives.
@@ -224,7 +261,18 @@ func humanChatStuckPattern(p string) string {
 	return p
 }
 
-// silence unused warning when the package builds without callers of
-// strings via formatChatRunEvent's switch (the linter sees only
-// transitive use).
-var _ = strings.TrimSpace
+// truncateChat clips s to maxRunes runes, appending "…" when it had
+// to cut. Rune-aware so multi-byte characters (Korean filenames in a
+// `Read` tool call, etc.) don't get split mid-sequence. Returns
+// trimmed input verbatim when already short enough.
+func truncateChat(s string, maxRunes int) string {
+	s = strings.TrimSpace(s)
+	if maxRunes <= 0 {
+		return ""
+	}
+	r := []rune(s)
+	if len(r) <= maxRunes {
+		return s
+	}
+	return string(r[:maxRunes]) + "…"
+}
