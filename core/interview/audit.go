@@ -47,8 +47,8 @@ func (g *SelfAuditGate) AuditConversationToConfirm(ctx context.Context, st *Stat
 		Model:     g.model,
 		System:    auditSystem,
 		Messages:  []provider.Message{{Role: provider.RoleUser, Content: "Working spec:\n" + string(specJSON)}},
-		// 2000 (was 200) — same headroom rationale as engine.RunSensing.
-		MaxTokens: 2000,
+		// 4000 — same headroom rationale as engine.RunSensing.
+		MaxTokens: 4000,
 	})
 	if err != nil {
 		return false, "", fmt.Errorf("audit provider: %w", err)

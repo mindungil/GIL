@@ -17,6 +17,13 @@ var thinkingBlockRE = regexp.MustCompile(`(?si)<think(?:ing)?>.*?</think(?:ing)?
 // matching substrings that happen to appear in legitimate answers.
 var qwenPreambleRE = regexp.MustCompile(`(?si)^\s*(?:thinking process|thought|reasoning|let me think)\s*[:\-—]\s*`)
 
+// quotedQuestionRE matches a `"…?"` substring of at least 15 inner
+// characters ending in `?`. Used as a high-precision "lift the last
+// candidate question" rule when reasoning models propose several
+// quoted alternatives in their prose. Non-greedy on the inner content
+// so multiple candidates each match independently.
+var quotedQuestionRE = regexp.MustCompile(`"([^"]{15,}?\?)"`)
+
 // extractJSON returns the user-prompted JSON object (or array) from a
 // model response that may include reasoning preambles. Handles the
 // common "thinking" patterns that break strict JSON parsers:
@@ -45,29 +52,83 @@ func extractJSON(s string) string {
 	// Strip markdown fence (```json … ``` or ``` … ```).
 	s = stripCodeFence(s)
 
-	// Find the first JSON-y opener.
-	start := -1
-	var open, close byte
-	for i := 0; i < len(s); i++ {
-		if s[i] == '{' {
-			start, open, close = i, '{', '}'
-			break
+	// Find every balanced top-level {...} or [...] in the string and
+	// return the LARGEST. Earlier versions returned the first opener,
+	// but reasoning models commonly emit short array literals like
+	//   `Value: ["foo", "bar"]`
+	// in their prose BEFORE delivering the real JSON answer. The real
+	// answer is invariably the largest balanced structure; preferring
+	// it picks the right candidate while still doing the right thing
+	// when the response contains exactly one JSON value.
+	candidates := findBalancedStructures(s)
+	if len(candidates) == 0 {
+		// No balanced structure found. If the string contains an
+		// opening bracket but no matching close, fall back to
+		// returning the tail from the first opener so json.Unmarshal
+		// produces a useful "unexpected end" diagnostic.
+		for i := 0; i < len(s); i++ {
+			if s[i] == '{' || s[i] == '[' {
+				return s[i:]
+			}
 		}
-		if s[i] == '[' {
-			start, open, close = i, '[', ']'
-			break
-		}
-	}
-	if start == -1 {
-		// No JSON found — return as-is so json.Unmarshal can produce
-		// the canonical "looking for beginning of value" diagnostic.
 		return s
 	}
+	best := candidates[0]
+	for _, c := range candidates[1:] {
+		if c.end-c.start > best.end-best.start {
+			best = c
+		}
+	}
+	return s[best.start:best.end]
+}
 
-	// Walk from start, balancing brackets while honoring strings so a
-	// `"key": "value with } in it"` doesn't fool the counter. Returns
-	// only the first balanced object/array — anything trailing (more
-	// reasoning prose, a second JSON fragment, etc.) is dropped.
+// jsonRange marks one balanced JSON structure inside the source: half-
+// open [start, end) over the cleaned string.
+type jsonRange struct{ start, end int }
+
+// findBalancedStructures scans s and returns the byte ranges of every
+// top-level balanced {...} or [...] block, honoring string literals so
+// braces inside JSON strings don't fool the counter.
+//
+// Top-level here means the bracket that began the structure was at
+// depth 0; nested structures are not reported separately. Unbalanced
+// openers (the model truncated mid-emit) are silently skipped — caller
+// handles the empty-result fallback.
+func findBalancedStructures(s string) []jsonRange {
+	var out []jsonRange
+	i := 0
+	for i < len(s) {
+		c := s[i]
+		if c != '{' && c != '[' {
+			i++
+			continue
+		}
+		open := c
+		var close byte
+		if open == '{' {
+			close = '}'
+		} else {
+			close = ']'
+		}
+		end, ok := scanBalanced(s, i, open, close)
+		if !ok {
+			// Unbalanced from this position — skip past this opener
+			// and keep searching (later positions may still balance).
+			i++
+			continue
+		}
+		out = append(out, jsonRange{start: i, end: end})
+		i = end
+	}
+	return out
+}
+
+// scanBalanced walks from start (which must point at an `open` byte)
+// and returns the index just past the matching close, or (0, false) if
+// no balanced match exists in s. Honors JSON string literals (`"..."`
+// with backslash escapes) so brackets inside strings don't move the
+// depth counter.
+func scanBalanced(s string, start int, open, close byte) (int, bool) {
 	depth, inStr, esc := 0, false, false
 	for i := start; i < len(s); i++ {
 		c := s[i]
@@ -92,13 +153,11 @@ func extractJSON(s string) string {
 		case close:
 			depth--
 			if depth == 0 {
-				return s[start : i+1]
+				return i + 1, true
 			}
 		}
 	}
-	// Unbalanced — return what we have so json.Unmarshal yields a
-	// useful "unexpected end" diagnostic instead of a silent retry.
-	return s[start:]
+	return 0, false
 }
 
 // stripCodeFence removes a single markdown code fence wrapping the
@@ -170,6 +229,22 @@ func extractAnswerText(s string) string {
 		}
 	}
 
+	// High-precision rescue (1): models often propose several quoted
+	// candidate questions in their prose while self-critiquing; the
+	// final choice is the LAST `"…?"` substring. Tried first because
+	// it survives candidates that are embedded inline ("But maybe
+	// simpler: "actual question?"") rather than on their own line.
+	if q := lastQuotedQuestion(s); q != "" {
+		return q
+	}
+	// High-precision rescue (2): when no quoted-question pattern fires
+	// but the response IS multi-line and the last trimmed line is a
+	// fully-quoted string, lift its content. Catches the simpler
+	// "reasoning prose, then quoted final answer" shape.
+	if quoted := tailQuotedLine(s); quoted != "" {
+		return quoted
+	}
+
 	if !hadTagBlock && !hadHeader {
 		// No preamble shape recognised — preserve the original
 		// (including any leading whitespace) so caller-visible
@@ -177,4 +252,85 @@ func extractAnswerText(s string) string {
 		return original
 	}
 	return s
+}
+
+// lastQuotedQuestion scans s for `"…?"` substrings and returns the
+// inner text of the last one. Returns "" when no candidate matches OR
+// when the matched substring is essentially the entire response (the
+// model passed through a single quoted question — that's intentional
+// formatting, not a reasoning leak).
+//
+// "?" requirement plus a 15-char minimum (enforced by quotedQuestionRE)
+// keeps this from latching onto short interjections like `"tiny"` that
+// reasoning models scatter through their prose.
+func lastQuotedQuestion(s string) string {
+	matches := quotedQuestionRE.FindAllStringSubmatch(s, -1)
+	if len(matches) == 0 {
+		return ""
+	}
+	last := matches[len(matches)-1]
+	// Reject when the whole-match (with surrounding quotes) IS the
+	// entire trimmed response — pass-through is the right behavior.
+	if strings.TrimSpace(s) == last[0] {
+		return ""
+	}
+	return last[1]
+}
+
+// tailQuotedLine returns the inner content of the LAST fully-quoted
+// line (`"..."` after trimming) when the response also contains at
+// least one earlier non-empty line. Returns "" otherwise.
+//
+// Reasoning models routinely emit several candidate questions wrapped
+// in quotes while critiquing themselves before settling on the final
+// one — empirically the last fully-quoted line is the chosen answer.
+// Walking from the bottom skips trailing prose ("This is good." etc.)
+// and tolerates a truncated final line (no closing `"` from MaxTokens
+// hitting mid-emit) by falling back to the prior complete one.
+//
+// Single-line fully-quoted responses pass through unchanged — those
+// are most likely intentional formatting, not the reasoning pattern.
+func tailQuotedLine(s string) string {
+	lines := strings.Split(s, "\n")
+	// Find the last non-blank line index for "is multi-line?" check.
+	lastNonBlank := -1
+	for i := len(lines) - 1; i >= 0; i-- {
+		if strings.TrimSpace(lines[i]) != "" {
+			lastNonBlank = i
+			break
+		}
+	}
+	if lastNonBlank <= 0 {
+		// Single-line or all-empty — nothing to lift safely.
+		return ""
+	}
+
+	// Walk from the bottom, return the inner of the first complete
+	// `"…"` line found. A "complete" quoted line has matching quotes
+	// at both ends after trim, length ≥ 2, and the inner string is
+	// not empty (avoids `""` false-positive).
+	for i := lastNonBlank; i >= 0; i-- {
+		t := strings.TrimSpace(lines[i])
+		if len(t) < 3 || t[0] != '"' || t[len(t)-1] != '"' {
+			continue
+		}
+		inner := t[1 : len(t)-1]
+		if strings.TrimSpace(inner) == "" {
+			continue
+		}
+		// Require at least one earlier non-empty line so a single
+		// quoted-line response still passes through.
+		hasEarlier := false
+		for j := 0; j < i; j++ {
+			if strings.TrimSpace(lines[j]) != "" {
+				hasEarlier = true
+				break
+			}
+		}
+		if !hasEarlier {
+			return ""
+		}
+		return inner
+	}
+	return ""
 }

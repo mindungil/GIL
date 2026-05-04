@@ -2,6 +2,7 @@ package interview
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -129,6 +130,69 @@ func TestExtractJSON_NestedObjects(t *testing.T) {
 	}
 }
 
+// Regression: a reasoning model emits a short array literal as part of
+// its prose ("Value: ["a","b"]") BEFORE delivering the real answer.
+// Earlier extractJSON returned the prose array because it picked the
+// first bracket; the largest-balanced rule must pick the actual
+// answer instead. Captured live during P26.6 dogfood.
+func TestExtractJSON_PrefersLargestWhenProseEmbedsShortArray(t *testing.T) {
+	in := `The user is giving constraints. Map them to slots.
+
+Value for goal.success_criteria_natural:
+["Return -1 for negative inputs", "Assume the slice is pre-sorted"]
+
+Now the actual JSON:
+
+{"updates":[{"field":"goal.success_criteria_natural","value":["Return -1 for negative inputs","Assume the slice is pre-sorted"]}]}
+
+Wait, is there a better fit?`
+	got := extractJSON(in)
+	var parsed struct {
+		Updates []struct {
+			Field string          `json:"field"`
+			Value json.RawMessage `json:"value"`
+		} `json:"updates"`
+	}
+	if err := json.Unmarshal([]byte(got), &parsed); err != nil {
+		t.Fatalf("expected the largest balanced object to parse cleanly; got=%q err=%v", got, err)
+	}
+	if len(parsed.Updates) != 1 || parsed.Updates[0].Field != "goal.success_criteria_natural" {
+		t.Errorf("parsed wrong shape: %+v", parsed)
+	}
+}
+
+// Same scenario but with the JSON answer EARLIER than the trailing
+// prose-embedded examples. Confirms "largest" beats "first" both ways.
+func TestExtractJSON_PrefersLargestEvenWhenLastIsSmaller(t *testing.T) {
+	in := `Here is my answer:
+
+{"updates":[{"field":"goal.one_liner","value":"Build a fast key-value store with TTL support"}]}
+
+For reference, an empty update would be: {"updates":[]}`
+	got := extractJSON(in)
+	if !strings.Contains(got, "key-value store") {
+		t.Errorf("got=%q; expected the larger object containing the actual goal", got)
+	}
+}
+
+// Pure-array shape (adversary returns []Finding) must still work after
+// the largest-wins refactor.
+func TestExtractJSON_PureArrayResponseStillExtracted(t *testing.T) {
+	in := `<think>let me critique</think>
+[{"severity":"blocker","category":"missing","msg":"no error case"},
+ {"severity":"warn","category":"vague","msg":"timeout undefined"}]`
+	got := extractJSON(in)
+	var parsed []struct {
+		Severity string `json:"severity"`
+	}
+	if err := json.Unmarshal([]byte(got), &parsed); err != nil {
+		t.Fatalf("array response broke after largest-wins: got=%q err=%v", got, err)
+	}
+	if len(parsed) != 2 {
+		t.Errorf("expected 2 findings, got %d", len(parsed))
+	}
+}
+
 func TestExtractJSON_StripsDeepSeekThinkBlock(t *testing.T) {
 	in := `<think>I need to think about the domain.</think>
 {"domain":"web","domain_confidence":0.7}`
@@ -222,6 +286,58 @@ func TestExtractAnswerText_EmptyAfterStrip(t *testing.T) {
 	got := extractAnswerText(in)
 	if got != "" {
 		t.Errorf("got %q; want empty string", got)
+	}
+}
+
+// Regression: reasoning model emits chain-of-thought as plain prose
+// (no <think> tag, no "Thinking Process:" header) and delivers the
+// final answer as the last line wrapped in literal quotes. Captured
+// live during P26.6 dogfood — second-turn NextQuestion from Qwen.
+func TestExtractAnswerText_LiftsQuotedFinalLine(t *testing.T) {
+	in := `Wait, "math/search.go" might imply ` + "`float64`" + `. Binary search on floats is weird.
+    "What data type should the input slice and target be, and does the input strictly require ascending order?"`
+	got := extractAnswerText(in)
+	want := "What data type should the input slice and target be, and does the input strictly require ascending order?"
+	if got != want {
+		t.Errorf("got %q;\nwant %q", got, want)
+	}
+}
+
+// Reasoning model emits MULTIPLE quoted candidate questions while
+// self-critiquing, ending with prose that may include a truncated
+// quoted fragment. The last COMPLETE quoted line is the chosen
+// answer. Captured live during P26.6 dogfood.
+func TestExtractAnswerText_LiftsLastCompleteQuotedAmongCandidates(t *testing.T) {
+	in := `Wait, the user said "tiny http server".
+    "Does 'tiny' imply a bare-bones implementation, or are there extra features needed?"
+    This is good.
+    But maybe simpler: "What features does the server need?"
+    This is less presumptuous about the definition of "`
+	got := extractAnswerText(in)
+	want := "What features does the server need?"
+	if got != want {
+		t.Errorf("got %q;\nwant %q", got, want)
+	}
+}
+
+// The tail-quoted heuristic must NOT eat single-line quoted
+// responses (those are likely intentional formatting like a
+// section title — passing through is the safer default).
+func TestExtractAnswerText_SingleQuotedLine_PassesThrough(t *testing.T) {
+	in := `"What is your goal?"`
+	got := extractAnswerText(in)
+	if got != in {
+		t.Errorf("single quoted line should pass through; got %q", got)
+	}
+}
+
+// And it must NOT eat a multi-line answer where the last line isn't
+// quoted (the standard 1–2 sentence question format).
+func TestExtractAnswerText_MultiLine_NoQuoted_PassesThrough(t *testing.T) {
+	in := "First context line.\nWhat would you like next?"
+	got := extractAnswerText(in)
+	if got != in {
+		t.Errorf("got %q; want pass-through", got)
 	}
 }
 

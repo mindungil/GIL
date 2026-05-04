@@ -47,10 +47,14 @@ Only extract fields the user explicitly stated or strongly implied. If nothing e
 // Does not append to history (caller's responsibility).
 func (f *SlotFiller) Apply(ctx context.Context, st *State, userReply string) error {
 	resp, err := f.prov.Complete(ctx, provider.Request{
-		Model:     f.model,
-		System:    slotFillSystem,
-		Messages:  []provider.Message{{Role: provider.RoleUser, Content: userReply}},
-		MaxTokens: 800,
+		Model:    f.model,
+		System:   slotFillSystem,
+		Messages: []provider.Message{{Role: provider.RoleUser, Content: userReply}},
+		// 4000 (was 800) — reasoning models leak chain-of-thought
+		// before the JSON updates. extractJSON keeps only the largest
+		// balanced object, but the JSON itself can be cut mid-emit if
+		// the budget is too tight after the preamble.
+		MaxTokens: 4000,
 	})
 	if err != nil {
 		return fmt.Errorf("slotfill provider: %w", err)

@@ -171,10 +171,20 @@ type chatChoice struct {
 // chatRespMsg is the assistant message inside a choice. content can be a
 // JSON string OR null when the model only emitted tool_calls; we declare
 // it as *string so the unmarshal preserves the null/empty distinction.
+//
+// Reasoning-model deployments (vLLM with --reasoning-parser, DeepSeek-R1,
+// Qwen3-thinking) put the chain-of-thought in a sibling field on the
+// assistant message — vLLM uses `reasoning`, DeepSeek uses
+// `reasoning_content`. We accept both and discard the value: callers
+// that want the answer want only `content`. This avoids the
+// reasoning-leakage failure mode where the entire CoT shows up in the
+// next-question stream and breaks JSON parsers further down.
 type chatRespMsg struct {
-	Role      string             `json:"role"`
-	Content   *string            `json:"content"`
-	ToolCalls []chatRespToolCall `json:"tool_calls"`
+	Role             string             `json:"role"`
+	Content          *string            `json:"content"`
+	Reasoning        string             `json:"reasoning"`
+	ReasoningContent string             `json:"reasoning_content"`
+	ToolCalls        []chatRespToolCall `json:"tool_calls"`
 }
 
 type chatRespToolCall struct {

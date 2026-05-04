@@ -54,10 +54,11 @@ func (a *Adversary) Critique(ctx context.Context, st *State) ([]Finding, error) 
 	}
 
 	resp, err := a.prov.Complete(ctx, provider.Request{
-		Model:     a.model,
-		System:    adversarySystem,
-		Messages:  []provider.Message{{Role: provider.RoleUser, Content: "Spec:\n" + string(specJSON)}},
-		MaxTokens: 2000,
+		Model:    a.model,
+		System:   adversarySystem,
+		Messages: []provider.Message{{Role: provider.RoleUser, Content: "Spec:\n" + string(specJSON)}},
+		// 4000 — same headroom rationale as slotfill / NextQuestion.
+		MaxTokens: 4000,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("adversary provider: %w", err)

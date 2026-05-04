@@ -35,12 +35,14 @@ func (e *Engine) RunSensing(ctx context.Context, st *State, firstInput string) e
 		Model:    e.model,
 		System:   sensingSystemPrompt,
 		Messages: []provider.Message{{Role: provider.RoleUser, Content: firstInput}},
-		// 2000 (was 200) accommodates reasoning-preamble models like
-		// Qwen3-thinking and DeepSeek-R1 that emit a chain-of-thought
-		// before the JSON answer. extractJSON strips the preamble; the
-		// JSON itself is small (~80 tokens) but needs headroom for the
-		// preamble to fit before the cap kicks in.
-		MaxTokens: 2000,
+		// 4000 (was 2000, was 200) — reasoning models routinely emit
+		// 2000+ tokens of chain-of-thought before the actual answer.
+		// extractJSON / extractAnswerText strip the preamble; this
+		// budget keeps the post-preamble payload from being truncated
+		// mid-sentence (observed live: Qwen3-thinking spent 2000
+		// tokens reasoning then cut "Should the function use Go
+		// generics to support any" mid-question).
+		MaxTokens: 4000,
 	})
 	if err != nil {
 		return fmt.Errorf("interview.RunSensing provider: %w", err)
