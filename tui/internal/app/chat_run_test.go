@@ -238,5 +238,92 @@ func TestChatUpdate_Adversary_ZeroCountStaysSilent(t *testing.T) {
 	}
 }
 
+// --- updateChatRunTelemetry + chatStatusBody (status strip) ---
+
+func TestUpdateRunTelemetry_IterAndCost(t *testing.T) {
+	m := newChatModel("/tmp/test.sock")
+	updateChatRunTelemetry(m, &gilv1.Event{
+		Type:     "run.iter",
+		DataJson: []byte(`{"iter":12}`),
+		Metrics:  &gilv1.EventMetrics{CostUsd: 0.5432},
+	})
+	if m.runIter != 12 {
+		t.Errorf("runIter = %d; want 12", m.runIter)
+	}
+	if m.runCost != 0.5432 {
+		t.Errorf("runCost = %v; want 0.5432", m.runCost)
+	}
+}
+
+func TestUpdateRunTelemetry_StuckThenRecoveredClearsPattern(t *testing.T) {
+	m := newChatModel("/tmp/test.sock")
+	updateChatRunTelemetry(m, &gilv1.Event{
+		Type:     "stuck_detected",
+		DataJson: []byte(`{"pattern":"PatternMonologue"}`),
+	})
+	if m.stuckPattern != "PatternMonologue" {
+		t.Errorf("stuckPattern = %q; want PatternMonologue", m.stuckPattern)
+	}
+	updateChatRunTelemetry(m, &gilv1.Event{Type: "stuck_recovered"})
+	if m.stuckPattern != "" {
+		t.Errorf("stuckPattern should clear on recovered; got %q", m.stuckPattern)
+	}
+}
+
+func TestChatStatusBody_RunPhaseShowsIterAndCost(t *testing.T) {
+	m := newChatModel("/tmp/test.sock")
+	m.phase = ChatPhaseRun
+	m.runIter = 7
+	m.runCost = 0.0421
+	body := chatStatusBody(m, "·")
+	if !strings.Contains(body, "iter 7") || !strings.Contains(body, "0.0421") {
+		t.Errorf("run body = %q; want iter + cost", body)
+	}
+}
+
+func TestChatStatusBody_RunPhaseWithoutTelemetry_ShowsWorking(t *testing.T) {
+	m := newChatModel("/tmp/test.sock")
+	m.phase = ChatPhaseRun
+	body := chatStatusBody(m, "·")
+	if !strings.Contains(body, "agent working") {
+		t.Errorf("run-without-iter body = %q; want fallback 'agent working'", body)
+	}
+}
+
+func TestChatStatusBody_StuckPhaseShowsPatternLabel(t *testing.T) {
+	m := newChatModel("/tmp/test.sock")
+	m.phase = ChatPhaseStuck
+	m.stuckPattern = "PatternMonologue"
+	body := chatStatusBody(m, "·")
+	if !strings.Contains(body, "talking without acting") {
+		t.Errorf("stuck body = %q; want human-readable pattern", body)
+	}
+}
+
+func TestChatStatusBody_ErrorWinsOverPhase(t *testing.T) {
+	m := newChatModel("/tmp/test.sock")
+	m.phase = ChatPhaseRun
+	m.runIter = 5
+	m.err = "stream broken"
+	body := chatStatusBody(m, "·")
+	if !strings.Contains(body, "stream broken") {
+		t.Errorf("error must win over phase; got %q", body)
+	}
+	if strings.Contains(body, "iter 5") {
+		t.Errorf("error body should NOT mix in run telemetry; got %q", body)
+	}
+}
+
+func TestChatStatusBody_DonePhaseShowsTotals(t *testing.T) {
+	m := newChatModel("/tmp/test.sock")
+	m.phase = ChatPhaseDone
+	m.runIter = 24
+	m.runCost = 1.234
+	body := chatStatusBody(m, "·")
+	if !strings.Contains(body, "24 iters") || !strings.Contains(body, "1.2340") {
+		t.Errorf("done body = %q; want totals", body)
+	}
+}
+
 // silence unused import when none of the helpers above pull tea.
 var _ = tea.Quit

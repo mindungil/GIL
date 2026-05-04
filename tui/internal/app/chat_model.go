@@ -54,6 +54,13 @@ type chatModel struct {
 	// stream cleanly and lets a second /run replace the prior tail.
 	runTail chatRunTailState
 
+	// Live run telemetry — populated by chatRunEventMsg handlers,
+	// consumed by renderStatusStrip so the strip body always
+	// reflects what the agent is actually doing.
+	runIter      int64
+	runCost      float64
+	stuckPattern string // last detected pattern; cleared on recovered
+
 	// firstTurnDone flips true the moment the user submits the first
 	// prompt; that's the cue for chat_view.go to stop rendering the
 	// session list above the conversation viewport.
@@ -284,6 +291,9 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if phase != "" {
 			m.phase = phase
 		}
+		// Telemetry capture for the status strip — single source of
+		// truth so renderStatusStrip doesn't re-parse event payloads.
+		updateChatRunTelemetry(m, msg.ev)
 		// Coalesce consecutive agent_turn chunks the same way the
 		// interview path does — if the new line starts with "‹" and
 		// the prior transcript line also starts with "‹", append in

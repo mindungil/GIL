@@ -144,18 +144,56 @@ func chatSubtitle(p ChatPhase) string {
 }
 
 // renderStatusStrip is the divider rule + one phase-state line above
-// the prompt panel. Two rows total (rule + body).
+// the prompt panel. Two rows total (rule + body). The body reflects
+// what the agent is actually doing (running iter X · cost, stuck on
+// pattern Y, etc.) rather than a generic "agent ready".
 func (m *chatModel) renderStatusStrip() string {
 	g := Glyphs()
 	rule := styleDim(strings.Repeat(g.HSep, m.width))
-	body := fmt.Sprintf("%s  %s  agent ready", string(m.phase), g.Dot)
-	if m.err != "" {
-		body = styleAlert("error: " + m.err)
-	}
+	body := chatStatusBody(m, g.Dot)
 	right := styleMeta(body)
+	if m.phase == ChatPhaseStuck || m.err != "" {
+		right = styleAlert(body)
+	}
 	left := strings.Repeat(" ", 6)
 	row := padBetween(left, right, m.width)
 	return lipgloss.JoinVertical(lipgloss.Left, rule, row)
+}
+
+// chatStatusBody composes the phase-aware right-side strip text.
+// Pure — testable without rendering. Errors win over phase so the
+// user always sees the most urgent state on top.
+func chatStatusBody(m *chatModel, dot string) string {
+	if m.err != "" {
+		return "error: " + m.err
+	}
+	switch m.phase {
+	case ChatPhaseIdle:
+		return fmt.Sprintf("%s  %s  agent ready", string(m.phase), dot)
+	case ChatPhaseInterview:
+		return fmt.Sprintf("%s  %s  gathering context", string(m.phase), dot)
+	case ChatPhaseAwaitingConfirm:
+		return fmt.Sprintf("%s  %s  ready to freeze", string(m.phase), dot)
+	case ChatPhaseRun:
+		if m.runIter > 0 || m.runCost > 0 {
+			return fmt.Sprintf("%s  %s  iter %d  %s  $%.4f",
+				string(m.phase), dot, m.runIter, dot, m.runCost)
+		}
+		return fmt.Sprintf("%s  %s  agent working", string(m.phase), dot)
+	case ChatPhaseStuck:
+		if m.stuckPattern != "" {
+			return fmt.Sprintf("%s  %s  %s",
+				string(m.phase), dot, humanChatStuckPattern(m.stuckPattern))
+		}
+		return fmt.Sprintf("%s  %s  recovery in progress", string(m.phase), dot)
+	case ChatPhaseDone:
+		if m.runIter > 0 {
+			return fmt.Sprintf("%s  %s  %d iters  %s  $%.4f",
+				string(m.phase), dot, m.runIter, dot, m.runCost)
+		}
+		return fmt.Sprintf("%s  %s  finished", string(m.phase), dot)
+	}
+	return string(m.phase)
 }
 
 // renderConversation fills the middle region. Pre-first-turn shows the

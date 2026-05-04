@@ -165,6 +165,43 @@ func formatChatRunEvent(ev *gilv1.Event) (phase ChatPhase, lines []string, keepD
 	return "", nil, true
 }
 
+// updateChatRunTelemetry mutates the chatModel's status-strip
+// telemetry fields based on the run event. Pure helper — kept out of
+// formatChatRunEvent so the formatter stays a pure function and tests
+// pin the rendering separately from the model mutation.
+func updateChatRunTelemetry(m *chatModel, ev *gilv1.Event) {
+	if m == nil || ev == nil {
+		return
+	}
+	switch ev.GetType() {
+	case "run.iter":
+		var d map[string]any
+		_ = json.Unmarshal(ev.GetDataJson(), &d)
+		if v, ok := d["iter"].(float64); ok {
+			m.runIter = int64(v)
+		}
+		if mt := ev.GetMetrics(); mt != nil {
+			if c := mt.GetCostUsd(); c > 0 {
+				m.runCost = c
+			}
+		}
+	case "stuck_detected":
+		var d map[string]any
+		_ = json.Unmarshal(ev.GetDataJson(), &d)
+		if p, ok := d["pattern"].(string); ok {
+			m.stuckPattern = p
+		}
+	case "stuck_recovered":
+		m.stuckPattern = ""
+	case "run.done":
+		if mt := ev.GetMetrics(); mt != nil {
+			if c := mt.GetCostUsd(); c > 0 {
+				m.runCost = c
+			}
+		}
+	}
+}
+
 // humanChatStuckPattern mirrors humanStuckPattern in cli/internal/
 // chat/repl/loop.go so the chat surface and the cli REPL describe
 // the same detector pattern with the same phrase. Duplicated locally
