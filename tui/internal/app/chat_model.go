@@ -96,11 +96,9 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.firstTurnDone = true
 
 			// §2.6(b) intent router. Slash-prefixed inputs skip the
-			// router (deterministic escape hatch). Verbs surface as a
-			// transcript note; full verb-dispatch in the TUI is
-			// followup #253b — for now non-quit verbs land a "use gil
-			// chat for this verb" hint so the routing is at least
-			// visible.
+			// router (deterministic escape hatch). Verbs route through
+			// dispatchVerb; ambiguous/too-vague get a clarification
+			// turned into a transcript note.
 			if m.router != nil && !strings.HasPrefix(text, "/") {
 				ctx := intent.SessionContext{
 					Phase:           string(m.phase),
@@ -110,15 +108,7 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cl := m.router.Classify(context.Background(), text, ctx)
 				switch cl.Kind {
 				case intent.KindVerb:
-					if cl.Verb == intent.VerbQuit {
-						if m.stream.cancel != nil {
-							m.stream.cancel()
-						}
-						return m, tea.Quit
-					}
-					m.transcript = append(m.transcript,
-						"   → "+cl.Rationale+"  (verb dispatch in TUI lands in followup; use `gil chat` for now)")
-					return m, nil
+					return m, m.dispatchVerb(cl)
 				case intent.KindAmbiguous:
 					m.transcript = append(m.transcript, "   ?  "+cl.Clarification)
 					return m, nil
@@ -193,6 +183,29 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case chatStreamErrMsg:
 		m.err = msg.err
 		m.stream.stream = nil
+		return m, nil
+
+	case chatVerbResultMsg:
+		// Multi-line results (sessions list, spec, diff) get split so
+		// each line aligns with the transcript's leading 3-space gutter.
+		glyph := "   ‹"
+		if msg.kind == "err" {
+			glyph = "   !"
+		}
+		for _, line := range strings.Split(msg.text, "\n") {
+			m.transcript = append(m.transcript, glyph+"  "+line)
+		}
+		return m, nil
+
+	case chatNewSessionMsg:
+		if msg.err != "" {
+			m.transcript = append(m.transcript, "   !  new: "+msg.err)
+			return m, nil
+		}
+		m.activeID = msg.session.ID
+		m.sessions = append([]*sdk.Session{msg.session}, m.sessions...)
+		m.transcript = append(m.transcript,
+			"   ‹  created "+shortChatID(msg.session.ID)+" — describe the task to begin")
 		return m, nil
 	}
 	return m, nil
