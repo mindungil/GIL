@@ -47,7 +47,8 @@ func (g *SelfAuditGate) AuditConversationToConfirm(ctx context.Context, st *Stat
 		Model:     g.model,
 		System:    auditSystem,
 		Messages:  []provider.Message{{Role: provider.RoleUser, Content: "Working spec:\n" + string(specJSON)}},
-		MaxTokens: 200,
+		// 2000 (was 200) — same headroom rationale as engine.RunSensing.
+		MaxTokens: 2000,
 	})
 	if err != nil {
 		return false, "", fmt.Errorf("audit provider: %w", err)
@@ -57,7 +58,7 @@ func (g *SelfAuditGate) AuditConversationToConfirm(ctx context.Context, st *Stat
 		Ready  bool   `json:"ready"`
 		Reason string `json:"reason"`
 	}
-	if err := json.Unmarshal([]byte(resp.Text), &parsed); err != nil {
+	if err := json.Unmarshal([]byte(extractJSON(resp.Text)), &parsed); err != nil {
 		return false, "", fmt.Errorf("audit parse %q: %w", resp.Text, err)
 	}
 	return parsed.Ready, parsed.Reason, nil

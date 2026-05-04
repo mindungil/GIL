@@ -82,6 +82,24 @@ func TestEngine_NextQuestion_ReturnsAgentText(t *testing.T) {
 	require.Equal(t, "What technologies do you want to use?", q)
 }
 
+func TestEngine_NextQuestion_StripsReasoningPreamble(t *testing.T) {
+	// Reasoning model emits <think> block + a Qwen-style "Thinking
+	// Process:" header before the actual question. The chat surface
+	// must see only the question, not the trace.
+	mock := provider.NewMock([]string{
+		"<think>The user mentioned a CLI but no language. I should ask.</think>What language should the CLI be written in?",
+	})
+	eng := NewEngine(mock, "qwen3-thinking")
+	st := NewState()
+	st.Stage = StageConversation
+	st.Domain = "cli-tooling"
+	st.AppendUser("I want a CLI")
+
+	q, err := eng.NextQuestion(context.Background(), st)
+	require.NoError(t, err)
+	require.Equal(t, "What language should the CLI be written in?", q)
+}
+
 func TestEngine_NextQuestion_PropagatesProviderError(t *testing.T) {
 	mock := provider.NewMock(nil) // empty → exhausted on first call
 	eng := NewEngine(mock, "claude-haiku-4-5")

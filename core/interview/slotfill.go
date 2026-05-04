@@ -62,7 +62,7 @@ func (f *SlotFiller) Apply(ctx context.Context, st *State, userReply string) err
 			Value json.RawMessage `json:"value"`
 		} `json:"updates"`
 	}
-	if err := json.Unmarshal([]byte(resp.Text), &parsed); err != nil {
+	if err := json.Unmarshal([]byte(extractJSON(resp.Text)), &parsed); err != nil {
 		return fmt.Errorf("slotfill parse %q: %w", resp.Text, err)
 	}
 

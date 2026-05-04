@@ -32,10 +32,15 @@ Output STRICT JSON only — no prose, no markdown fences. Schema:
 // retries don't double-record.
 func (e *Engine) RunSensing(ctx context.Context, st *State, firstInput string) error {
 	resp, err := e.prov.Complete(ctx, provider.Request{
-		Model:     e.model,
-		System:    sensingSystemPrompt,
-		Messages:  []provider.Message{{Role: provider.RoleUser, Content: firstInput}},
-		MaxTokens: 200,
+		Model:    e.model,
+		System:   sensingSystemPrompt,
+		Messages: []provider.Message{{Role: provider.RoleUser, Content: firstInput}},
+		// 2000 (was 200) accommodates reasoning-preamble models like
+		// Qwen3-thinking and DeepSeek-R1 that emit a chain-of-thought
+		// before the JSON answer. extractJSON strips the preamble; the
+		// JSON itself is small (~80 tokens) but needs headroom for the
+		// preamble to fit before the cap kicks in.
+		MaxTokens: 2000,
 	})
 	if err != nil {
 		return fmt.Errorf("interview.RunSensing provider: %w", err)
@@ -45,7 +50,7 @@ func (e *Engine) RunSensing(ctx context.Context, st *State, firstInput string) e
 		Domain     string  `json:"domain"`
 		Confidence float64 `json:"domain_confidence"`
 	}
-	if err := json.Unmarshal([]byte(resp.Text), &parsed); err != nil {
+	if err := json.Unmarshal([]byte(extractJSON(resp.Text)), &parsed); err != nil {
 		return fmt.Errorf("interview.RunSensing parse %q: %w", resp.Text, err)
 	}
 
@@ -67,15 +72,20 @@ Goal: read the conversation so far and produce ONE follow-up question that maxim
 Be brief (1-2 sentences). Output ONLY the question text — no markdown, no quotes.`, st.Domain)
 
 	resp, err := e.prov.Complete(ctx, provider.Request{
-		Model:     e.model,
-		System:    system,
-		Messages:  st.History,
-		MaxTokens: 200,
+		Model:    e.model,
+		System:   system,
+		Messages: st.History,
+		// 2000 (was 200) — same headroom rationale as RunSensing above.
+		MaxTokens: 2000,
 	})
 	if err != nil {
 		return "", fmt.Errorf("interview.NextQuestion: %w", err)
 	}
-	return resp.Text, nil
+	// Strip reasoning preambles so the chat surface shows only the
+	// question itself. Reasoning models (DeepSeek-R1, Qwen3-thinking,
+	// Anthropic extended-thinking) otherwise dump their full chain-of-
+	// thought into the AgentTurn payload.
+	return extractAnswerText(resp.Text), nil
 }
 
 // ReplyOutcome describes what the engine decided to do after a user reply.

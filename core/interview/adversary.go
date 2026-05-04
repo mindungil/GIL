@@ -64,7 +64,7 @@ func (a *Adversary) Critique(ctx context.Context, st *State) ([]Finding, error) 
 	}
 
 	var findings []Finding
-	if err := json.Unmarshal([]byte(resp.Text), &findings); err != nil {
+	if err := json.Unmarshal([]byte(extractJSON(resp.Text)), &findings); err != nil {
 		return nil, fmt.Errorf("adversary parse %q: %w", resp.Text, err)
 	}
 
