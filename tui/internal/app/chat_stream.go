@@ -56,6 +56,28 @@ type chatStreamErrMsg struct{ err string }
 // daemon might emit.
 type chatStreamEventSkipMsg struct{}
 
+// chatSaturationMsg surfaces interview progress (slots filled out of
+// total). Mirrors the cli REPL's interview.slot_filled SystemNote so
+// the user watches the spec fill in real time.
+type chatSaturationMsg struct {
+	filled, total int
+	saturation    float64
+}
+
+// chatAdversaryMsg surfaces the adversary critique count. Mirrors the
+// cli REPL's interview.adversary SystemNote.
+type chatAdversaryMsg struct{ count int }
+
+// chatStageReasonMsg carries the stage transition's Reason field
+// (e.g. "domain=cli-tooling confidence=0.85" on sensing→conversation,
+// or the audit's "ready" reason on conversation→confirm). Keeps the
+// existing chatPhaseMsg shape minimal — only Update paths that want
+// the human-readable reason consume it.
+type chatStageReasonMsg struct {
+	phase  ChatPhase
+	reason string
+}
+
 // startInterviewCmd opens the interview stream and returns the
 // handle via chatStreamStartedMsg. The stream is then drained by
 // repeated nextChatEventCmd calls scheduled from Update.
@@ -91,7 +113,20 @@ func nextChatEventCmd(stream gilv1.InterviewService_StartClient) tea.Cmd {
 			return chatAssistantChunkMsg{text: t.GetContent()}
 		}
 		if st := ev.GetStage(); st != nil {
-			return chatPhaseMsg{phase: stagePhase(st.GetTo())}
+			return chatStageReasonMsg{
+				phase:  stagePhase(st.GetTo()),
+				reason: st.GetReason(),
+			}
+		}
+		if su := ev.GetSaturationUpdate(); su != nil {
+			return chatSaturationMsg{
+				filled:     int(su.GetSlotsFilled()),
+				total:      int(su.GetSlotsTotal()),
+				saturation: su.GetSaturation(),
+			}
+		}
+		if af := ev.GetAdversaryFindings(); af != nil {
+			return chatAdversaryMsg{count: int(af.GetCount())}
 		}
 		if e := ev.GetError(); e != nil {
 			return chatStreamErrMsg{err: e.GetMessage()}

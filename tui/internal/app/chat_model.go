@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -173,6 +174,49 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case chatStreamEventSkipMsg:
+		if m.stream.stream != nil {
+			return m, nextChatEventCmd(m.stream.stream)
+		}
+		return m, nil
+
+	case chatStageReasonMsg:
+		// Same effect as chatPhaseMsg (flips the strip) but also
+		// surfaces the human-readable reason in the transcript so
+		// the user sees what the engine inferred.
+		m.phase = msg.phase
+		var note string
+		switch msg.phase {
+		case ChatPhaseInterview:
+			note = "interview started"
+		case ChatPhaseAwaitingConfirm:
+			note = "ready to freeze — say `run` to start the agent"
+		}
+		if note != "" {
+			line := "   ‹  " + note
+			if msg.reason != "" {
+				line += " — " + msg.reason
+			}
+			m.transcript = append(m.transcript, line)
+		}
+		if m.stream.stream != nil {
+			return m, nextChatEventCmd(m.stream.stream)
+		}
+		return m, nil
+
+	case chatSaturationMsg:
+		m.transcript = append(m.transcript,
+			fmt.Sprintf("   ‹  slot filled (%d/%d, sat %d%%)",
+				msg.filled, msg.total, int(msg.saturation*100+0.5)))
+		if m.stream.stream != nil {
+			return m, nextChatEventCmd(m.stream.stream)
+		}
+		return m, nil
+
+	case chatAdversaryMsg:
+		if msg.count > 0 {
+			m.transcript = append(m.transcript,
+				fmt.Sprintf("   ‹  adversary: %d finding(s)", msg.count))
+		}
 		if m.stream.stream != nil {
 			return m, nextChatEventCmd(m.stream.stream)
 		}

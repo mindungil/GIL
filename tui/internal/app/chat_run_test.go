@@ -178,5 +178,65 @@ func TestChatUpdate_RunStarted_DoesNotEatVerbResult(t *testing.T) {
 	}
 }
 
+// --- chat_stream interview-event handlers (parity with cli REPL) ---
+
+func TestChatUpdate_StageReason_FlipsPhaseAndAppendsNote(t *testing.T) {
+	m := newChatModel("/tmp/test.sock")
+	updated, _ := m.Update(chatStageReasonMsg{
+		phase: ChatPhaseInterview, reason: "domain=cli-tooling confidence=0.85",
+	})
+	cm := updated.(*chatModel)
+	if cm.phase != ChatPhaseInterview {
+		t.Errorf("phase = %v; want ChatPhaseInterview", cm.phase)
+	}
+	if !transcriptContains(cm.transcript, "interview started", "domain=cli-tooling") {
+		t.Errorf("expected interview-started note with reason; got %v", cm.transcript)
+	}
+}
+
+func TestChatUpdate_StageReason_AwaitingConfirm_HintsNextStep(t *testing.T) {
+	m := newChatModel("/tmp/test.sock")
+	updated, _ := m.Update(chatStageReasonMsg{
+		phase: ChatPhaseAwaitingConfirm, reason: "all 7 slots saturated",
+	})
+	cm := updated.(*chatModel)
+	if cm.phase != ChatPhaseAwaitingConfirm {
+		t.Errorf("phase = %v; want ChatPhaseAwaitingConfirm", cm.phase)
+	}
+	// Affordance hint: tell the user that 'run' is the natural next step.
+	if !transcriptContains(cm.transcript, "ready to freeze", "run") {
+		t.Errorf("expected ready-to-freeze + run hint; got %v", cm.transcript)
+	}
+}
+
+func TestChatUpdate_Saturation_AppendsProgress(t *testing.T) {
+	m := newChatModel("/tmp/test.sock")
+	updated, _ := m.Update(chatSaturationMsg{filled: 3, total: 7, saturation: 0.43})
+	cm := updated.(*chatModel)
+	if !transcriptContains(cm.transcript, "3/7", "43%") {
+		t.Errorf("expected slot-fill progress with percent; got %v", cm.transcript)
+	}
+}
+
+func TestChatUpdate_Adversary_AppendsCount(t *testing.T) {
+	m := newChatModel("/tmp/test.sock")
+	updated, _ := m.Update(chatAdversaryMsg{count: 2})
+	cm := updated.(*chatModel)
+	if !transcriptContains(cm.transcript, "adversary", "2 finding") {
+		t.Errorf("expected adversary count line; got %v", cm.transcript)
+	}
+}
+
+func TestChatUpdate_Adversary_ZeroCountStaysSilent(t *testing.T) {
+	// Zero findings is a clean check; no need to add a transcript
+	// line that says "0 findings" — that's noise, not signal.
+	m := newChatModel("/tmp/test.sock")
+	updated, _ := m.Update(chatAdversaryMsg{count: 0})
+	cm := updated.(*chatModel)
+	if len(cm.transcript) != 0 {
+		t.Errorf("zero adversary findings should produce no transcript line; got %v", cm.transcript)
+	}
+}
+
 // silence unused import when none of the helpers above pull tea.
 var _ = tea.Quit
