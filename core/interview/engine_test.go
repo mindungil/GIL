@@ -82,6 +82,29 @@ func TestEngine_NextQuestion_ReturnsAgentText(t *testing.T) {
 	require.Equal(t, "What technologies do you want to use?", q)
 }
 
+func TestEngine_NextQuestion_TrustsContentWhenReasoningSeparated(t *testing.T) {
+	// When the provider populates Response.Reasoning, the engine
+	// must trust Text as-is — running extractAnswerText would risk
+	// false-positive lifts (e.g. quoted-question heuristic eating a
+	// legitimate "…?" answer). The user-visible string is just the
+	// trimmed Text.
+	mock := provider.NewMock([]string{
+		`  "What language should the CLI be written in?"  `,
+	})
+	mock.SetReasonings([]string{"The user mentioned a CLI but no language."})
+	eng := NewEngine(mock, "qwen3-thinking")
+	st := NewState()
+	st.Stage = StageConversation
+	st.Domain = "cli-tooling"
+	st.AppendUser("I want a CLI")
+
+	q, err := eng.NextQuestion(context.Background(), st)
+	require.NoError(t, err)
+	// Heuristic strip would have lifted the inner quoted content;
+	// reasoning-aware path preserves it intact (just trimmed).
+	require.Equal(t, `"What language should the CLI be written in?"`, q)
+}
+
 func TestEngine_NextQuestion_StripsReasoningPreamble(t *testing.T) {
 	// Reasoning model emits <think> block + a Qwen-style "Thinking
 	// Process:" header before the actual question. The chat surface

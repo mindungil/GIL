@@ -9,9 +9,10 @@ import (
 // Mock returns scripted responses in order. Useful for tests where you want
 // deterministic behavior without hitting a real LLM API.
 type Mock struct {
-	mu        sync.Mutex
-	responses []string
-	idx       int
+	mu         sync.Mutex
+	responses  []string
+	reasonings []string // optional, parallel to responses; "" means none
+	idx        int
 }
 
 // NewMock returns a Mock pre-loaded with the given response strings. Each
@@ -20,6 +21,13 @@ type Mock struct {
 func NewMock(responses []string) *Mock {
 	return &Mock{responses: responses}
 }
+
+// SetReasonings attaches per-response Reasoning values for tests that
+// need to exercise the upstream-separated-reasoning path. The slice
+// runs parallel to responses; positions beyond its length receive an
+// empty Reasoning. Safe to call before Complete; not safe to call
+// concurrently with Complete.
+func (m *Mock) SetReasonings(rs []string) { m.reasonings = rs }
 
 // Name implements Provider.
 func (m *Mock) Name() string { return "mock" }
@@ -32,9 +40,14 @@ func (m *Mock) Complete(ctx context.Context, req Request) (Response, error) {
 		return Response{}, errors.New("mock provider responses exhausted")
 	}
 	resp := m.responses[m.idx]
+	var reasoning string
+	if m.idx < len(m.reasonings) {
+		reasoning = m.reasonings[m.idx]
+	}
 	m.idx++
 	return Response{
 		Text:         resp,
+		Reasoning:    reasoning,
 		InputTokens:  int64(len(req.Messages) * 10),
 		OutputTokens: int64(len(resp)),
 		StopReason:   "end_turn",

@@ -282,6 +282,16 @@ func (o *OpenAI) Complete(ctx context.Context, req Request) (Response, error) {
 	if choice.Message.Content != nil {
 		out.Text = *choice.Message.Content
 	}
+	// Surface the reasoning trace in its dedicated field. vLLM uses
+	// `reasoning`, DeepSeek-R1 uses `reasoning_content`; we accept
+	// either and report whichever was populated. Callers that don't
+	// care can ignore it; callers that do (interview engine) use it
+	// to skip defensive heuristics on Text.
+	if choice.Message.Reasoning != "" {
+		out.Reasoning = choice.Message.Reasoning
+	} else if choice.Message.ReasoningContent != "" {
+		out.Reasoning = choice.Message.ReasoningContent
+	}
 	for _, tc := range choice.Message.ToolCalls {
 		// arguments is a JSON string per the OpenAI spec. Wrap it as
 		// json.RawMessage by parsing-then-remarshalling to validate the

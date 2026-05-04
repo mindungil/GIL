@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/mindungil/gil/core/provider"
 	"github.com/mindungil/gil/core/spec"
@@ -83,10 +84,17 @@ Be brief (1-2 sentences). Output ONLY the question text — no markdown, no quot
 	if err != nil {
 		return "", fmt.Errorf("interview.NextQuestion: %w", err)
 	}
-	// Strip reasoning preambles so the chat surface shows only the
-	// question itself. Reasoning models (DeepSeek-R1, Qwen3-thinking,
-	// Anthropic extended-thinking) otherwise dump their full chain-of-
-	// thought into the AgentTurn payload.
+	// When the upstream cleanly separated reasoning from the answer
+	// (vLLM `reasoning` / DeepSeek `reasoning_content`), Text is
+	// already the bare question — running extractAnswerText risks
+	// false-positive stripping on legitimate `"…?"` answers, so we
+	// just trim whitespace and return.
+	if resp.Reasoning != "" {
+		return strings.TrimSpace(resp.Text), nil
+	}
+	// Otherwise the model inlined reasoning into Text (or didn't
+	// reason). Strip any preamble we recognise so the chat surface
+	// shows only the question itself.
 	return extractAnswerText(resp.Text), nil
 }
 
