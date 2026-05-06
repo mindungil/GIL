@@ -145,6 +145,53 @@ func formatChatRunEvent(ev *gilv1.Event) (phase ChatPhase, lines []string, keepD
 			errMsg = string(ev.GetDataJson())
 		}
 		return "", []string{"   !  run error: " + errMsg}, true
+	case "subagent_started":
+		// Parent agent dispatched a sub-loop. Without this surfacing
+		// the user sees a long quiet gap until subagent_done fires.
+		var d map[string]any
+		_ = json.Unmarshal(ev.GetDataJson(), &d)
+		goal, _ := d["goal"].(string)
+		line := "   ‹  subagent started"
+		if goal != "" {
+			line += " — " + truncateChat(goal, 60)
+		}
+		return "", []string{line}, true
+	case "subagent_done":
+		var d map[string]any
+		_ = json.Unmarshal(ev.GetDataJson(), &d)
+		summary, _ := d["summary"].(string)
+		iters, _ := d["iterations"].(float64)
+		line := "   ‹  subagent done"
+		if iters > 0 {
+			line = fmt.Sprintf("   ‹  subagent done (%d iters)", int(iters))
+		}
+		if summary != "" {
+			line += " — " + truncateChat(summary, 80)
+		}
+		return "", []string{line}, true
+	case "budget_warning":
+		var d map[string]any
+		_ = json.Unmarshal(ev.GetDataJson(), &d)
+		reason, _ := d["reason"].(string)
+		used, _ := d["used"].(float64)
+		dim := "budget"
+		if reason != "" {
+			dim = reason
+		}
+		line := fmt.Sprintf("   !  approaching %s budget", dim)
+		if reason == "cost" && used > 0 {
+			line = fmt.Sprintf("   !  approaching cost budget — $%.2f used", used)
+		}
+		return "", []string{line}, true
+	case "budget_exceeded":
+		var d map[string]any
+		_ = json.Unmarshal(ev.GetDataJson(), &d)
+		reason, _ := d["reason"].(string)
+		dim := "budget"
+		if reason != "" {
+			dim = reason
+		}
+		return "", []string{fmt.Sprintf("   !  %s budget exceeded — run will halt at end of iteration", dim)}, true
 	case "provider.retry_attempt":
 		// Provider hit a transient failure and Retry.OnRetry fired
 		// before sleeping `wait_ms` to try again. Surface so the user

@@ -43,6 +43,43 @@ func TestMapRunEvent_LegacyRunStuckNameNoLongerFires(t *testing.T) {
 	require.Equal(t, "", in.Kind, "legacy event name must NOT be matched")
 }
 
+func TestMapRunEvent_SubagentLifecycle(t *testing.T) {
+	// Subagent events were dropped on the floor — long sub-loops
+	// looked like the parent stopped working. Adapter forwards the
+	// goal on start and (truncated) summary + iter count on done.
+	start := mapRunEventToTracker("01HQ", &gilv1.Event{
+		Type:     "subagent_started",
+		DataJson: []byte(`{"goal":"investigate dead-letter queue growth","max_iterations":8,"max_tokens":30000,"model":"haiku","tools":["read_file","grep"]}`),
+	})
+	require.Equal(t, "subagent_started", start.Kind)
+	require.Contains(t, start.Reason, "investigate")
+
+	done := mapRunEventToTracker("01HQ", &gilv1.Event{
+		Type:     "subagent_done",
+		DataJson: []byte(`{"goal":"x","status":"complete","iterations":5,"tokens":4321,"summary":"DLQ was reaching cap; consumer crashed in handlerv2"}`),
+	})
+	require.Equal(t, "subagent_done", done.Kind)
+	require.Equal(t, 5, done.RetryAttempt) // reused field as iteration count
+	require.Contains(t, done.Reason, "DLQ")
+}
+
+func TestMapRunEvent_BudgetWarningAndExceeded(t *testing.T) {
+	warn := mapRunEventToTracker("01HQ", &gilv1.Event{
+		Type:     "budget_warning",
+		DataJson: []byte(`{"reason":"cost","used":1.50,"limit":2.00,"threshold":0.75}`),
+	})
+	require.Equal(t, "budget_warning", warn.Kind)
+	require.Equal(t, "cost", warn.Reason)
+	require.InDelta(t, 1.50, warn.CostUSD, 1e-9)
+
+	exceeded := mapRunEventToTracker("01HQ", &gilv1.Event{
+		Type:     "budget_exceeded",
+		DataJson: []byte(`{"reason":"tokens","used":50000,"limit":40000}`),
+	})
+	require.Equal(t, "budget_exceeded", exceeded.Kind)
+	require.Equal(t, "tokens", exceeded.Reason)
+}
+
 func TestMapRunEvent_RetryAttempt_PopulatesPayload(t *testing.T) {
 	// Regression: chat REPL ignored provider.retry_attempt events, so
 	// flaky upstreams looked like 30s hangs. Adapter now extracts the

@@ -512,6 +512,63 @@ func mapRunEventToTracker(sessionID string, ev *gilv1.Event) TrackerInput {
 		if ev.GetMetrics() != nil {
 			in.CostUSD = ev.GetMetrics().CostUsd
 		}
+	case "subagent_started":
+		// Parent agent kicked off a sub-loop investigation (the
+		// "subagent" tool, not RunSubagent — same event though).
+		// Surface the goal so the user understands the gap before
+		// subagent_done fires; long sub-loops otherwise look like
+		// the parent stopped working. Phase stays whatever it was.
+		in.Kind = "subagent_started"
+		var d map[string]any
+		if jerr := json.Unmarshal(ev.GetDataJson(), &d); jerr == nil {
+			if g, ok := d["goal"].(string); ok {
+				in.Reason = g
+			}
+		}
+	case "subagent_done":
+		// Sub-loop finished. The summary is truncated to 512B server-
+		// side (runner.go) so it's safe to forward whole — chat strip
+		// will narrow it further if needed.
+		in.Kind = "subagent_done"
+		var d map[string]any
+		if jerr := json.Unmarshal(ev.GetDataJson(), &d); jerr == nil {
+			if s, ok := d["summary"].(string); ok {
+				in.Reason = s
+			}
+			if v, ok := d["iterations"].(float64); ok {
+				in.RetryAttempt = int(v) // reuse field as iteration count
+			}
+		}
+	case "budget_warning":
+		// Cost or token budget crossed a 75% / 90% threshold. Reason
+		// distinguishes "tokens" vs "cost" so the user knows which
+		// dial is closing in. budget_exceeded latches sticky, but a
+		// warning is just a heads-up — phase unchanged.
+		in.Kind = "budget_warning"
+		var d map[string]any
+		if jerr := json.Unmarshal(ev.GetDataJson(), &d); jerr == nil {
+			if r, ok := d["reason"].(string); ok {
+				in.Reason = r
+			}
+			if v, ok := d["used"].(float64); ok {
+				in.CostUSD = v
+			}
+		}
+	case "budget_exceeded":
+		// Budget hit the hard limit; the runner will halt at end of
+		// the current iteration. Sticky — surface as an alert rather
+		// than a passing note so the user can decide whether to bump
+		// the budget or stop.
+		in.Kind = "budget_exceeded"
+		var d map[string]any
+		if jerr := json.Unmarshal(ev.GetDataJson(), &d); jerr == nil {
+			if r, ok := d["reason"].(string); ok {
+				in.Reason = r
+			}
+			if v, ok := d["used"].(float64); ok {
+				in.CostUSD = v
+			}
+		}
 	case "provider.retry_attempt":
 		// Provider hit a transient failure (5xx / rate-limit / network).
 		// Retry.OnRetry fired before sleeping `wait_ms` and trying again.

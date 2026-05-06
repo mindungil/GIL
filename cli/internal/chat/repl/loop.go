@@ -273,6 +273,47 @@ func emitDeltaNotes(r render.Renderer, prev, cur render.SessionState, ev Tracker
 		r.SystemNote(render.NoteSystem, msg)
 	case "run.done":
 		r.SystemNote(render.NoteSystem, "done — /diff to review, /merge to apply")
+	case "subagent_started":
+		// Show the goal so a long sub-loop doesn't look like a hang.
+		// The subagent tool clamps goal length at the server side; we
+		// truncate again as a chat-strip safety net.
+		msg := "subagent started"
+		if ev.Reason != "" {
+			msg += " — " + truncateRetryReason(ev.Reason)
+		}
+		r.SystemNote(render.NoteSystem, msg)
+	case "subagent_done":
+		// RetryAttempt is reused as iteration count for this case
+		// (see grpc_client.go's mapping comment). Summary is the
+		// already-truncated 512B from the server.
+		msg := "subagent done"
+		if ev.RetryAttempt > 0 {
+			msg = fmt.Sprintf("subagent done (%d iters)", ev.RetryAttempt)
+		}
+		if ev.Reason != "" {
+			msg += " — " + truncateRetryReason(ev.Reason)
+		}
+		r.SystemNote(render.NoteSystem, msg)
+	case "budget_warning":
+		// Reason is "tokens" or "cost"; CostUSD carries the running
+		// total. Mark with NoteV11 (the existing "soft warning"
+		// taxonomy) so the strip color emphasizes vs system notes.
+		dim := "budget"
+		if ev.Reason != "" {
+			dim = ev.Reason
+		}
+		msg := fmt.Sprintf("approaching %s budget", dim)
+		if ev.CostUSD > 0 && ev.Reason == "cost" {
+			msg = fmt.Sprintf("approaching cost budget — $%.2f used", ev.CostUSD)
+		}
+		r.SystemNote(render.NoteV11, msg)
+	case "budget_exceeded":
+		dim := "budget"
+		if ev.Reason != "" {
+			dim = ev.Reason
+		}
+		msg := fmt.Sprintf("%s budget exceeded — run will halt at end of iteration", dim)
+		r.SystemNote(render.NoteSystem, msg)
 	case "provider.retry_attempt":
 		// Provider returned a retryable error (5xx / rate-limit / network).
 		// We're between attempt N and N+1, sleeping RetryWaitMs. Show the
