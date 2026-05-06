@@ -85,18 +85,16 @@ func (m *chatModel) renderChatHeader() string {
 }
 
 // renderPromptPanel returns (height, rendered). Thin rounded magenta
-// frame, 3 rows tall (top + content + bottom). Magenta is reserved
-// for this panel per spec §4.1 — it's the single-purpose accent that
-// signals "this is where you type."
+// frame around the textarea. The panel grows vertically with the
+// buffer's row count (1..chatInputMaxRows) so multi-line composition
+// has somewhere to go without pushing the conversation off-screen.
 //
-// Pre-redesign this was a 5-row heavy `╔══╗` box with two blank
-// padding rows. The heavy double-line + extra padding read as
-// alarming/modal-warning rather than "primary input affordance," and
-// the magenta treatment alone is enough emphasis.
+// The cue glyph `›` sits flush in the panel's gutter on every line
+// (when multi-line) so the user always sees where their text is going.
+// Magenta is reserved for this panel per spec §4.1 — it's the
+// single-purpose accent that signals "this is where you type."
 func (m *chatModel) renderPromptPanel() (int, string) {
 	g := Glyphs()
-	// Use light rounded frame in magenta — magenta still owns the
-	// prompt-panel-singular rule, but the line weight stops shouting.
 	tl, tr := g.BoxLightTL, g.BoxLightTR
 	bl, br := g.BoxLightBL, g.BoxLightBR
 	hr := g.BoxLightHRule
@@ -116,19 +114,72 @@ func (m *chatModel) renderPromptPanel() (int, string) {
 	}
 	leftPad := strings.Repeat(" ", indent)
 
-	top := leftPad + bordStyle(tl+strings.Repeat(hr, innerW)+tr) + leftPad
-
-	cue := lipgloss.NewStyle().Bold(true).Render(g.Arrow)
-	inputView := m.input.ti.View()
-	inner := " " + cue + "  " + inputView
-	innerLen := lipgloss.Width(inner)
-	if innerLen < innerW {
-		inner += strings.Repeat(" ", innerW-innerLen)
+	// Cue gutter: " ›  " on the first line, "    " on continuation
+	// lines. Reserve those 4 cells so the textarea's own line width
+	// matches the panel inner width and doesn't push the right
+	// border out at narrow terminals (also defends against the
+	// snapshot-test path that wires m.width without firing
+	// WindowSizeMsg, which would otherwise leave the textarea at
+	// its default width).
+	const cueWidth = 4
+	taW := innerW - cueWidth
+	if taW < 1 {
+		taW = 1
 	}
-	mid := leftPad + bordStyle(vr) + inner + bordStyle(vr) + leftPad
+	m.input.ta.SetWidth(taW)
+	// Sync textarea visible height with the panel row count so the
+	// View() output produces exactly the right number of rendered
+	// lines. Update() also calls this on every keystroke; the
+	// repeat here keeps snapshot tests (which bypass Update via
+	// direct SetValue) in agreement.
+	m.input.ta.SetHeight(m.input.rowCount())
+
+	top := leftPad + bordStyle(tl+strings.Repeat(hr, innerW)+tr) + leftPad
 	bot := leftPad + bordStyle(bl+strings.Repeat(hr, innerW)+br) + leftPad
 
-	return 3, lipgloss.JoinVertical(lipgloss.Left, top, mid, bot)
+	cue := lipgloss.NewStyle().Bold(true).Render(g.Arrow)
+	rows := m.input.rowCount()
+	view := m.input.ta.View()
+	viewLines := strings.Split(view, "\n")
+	// Pad to exactly rows so the panel doesn't collapse mid-line on
+	// short buffers.
+	for len(viewLines) < rows {
+		viewLines = append(viewLines, "")
+	}
+	if len(viewLines) > rows {
+		viewLines = viewLines[:rows]
+	}
+
+	mids := make([]string, 0, rows)
+	for i, line := range viewLines {
+		// Only the first row gets the `›` cue; subsequent rows get
+		// blank padding so multi-line buffers read as a single
+		// continuous text block instead of a list of arrows.
+		var prefix string
+		if i == 0 {
+			prefix = " " + cue + "  "
+		} else {
+			prefix = "    "
+		}
+		// Pad / truncate inner content to exactly innerW so the
+		// right border aligns even when the textarea's line is
+		// shorter (most cases) or longer (edge: textarea internal
+		// padding for caret rendering).
+		body := prefix + line
+		w := lipgloss.Width(body)
+		switch {
+		case w < innerW:
+			body += strings.Repeat(" ", innerW-w)
+		case w > innerW:
+			body = truncate(body, innerW)
+		}
+		mids = append(mids,
+			leftPad+bordStyle(vr)+body+bordStyle(vr)+leftPad)
+	}
+
+	all := append([]string{top}, mids...)
+	all = append(all, bot)
+	return 2 + rows, lipgloss.JoinVertical(lipgloss.Left, all...)
 }
 
 // renderAffordanceLine is the single row of helper text below the

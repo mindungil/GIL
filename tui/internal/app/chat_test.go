@@ -31,25 +31,28 @@ func TestChatModel_WindowSize_StoresDimensions(t *testing.T) {
 // All gRPC-dependent fields are left nil; tests that need them inject
 // their own fake stream.
 func newChatModelForTest() *chatModel {
-	return &chatModel{phase: ChatPhaseIdle}
+	return &chatModel{
+		phase: ChatPhaseIdle,
+		input: newChatInput(),
+	}
 }
 
 func TestChatInput_NewActive_HasFocus(t *testing.T) {
 	in := newChatInput()
-	if !in.ti.Focused() {
+	if !in.ta.Focused() {
 		t.Fatalf("new chat input should be focused")
 	}
 }
 
 func TestChatInput_SubmitClearsBuffer(t *testing.T) {
 	in := newChatInput()
-	in.ti.SetValue("hello there")
+	in.ta.SetValue("hello there")
 	got := in.submit()
 	if got != "hello there" {
 		t.Fatalf("submit returned %q, want %q", got, "hello there")
 	}
-	if in.ti.Value() != "" {
-		t.Fatalf("buffer should be cleared after submit, got %q", in.ti.Value())
+	if in.ta.Value() != "" {
+		t.Fatalf("buffer should be cleared after submit, got %q", in.ta.Value())
 	}
 	if len(in.history) != 1 || in.history[0] != "hello there" {
 		t.Fatalf("history not appended: %v", in.history)
@@ -58,24 +61,24 @@ func TestChatInput_SubmitClearsBuffer(t *testing.T) {
 
 func TestChatInput_HistoryNavigation_UpDown(t *testing.T) {
 	in := newChatInput()
-	in.ti.SetValue("first")
+	in.ta.SetValue("first")
 	in.submit()
-	in.ti.SetValue("second")
+	in.ta.SetValue("second")
 	in.submit()
 	in.historyUp()
-	if v := in.ti.Value(); v != "second" {
+	if v := in.ta.Value(); v != "second" {
 		t.Fatalf("up once → want \"second\", got %q", v)
 	}
 	in.historyUp()
-	if v := in.ti.Value(); v != "first" {
+	if v := in.ta.Value(); v != "first" {
 		t.Fatalf("up twice → want \"first\", got %q", v)
 	}
 	in.historyDown()
-	if v := in.ti.Value(); v != "second" {
+	if v := in.ta.Value(); v != "second" {
 		t.Fatalf("down → want \"second\", got %q", v)
 	}
 	in.historyDown()
-	if v := in.ti.Value(); v != "" {
+	if v := in.ta.Value(); v != "" {
 		t.Fatalf("down past end → want empty, got %q", v)
 	}
 }
@@ -206,13 +209,13 @@ func TestChatUpdate_EnterSubmitsAndAppendsToTranscript(t *testing.T) {
 	m.height = 32
 	// Use a substantive prompt so the §2.6(b) router forwards it
 	// (KindForward) instead of catching it as too-vague.
-	m.input.ti.SetValue("add a fibonacci function to the math package")
+	m.input.ta.SetValue("add a fibonacci function to the math package")
 
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	cm := updated.(*chatModel)
 	// Buffer cleared.
-	if cm.input.ti.Value() != "" {
-		t.Fatalf("buffer should clear on submit, got %q", cm.input.ti.Value())
+	if cm.input.ta.Value() != "" {
+		t.Fatalf("buffer should clear on submit, got %q", cm.input.ta.Value())
 	}
 	// Transcript has the user echo line (router forwarded; the user
 	// line is present even if downstream dispatch was skipped because
@@ -237,7 +240,7 @@ func TestChatUpdate_NLVerb_AppendsArrowNote(t *testing.T) {
 	m := newChatModel("/tmp/test.sock")
 	m.width = 100
 	m.height = 32
-	m.input.ti.SetValue("show me the spec")
+	m.input.ta.SetValue("show me the spec")
 
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	cm := updated.(*chatModel)
@@ -256,7 +259,7 @@ func TestChatUpdate_NLVerb_AppendsArrowNote(t *testing.T) {
 
 func TestChatUpdate_NLVerbQuit_ReturnsQuitCmd(t *testing.T) {
 	m := newChatModel("/tmp/test.sock")
-	m.input.ti.SetValue("goodbye")
+	m.input.ta.SetValue("goodbye")
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	if cmd == nil {
 		t.Fatalf("NL 'goodbye' should resolve to quit verb and return tea.Quit")
@@ -265,7 +268,7 @@ func TestChatUpdate_NLVerbQuit_ReturnsQuitCmd(t *testing.T) {
 
 func TestChatUpdate_TooVague_AppendsClarification(t *testing.T) {
 	m := newChatModel("/tmp/test.sock")
-	m.input.ti.SetValue("hi")
+	m.input.ta.SetValue("hi")
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	cm := updated.(*chatModel)
 	var foundQ bool
@@ -290,7 +293,7 @@ func TestChatUpdate_CtrlC_ReturnsQuitCmd(t *testing.T) {
 
 func TestChatUpdate_SlashQuit_ReturnsQuitCmd(t *testing.T) {
 	m := newChatModel("/tmp/test.sock")
-	m.input.ti.SetValue("/quit")
+	m.input.ta.SetValue("/quit")
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	if cmd == nil {
 		t.Fatalf("/quit should return a Quit cmd")
@@ -304,8 +307,8 @@ func TestChatUpdate_Up_RecallsHistory(t *testing.T) {
 
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyUp})
 	cm := updated.(*chatModel)
-	if cm.input.ti.Value() != "second" {
-		t.Fatalf("up → want \"second\", got %q", cm.input.ti.Value())
+	if cm.input.ta.Value() != "second" {
+		t.Fatalf("up → want \"second\", got %q", cm.input.ta.Value())
 	}
 }
 

@@ -83,7 +83,11 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m.input.ti.Width = msg.Width - 8 // panel inner width minus › prefix gutter
+		// Panel inner width minus left margin (3) + border (1) +
+		// cursor gutter (4 for " ›  ") + right border (1) + right
+		// margin (3) ≈ 12 cells of chrome subtracted from terminal
+		// width before handing to the textarea.
+		m.input.ta.SetWidth(msg.Width - 12)
 		return m, nil
 
 	case tea.KeyMsg:
@@ -151,7 +155,11 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		default:
 			// Forward to the textinput so typing works.
 			var cmd tea.Cmd
-			m.input.ti, cmd = m.input.ti.Update(msg)
+			m.input.ta, cmd = m.input.ta.Update(msg)
+			// Resize on every keystroke so the panel grows/shrinks
+			// to fit the current buffer's row count (capped at
+			// chatInputMaxRows by rowCount()).
+			m.input.ta.SetHeight(m.input.rowCount())
 			return m, cmd
 		}
 

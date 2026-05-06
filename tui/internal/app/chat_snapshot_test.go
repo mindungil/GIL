@@ -111,6 +111,45 @@ func TestChatView_AsciiSnapshot(t *testing.T) {
 	}
 }
 
+// TestChatView_MultilineInput pins the prompt panel's vertical
+// growth as the user composes a multi-line buffer. The textarea
+// reports LineCount → chatInputState.rowCount() → renderPromptPanel
+// uses (2 + rows) so the panel grows from 3 rows for a single line
+// up to (2 + chatInputMaxRows) rows for a fully-filled buffer.
+func TestChatView_MultilineInput(t *testing.T) {
+	prevNoColor := IsNoColor()
+	prevAscii := IsAsciiMode()
+	prevCwd := chatCwd
+	SetNoColor(true)
+	SetAsciiMode(false)
+	chatCwd = func() string { return "/snap/cwd" }
+	defer SetNoColor(prevNoColor)
+	defer SetAsciiMode(prevAscii)
+	defer func() { chatCwd = prevCwd }()
+
+	m := newChatModel("/tmp/test.sock")
+	m.width = 80
+	m.height = 24
+	m.phase = ChatPhaseIdle
+	// Prefill a 3-line buffer to exercise the multi-line path.
+	m.input.ta.SetValue("first line of a long prompt\nsecond line continues\nand a third")
+
+	got := stripDynamic(m.View())
+	path := filepath.Join("testdata", "chat_multiline_80x24.txt")
+
+	if os.Getenv("UPDATE_SNAPSHOTS") == "1" {
+		_ = os.WriteFile(path, []byte(got), 0o644)
+		return
+	}
+	want, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("missing snapshot %s — run UPDATE_SNAPSHOTS=1", path)
+	}
+	if got != string(want) {
+		t.Errorf("multiline snapshot mismatch:\n--- want ---\n%s\n--- got ---\n%s", string(want), got)
+	}
+}
+
 // TestChatView_RunPhaseSnapshot pins the look of the chat surface
 // mid-run so future aesthetic changes have to consciously rebase the
 // transcript treatment (left rail, glyph prefixes, status pill colour).

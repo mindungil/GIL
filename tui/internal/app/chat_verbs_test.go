@@ -15,7 +15,7 @@ import (
 
 func TestChatVerb_Sessions_AppendsArrowNote(t *testing.T) {
 	m := newChatModel("/tmp/test.sock")
-	m.input.ti.SetValue("list my sessions")
+	m.input.ta.SetValue("list my sessions")
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	cm := updated.(*chatModel)
 	if !transcriptContains(cm.transcript, "→", "session") {
@@ -25,7 +25,7 @@ func TestChatVerb_Sessions_AppendsArrowNote(t *testing.T) {
 
 func TestChatVerb_New_AppendsArrowNote(t *testing.T) {
 	m := newChatModel("/tmp/test.sock")
-	m.input.ti.SetValue("start a new session")
+	m.input.ta.SetValue("start a new session")
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	cm := updated.(*chatModel)
 	if !transcriptContains(cm.transcript, "→", "new") {
@@ -35,7 +35,7 @@ func TestChatVerb_New_AppendsArrowNote(t *testing.T) {
 
 func TestChatVerb_Status_AppendsArrowNote(t *testing.T) {
 	m := newChatModel("/tmp/test.sock")
-	m.input.ti.SetValue("how's it going?")
+	m.input.ta.SetValue("how's it going?")
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	cm := updated.(*chatModel)
 	if !transcriptContains(cm.transcript, "→", "status") {
@@ -45,7 +45,7 @@ func TestChatVerb_Status_AppendsArrowNote(t *testing.T) {
 
 func TestChatVerb_Diff_AppendsArrowNote(t *testing.T) {
 	m := newChatModel("/tmp/test.sock")
-	m.input.ti.SetValue("show me the diff")
+	m.input.ta.SetValue("show me the diff")
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	cm := updated.(*chatModel)
 	if !transcriptContains(cm.transcript, "→", "diff") {
@@ -55,7 +55,7 @@ func TestChatVerb_Diff_AppendsArrowNote(t *testing.T) {
 
 func TestChatVerb_Help_AppendsHelpLine(t *testing.T) {
 	m := newChatModel("/tmp/test.sock")
-	m.input.ti.SetValue("what can you do")
+	m.input.ta.SetValue("what can you do")
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	cm := updated.(*chatModel)
 	if !transcriptContains(cm.transcript, "slash escape-hatch") {
@@ -65,7 +65,7 @@ func TestChatVerb_Help_AppendsHelpLine(t *testing.T) {
 
 func TestChatVerb_Switch_ChangesActiveID(t *testing.T) {
 	m := newChatModel("/tmp/test.sock")
-	m.input.ti.SetValue("switch to 01KQEPABCXYZ12345")
+	m.input.ta.SetValue("switch to 01KQEPABCXYZ12345")
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	cm := updated.(*chatModel)
 	if cm.activeID != "01KQEPABCXYZ12345" {
@@ -78,7 +78,7 @@ func TestChatVerb_Switch_ChangesActiveID(t *testing.T) {
 
 func TestChatVerb_Merge_ShowsConfirmHint(t *testing.T) {
 	m := newChatModel("/tmp/test.sock")
-	m.input.ti.SetValue("merge it")
+	m.input.ta.SetValue("merge it")
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	cm := updated.(*chatModel)
 	// Merge needs a confirmation prompt that the TUI doesn't yet host;
@@ -93,7 +93,7 @@ func TestChatVerb_Run_GuardsBeforeAwaitingConfirm(t *testing.T) {
 	m := newChatModel("/tmp/test.sock")
 	m.activeID = "01KQEPABCXYZ"
 	m.phase = ChatPhaseInterview // not yet AwaitingConfirm
-	m.input.ti.SetValue("run it")
+	m.input.ta.SetValue("run it")
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	cm := updated.(*chatModel)
 	// The phase guard mirrors the cli REPL — start a run only when the
