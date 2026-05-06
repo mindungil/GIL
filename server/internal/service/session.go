@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -45,6 +46,17 @@ type SessionService struct {
 	// entirely (used by the SessionService unit tests, which only
 	// care about the SQL row).
 	sessionsBase string
+
+	// providerFactory is the same closure RunService and InterviewService
+	// use, reused here for SessionService.Prompt's agent loop. Wired
+	// via WithProviderFactory; nil disables the Prompt RPC.
+	providerFactory ProviderFactory
+
+	// chatHist is the in-memory per-session message log used by the
+	// V1 chat agent loop. Lazily initialised; nil for SessionServices
+	// constructed in unit tests that never call Prompt.
+	chatHistMu sync.Mutex
+	chatHist   *chatHistory
 }
 
 // NewSessionService returns a new SessionService backed by the provided Repo.

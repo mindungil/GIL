@@ -340,6 +340,43 @@ type DiffResult struct {
 	Note           string
 }
 
+// PromptOptions controls a single SessionService.Prompt call. All
+// fields are optional except SessionID (which may be empty to ask
+// the daemon to allocate inline; the first streamed Part will then
+// carry a SessionAllocatedPart so callers can pin the new id).
+//
+// Agent picks which agent prompt + tool subset runs the loop. Empty
+// falls through to the daemon's "default" agent. Provider/Model
+// override workspace.Resolve when set.
+type PromptOptions struct {
+	SessionID string
+	Text      string
+	Agent     string
+	Provider  string
+	Model     string
+}
+
+// Prompt opens a streaming chat turn against the daemon's agent
+// loop (docs/design/chat-architecture.md). The user types text,
+// the server runs an agent loop that may call tools, and Parts
+// stream back: TextDelta for assistant chunks, ToolCallPart /
+// ToolResultPart for tool invocations, SessionAllocatedPart on the
+// first call when SessionID is empty, PromptMetrics snapshots, and
+// finally DonePart. Caller drains the returned stream until EOF.
+func (c *Client) Prompt(ctx context.Context, opt PromptOptions) (gilv1.SessionService_PromptClient, error) {
+	req := &gilv1.PromptRequest{
+		SessionId: opt.SessionID,
+		Agent:     opt.Agent,
+		Parts: []*gilv1.PromptPart{
+			{Body: &gilv1.PromptPart_Text{Text: opt.Text}},
+		},
+	}
+	if opt.Provider != "" || opt.Model != "" {
+		req.Model = &gilv1.ModelChoice{Provider: opt.Provider, ModelId: opt.Model}
+	}
+	return c.sessions.Prompt(ctx, req)
+}
+
 // Diff fetches the unified diff between the latest shadow-git
 // checkpoint for sessionID and the current workspace state. The diff
 // is read-only — the workspace is unchanged. Use the Note field to
