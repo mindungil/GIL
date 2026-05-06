@@ -181,9 +181,16 @@ func TestLoop_SessionScopedSlashWithoutSession_Errors(t *testing.T) {
 	require.True(t, found)
 }
 
-func TestLoop_Router_NLVerb_DispatchesAndEmitsArrowNote(t *testing.T) {
+// Router is now a stub (see core/intent/router.go header). All
+// natural-language input forwards to the daemon — verb detection,
+// switch resolution, ambiguity clarification, and too-vague gating
+// moved to the daemon-side LLM-driven loop. These tests pin the new
+// contract: the chat REPL forwards every non-slash prompt unchanged
+// regardless of whether a Router is configured.
+
+func TestLoop_NL_AlwaysForwardsToDaemon(t *testing.T) {
 	mock := render.NewMockRenderer()
-	fc := &fakeClient{sessionID: "01KQEP000001"}
+	fc := &fakeClient{sessionID: "01KQEP000001", assistantChunks: []string{"ok"}}
 	in := strings.NewReader("show me the spec\n/quit\n")
 	err := Run(context.Background(), Config{
 		In:       in,
@@ -192,22 +199,13 @@ func TestLoop_Router_NLVerb_DispatchesAndEmitsArrowNote(t *testing.T) {
 		Router:   intent.NewRouter(),
 	})
 	require.NoError(t, err)
-
-	// Router should have classified → emitted "→ <rationale>" SystemNote …
-	var foundArrow bool
-	for _, c := range mock.Calls {
-		if c.Method == "SystemNote" && strings.HasPrefix(c.Text, "→ ") {
-			foundArrow = true
-			break
-		}
-	}
-	require.True(t, foundArrow, "expected router to emit a → routing note")
-
-	// … and the prompt should NOT have been sent to the daemon.
-	require.Empty(t, fc.sentPrompts, "verb prompts must not forward to SendPrompt")
+	// Previously this prompt would have been classified as VerbSpec
+	// and dispatched client-side. Now it forwards verbatim — the
+	// daemon's LLM decides what "show me the spec" means.
+	require.Equal(t, []string{"show me the spec"}, fc.sentPrompts)
 }
 
-func TestLoop_Router_Forward_StillSendsPrompt(t *testing.T) {
+func TestLoop_NL_TaskPromptForwards(t *testing.T) {
 	mock := render.NewMockRenderer()
 	fc := &fakeClient{
 		assistantChunks: []string{"ok"},
@@ -223,9 +221,15 @@ func TestLoop_Router_Forward_StillSendsPrompt(t *testing.T) {
 	require.Equal(t, []string{"add a dark mode toggle to the settings page"}, fc.sentPrompts)
 }
 
-func TestLoop_Router_AmbiguousSwitch_AsksAndDoesNotDispatch(t *testing.T) {
+func TestLoop_NL_NaturalSwitchPhrasesForward(t *testing.T) {
+	// "switch to the dark one" used to be classified client-side as
+	// VerbSwitch with slug resolution; now it forwards. The daemon's
+	// LLM decides whether to reinterpret it as a switch verb (and
+	// ask for clarification when ambiguous) — that's where the
+	// resolution happens, not in regex on the client.
 	mock := render.NewMockRenderer()
 	fc := &fakeClient{
+		assistantChunks: []string{"ok"},
 		sessionList: []SessionSummary{
 			{ID: "01KQEP000001", GoalHint: "dark mode toggle"},
 			{ID: "01KQEP000002", GoalHint: "dark theme refactor"},
@@ -239,19 +243,14 @@ func TestLoop_Router_AmbiguousSwitch_AsksAndDoesNotDispatch(t *testing.T) {
 		Router:   intent.NewRouter(),
 	})
 	require.NoError(t, err)
-
-	var foundQ bool
-	for _, c := range mock.Calls {
-		if c.Method == "SystemNote" && strings.HasPrefix(c.Text, "?  ") {
-			foundQ = true
-			break
-		}
-	}
-	require.True(t, foundQ, "ambiguous switch should emit a clarifying SystemNote")
-	require.Equal(t, "", fc.sessionID, "ambiguous switch must not commit")
+	require.Equal(t, []string{"switch to the dark one"}, fc.sentPrompts,
+		"natural-language switch phrasing forwards to the daemon now")
 }
 
-func TestLoop_Router_NilRouter_PreservesLegacyForward(t *testing.T) {
+func TestLoop_NL_NilRouterForwards(t *testing.T) {
+	// --no-intent-router (Router=nil) is now equivalent to the
+	// default since the router doesn't do anything. Both paths
+	// forward the prompt verbatim.
 	mock := render.NewMockRenderer()
 	fc := &fakeClient{}
 	in := strings.NewReader("show me the spec\n/quit\n")
@@ -259,7 +258,6 @@ func TestLoop_Router_NilRouter_PreservesLegacyForward(t *testing.T) {
 		In:       in,
 		Renderer: mock,
 		Client:   fc,
-		// Router intentionally nil — --no-intent-router behavior.
 	})
 	require.NoError(t, err)
 	require.Equal(t, []string{"show me the spec"}, fc.sentPrompts)

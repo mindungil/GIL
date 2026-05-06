@@ -1,7 +1,6 @@
 package app
 
 import (
-	"context"
 	"fmt"
 	"strings"
 
@@ -113,35 +112,30 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.transcript = append(m.transcript, "›  "+text)
 			m.firstTurnDone = true
 
-			// §2.6(b) intent router. Slash-prefixed inputs skip the
-			// router (deterministic escape hatch). Verbs route through
-			// dispatchVerb; ambiguous/too-vague get a clarification
-			// turned into a transcript note.
-			if m.router != nil && !strings.HasPrefix(text, "/") {
-				ctx := intent.SessionContext{
-					Phase:           string(m.phase),
-					ActiveSessionID: m.activeID,
-					RecentSessions:  toIntentRefs(m.sessions),
+			// §2.6: natural-language single surface. The intent
+			// router is a stub now (see core/intent/router.go header
+			// for why). All non-slash input forwards to the daemon
+			// where the LLM-driven loop decides what it means —
+			// greeting, meta-question, task description, or verb
+			// invocation phrased naturally.
+			//
+			// Slash-prefixed input is the explicit escape hatch.
+			// Strip the slash, treat the head token as the verb name,
+			// and dispatch through the same dispatchVerb pipeline as
+			// before.
+			if strings.HasPrefix(text, "/") {
+				rest := strings.TrimPrefix(text, "/")
+				parts := strings.SplitN(rest, " ", 2)
+				slashCmd := parts[0]
+				slashArgs := ""
+				if len(parts) == 2 {
+					slashArgs = strings.TrimSpace(parts[1])
 				}
-				cl := m.router.Classify(context.Background(), text, ctx)
-				switch cl.Kind {
-				case intent.KindVerb:
-					return m, m.dispatchVerb(cl)
-				case intent.KindAmbiguous:
-					// styleMeta (dim italic) + a `gil →` prefix marks
-					// this as a router note, not a model response.
-					// The previous `?` glyph alone read like the AI
-					// was asking back, especially with greetings.
-					m.transcript = append(m.transcript,
-						"   "+styleMeta("gil → "+cl.Clarification))
-					return m, nil
-				case intent.KindTooVague:
-					m.transcript = append(m.transcript,
-						"   "+styleMeta("gil → "+cl.Clarification))
-					return m, nil
-				case intent.KindForward:
-					// fall through to the daemon dispatch below
-				}
+				return m, m.dispatchVerb(intent.Classification{
+					Kind: intent.KindVerb,
+					Verb: intent.Verb(slashCmd),
+					Args: map[string]string{"target": slashArgs, "raw": slashArgs},
+				})
 			}
 
 			if m.client == nil {

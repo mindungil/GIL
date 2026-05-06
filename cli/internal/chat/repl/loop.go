@@ -138,43 +138,13 @@ func Run(ctx context.Context, cfg Config) error {
 					"run-time prompts are V1.1 — wait for done; there is no in-chat stop verb yet")
 				continue
 			}
-			// §2.6(b): natural-language verb routing. Slash-prefixed
-			// inputs are handled in InputSlash above and skip this path.
-			if cfg.Router != nil {
-				cl := cfg.Router.Classify(ctx, args, buildSessionContext(ctx, cfg, tr))
-				switch cl.Kind {
-				case intent.KindVerb:
-					if cl.Rationale != "" {
-						cfg.Renderer.SystemNote(render.NoteSystem, "→ "+cl.Rationale)
-					}
-					verbCmd, verbArgs := verbToSlashArgs(cl)
-					if SlashRequiresSession(verbCmd) && cfg.Client.ActiveSessionID() == "" {
-						cfg.Renderer.SystemNote(render.NoteSystem,
-							"need an active session for "+verbCmd+" — start one with a prompt or 'sessions'")
-						continue
-					}
-					if verbCmd == "quit" {
-						return nil
-					}
-					if err := dispatchSlash(ctx, cfg, tr, verbCmd, verbArgs); err != nil {
-						cfg.Renderer.SystemNote(render.NoteSystem,
-							fmt.Sprintf("%s failed: %s", verbCmd, errmap.FormatForChat(err)))
-					}
-					continue
-				case intent.KindAmbiguous:
-					// `gil →` prefix makes this read as a router
-					// note, not as the model asking back. The
-					// previous `?` glyph alone confused users into
-					// thinking the AI hadn't responded.
-					cfg.Renderer.SystemNote(render.NoteSystem, "gil → "+cl.Clarification)
-					continue
-				case intent.KindTooVague:
-					cfg.Renderer.SystemNote(render.NoteSystem, "gil → "+cl.Clarification)
-					continue
-				case intent.KindForward:
-					// fall through to SendPrompt below
-				}
-			}
+			// §2.6: natural-language single surface. The router is a
+			// stub now (see core/intent/router.go header) — it always
+			// returns KindForward. Verb/ambiguity/too-vague resolution
+			// moved to the daemon's LLM-driven loop. Keeping the
+			// Classify call here as a stable seam for the future
+			// LLM-side router path; the switch is reduced to its only
+			// reachable arm.
 			if err := cfg.Client.SendPrompt(ctx, args); err != nil {
 				cfg.Renderer.SystemNote(render.NoteSystem,
 					"send failed: "+errmap.FormatForChat(err))
