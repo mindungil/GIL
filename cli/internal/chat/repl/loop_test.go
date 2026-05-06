@@ -93,6 +93,36 @@ func TestLoop_BarePrompt_SendsAndRendersAssistant(t *testing.T) {
 	require.Contains(t, seq, "PromptCue")
 }
 
+func TestLoop_StatusStripOnlyRedrawsOnPhaseChange(t *testing.T) {
+	// #40 regression. Prior to this fix the loop unconditionally
+	// repainted StatusStrip every iteration, sandwiching assistant text
+	// between two identical strips when the phase had not actually
+	// changed. The fix: track lastStripPhase and skip repaint when
+	// the new state matches.
+	mock := render.NewMockRenderer()
+	fc := &fakeClient{
+		assistantChunks: []string{"hello"},
+	}
+	// Three iterations: prompt → noop blank line → /quit. All while
+	// the tracker sits in the default Idle phase, so StatusStrip
+	// should fire once (the initial paint) — not three times.
+	in := strings.NewReader("hi\n\n/quit\n")
+	err := Run(context.Background(), Config{
+		In:       in,
+		Renderer: mock,
+		Client:   fc,
+	})
+	require.NoError(t, err)
+	stripCount := 0
+	for _, c := range mock.Calls {
+		if c.Method == "StatusStrip" {
+			stripCount++
+		}
+	}
+	require.Equal(t, 1, stripCount,
+		"strip should paint only on phase changes; got %d paints", stripCount)
+}
+
 func TestLoop_SlashHelp_RoutesToHelp(t *testing.T) {
 	mock := render.NewMockRenderer()
 	in := strings.NewReader("/help\n/quit\n")

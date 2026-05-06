@@ -73,15 +73,29 @@ func Run(ctx context.Context, cfg Config) error {
 
 	scanner := bufio.NewScanner(cfg.In)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1<<20)
+	// lastStripPhase remembers the Phase last sent to the renderer so
+	// we only repaint the status strip when something the strip
+	// actually displays has changed. The previous unconditional repaint
+	// every iteration sandwiched assistant text between two identical
+	// strips after a turn ended (#40 — the artifact "What's your project
+	// goal? appears AFTER the next strip line"). Initialised to a
+	// sentinel so the very first iteration always paints once.
+	var lastStripPhase render.Phase = "<unset>"
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 
-		// Drain any pending events into the tracker before drawing strip.
+		// Drain any pending events into the tracker before deciding
+		// whether to repaint. This may emit system notes that are
+		// orthogonal to the strip — those still print regardless.
 		drainEvents(ctx, cfg, tr)
 
-		cfg.Renderer.StatusStrip(tr.State())
+		state := tr.State()
+		if state.Phase != lastStripPhase {
+			cfg.Renderer.StatusStrip(state)
+			lastStripPhase = state.Phase
+		}
 		cfg.Renderer.PromptCue()
 
 		if !scanner.Scan() {
