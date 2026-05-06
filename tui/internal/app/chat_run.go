@@ -145,6 +145,24 @@ func formatChatRunEvent(ev *gilv1.Event) (phase ChatPhase, lines []string, keepD
 			errMsg = string(ev.GetDataJson())
 		}
 		return "", []string{"   !  run error: " + errMsg}, true
+	case "provider.retry_attempt":
+		// Provider hit a transient failure and Retry.OnRetry fired
+		// before sleeping `wait_ms` to try again. Surface so the user
+		// sees backoff is happening — without this a 30s exponential
+		// backoff looks indistinguishable from a daemon hang.
+		var d map[string]any
+		_ = json.Unmarshal(ev.GetDataJson(), &d)
+		attempt, _ := d["attempt"].(float64)
+		max, _ := d["max_attempts"].(float64)
+		waitMs, _ := d["wait_ms"].(float64)
+		errMsg, _ := d["err"].(string)
+		line := fmt.Sprintf("   ‹  retry %d/%d in %s",
+			int(attempt), int(max), formatChatRetryWait(int64(waitMs)))
+		if errMsg != "" {
+			line += " — " + truncateChat(errMsg, 60)
+		}
+		// Phase stays whatever it was — the run hasn't advanced.
+		return "", []string{line}, true
 	case "agent_turn":
 		// Run-side AgentTurn comes through the Event stream (not the
 		// InterviewService stream that chat_stream.go handles). The
@@ -259,6 +277,20 @@ func humanChatStuckPattern(p string) string {
 		return "no file progress"
 	}
 	return p
+}
+
+// formatChatRetryWait turns wait-ms into a compact label for the
+// transcript. Mirrors formatRetryWait in cli/internal/chat/repl/loop.go
+// — duplicated locally so the cli REPL and the TUI describe the same
+// retry-backoff window with the same units.
+func formatChatRetryWait(ms int64) string {
+	if ms < 1000 {
+		return fmt.Sprintf("%dms", ms)
+	}
+	if ms < 60_000 {
+		return fmt.Sprintf("%.1fs", float64(ms)/1000)
+	}
+	return fmt.Sprintf("%dm", ms/60_000)
 }
 
 // truncateChat clips s to maxRunes runes, appending "…" when it had

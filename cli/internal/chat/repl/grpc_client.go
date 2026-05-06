@@ -504,6 +504,28 @@ func mapRunEventToTracker(sessionID string, ev *gilv1.Event) TrackerInput {
 		if ev.GetMetrics() != nil {
 			in.CostUSD = ev.GetMetrics().CostUsd
 		}
+	case "provider.retry_attempt":
+		// Provider hit a transient failure (5xx / rate-limit / network).
+		// Retry.OnRetry fired before sleeping `wait_ms` and trying again.
+		// Surface so the user sees backoff is happening rather than
+		// staring at silence — the previous adapter ignored these and
+		// flaky upstreams looked like hangs.
+		in.Kind = "provider.retry_attempt"
+		var d map[string]any
+		if jerr := json.Unmarshal(ev.GetDataJson(), &d); jerr == nil {
+			if v, ok := d["attempt"].(float64); ok {
+				in.RetryAttempt = int(v)
+			}
+			if v, ok := d["max_attempts"].(float64); ok {
+				in.RetryMax = int(v)
+			}
+			if v, ok := d["wait_ms"].(float64); ok {
+				in.RetryWaitMs = int64(v)
+			}
+			if v, ok := d["err"].(string); ok {
+				in.Reason = v
+			}
+		}
 	}
 	return in
 }

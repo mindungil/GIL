@@ -273,7 +273,48 @@ func emitDeltaNotes(r render.Renderer, prev, cur render.SessionState, ev Tracker
 		r.SystemNote(render.NoteSystem, msg)
 	case "run.done":
 		r.SystemNote(render.NoteSystem, "done — /diff to review, /merge to apply")
+	case "provider.retry_attempt":
+		// Provider returned a retryable error (5xx / rate-limit / network).
+		// We're between attempt N and N+1, sleeping RetryWaitMs. Show the
+		// progression so the user understands the gap is intentional rather
+		// than a daemon hang. Phase is unaffected — the run hasn't moved.
+		msg := "provider retry"
+		if ev.RetryAttempt > 0 && ev.RetryMax > 0 {
+			msg = fmt.Sprintf("retry %d/%d in %s",
+				ev.RetryAttempt, ev.RetryMax, formatRetryWait(ev.RetryWaitMs))
+		}
+		if ev.Reason != "" {
+			msg += " — " + truncateRetryReason(ev.Reason)
+		}
+		r.SystemNote(render.NoteSystem, msg)
 	}
+}
+
+// formatRetryWait turns a wait duration in ms into a compact label
+// ("0.5s", "12s", "2m"). Single-line strip cells don't have room for
+// a full duration so we cap at minutes.
+func formatRetryWait(ms int64) string {
+	if ms < 1000 {
+		return fmt.Sprintf("%dms", ms)
+	}
+	if ms < 60_000 {
+		return fmt.Sprintf("%.1fs", float64(ms)/1000)
+	}
+	return fmt.Sprintf("%dm", ms/60_000)
+}
+
+// truncateRetryReason clips a long upstream error message (often the
+// raw provider response body — JSON, HTML maintenance page, etc.) to a
+// chat-friendly length. Most real retry errors are short ("rate limit
+// exceeded", "503"); the truncation is a safety net for HTML 503s and
+// deeply nested JSON error envelopes.
+func truncateRetryReason(s string) string {
+	const max = 80
+	s = strings.TrimSpace(s)
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "…"
 }
 
 // buildSessionContext snapshots the runtime state the router needs.

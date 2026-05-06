@@ -43,6 +43,23 @@ func TestMapRunEvent_LegacyRunStuckNameNoLongerFires(t *testing.T) {
 	require.Equal(t, "", in.Kind, "legacy event name must NOT be matched")
 }
 
+func TestMapRunEvent_RetryAttempt_PopulatesPayload(t *testing.T) {
+	// Regression: chat REPL ignored provider.retry_attempt events, so
+	// flaky upstreams looked like 30s hangs. Adapter now extracts the
+	// attempt counter, the wait window, and the upstream error so
+	// emitDeltaNotes can render "retry 2/4 in 1.0s — 503 service unavailable".
+	ev := &gilv1.Event{
+		Type:     "provider.retry_attempt",
+		DataJson: []byte(`{"attempt":2,"max_attempts":4,"wait_ms":1000,"err":"status 503 service unavailable"}`),
+	}
+	in := mapRunEventToTracker("01HQ", ev)
+	require.Equal(t, "provider.retry_attempt", in.Kind)
+	require.Equal(t, 2, in.RetryAttempt)
+	require.Equal(t, 4, in.RetryMax)
+	require.EqualValues(t, 1000, in.RetryWaitMs)
+	require.Contains(t, in.Reason, "503")
+}
+
 func TestMapRunEvent_StuckDetected_BadJSON_StillRoutesPhase(t *testing.T) {
 	// Malformed payload must not block the phase change — pattern /
 	// detail simply remain empty so the SystemNote falls back to a

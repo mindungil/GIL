@@ -32,8 +32,18 @@ type TrackerInput struct {
 	// Reason is the StageTransition.Reason payload — e.g.
 	// "domain=cli-tooling confidence=0.85" on interview.started, or
 	// the audit's "ready" reason on interview.ready_to_freeze. Empty
-	// for events that don't carry one.
+	// for events that don't carry one. Reused for retry's err string
+	// when Kind == "provider.retry_attempt".
 	Reason string
+
+	// Retry-attempt payload, populated when Kind is
+	// "provider.retry_attempt". Sent by core/provider/retry.go's
+	// OnRetry hook before sleeping `RetryWaitMs` to retry as
+	// attempt RetryAttempt of RetryMax. Surfaces in the chat REPL
+	// as a transient SystemNote so backoff is visible.
+	RetryAttempt int
+	RetryMax     int
+	RetryWaitMs  int64
 }
 
 type Tracker struct {

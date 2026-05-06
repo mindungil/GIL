@@ -801,6 +801,30 @@ func (s *RunService) executeRun(
 	s.runProgress[sessionID] = &runProgressSnap{}
 	s.mu.Unlock()
 
+	// Wire provider retry observability. The provider was wrapped in
+	// NewRetry at gRPC entry; once we have a stream, attach a callback
+	// that emits a `provider.retry_attempt` event so the chat surface
+	// can show "[retrying 2/4 · 1.0s]" instead of a silent ~30s gap
+	// while exponential backoff drains. Without this hook a flaky
+	// upstream looks indistinguishable from a hang to the user.
+	if rp, ok := prov.(*provider.Retry); ok {
+		rp.OnRetry = func(attempt, maxAttempts int, err error, wait time.Duration) {
+			data, _ := json.Marshal(map[string]any{
+				"attempt":      attempt,
+				"max_attempts": maxAttempts,
+				"wait_ms":      wait.Milliseconds(),
+				"err":          err.Error(),
+			})
+			_, _ = stream.Append(event.Event{
+				Timestamp: time.Now().UTC(),
+				Source:    event.SourceSystem,
+				Kind:      event.KindNote,
+				Type:      "provider.retry_attempt",
+				Data:      data,
+			})
+		}
+	}
+
 	// Cleanup on exit: remove stream, progress, loop, and any
 	// pending-clarification channels. Closing each pending channel
 	// unblocks the clarify tool with Cancelled=true so the run can
