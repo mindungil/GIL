@@ -2,6 +2,8 @@ package app
 
 import (
 	"context"
+	"errors"
+	"io"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -78,9 +80,11 @@ type chatStageReasonMsg struct {
 	reason string
 }
 
-// startInterviewCmd opens the interview stream and returns the
-// handle via chatStreamStartedMsg. The stream is then drained by
-// repeated nextChatEventCmd calls scheduled from Update.
+// startInterviewCmd / replyInterviewCmd are the legacy InterviewService
+// entry points. M3 will delete InterviewService entirely; for now the
+// TUI no longer calls these — startChatPromptCmd below replaces both
+// via the single SessionService.Prompt RPC. The functions stay defined
+// to keep any test that imports them compiling until M3 lands.
 func startInterviewCmd(client *sdk.Client, sessionID, firstInput string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -90,6 +94,31 @@ func startInterviewCmd(client *sdk.Client, sessionID, firstInput string) tea.Cmd
 			return chatStreamErrMsg{err: err.Error()}
 		}
 		return chatStreamStartedMsg{stream: stream, cancel: cancel}
+	}
+}
+
+// startChatPromptCmd is the M2 single-RPC chat path. It calls
+// sdk.Client.Prompt (SessionService.Prompt) and adapts the resulting
+// Part stream into the chat surface's existing message types
+// (chatAssistantChunkMsg / chatStreamErrMsg / chatStreamDoneMsg) plus
+// new ones for tool calls/results and prompt metrics.
+//
+// The Part stream type doesn't share an alias with InterviewEvent
+// streams (different message bodies), so this command goes through a
+// dedicated chatPromptStreamStartedMsg + chatPromptEventCmd pump that
+// runs alongside the interview pump until M3 deletes the latter.
+func startChatPromptCmd(client *sdk.Client, sessionID, text string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithCancel(context.Background())
+		stream, err := client.Prompt(ctx, sdk.PromptOptions{
+			SessionID: sessionID,
+			Text:      text,
+		})
+		if err != nil {
+			cancel()
+			return chatStreamErrMsg{err: err.Error()}
+		}
+		return chatPromptStreamStartedMsg{stream: stream, cancel: cancel}
 	}
 }
 
@@ -157,6 +186,94 @@ func nextChatEventCmd(stream gilv1.InterviewService_StartClient) tea.Cmd {
 		}
 		// Unknown / not-yet-rendered events become "skip" — Update
 		// converts the sentinel back into a pump call. V1 just drops them.
+		return chatStreamEventSkipMsg{}
+	}
+}
+
+// --- M2 chat-prompt pump ---------------------------------------------
+//
+// SessionService.Prompt uses a different streaming type and different
+// message body shape than InterviewService.Start. The msgs and pump
+// below mirror the interview pump's structure but speak Parts.
+
+// chatPromptStreamStartedMsg is the post-Prompt-RPC equivalent of
+// chatStreamStartedMsg. The model stores the stream + cancel and
+// schedules the pump.
+type chatPromptStreamStartedMsg struct {
+	stream gilv1.SessionService_PromptClient
+	cancel context.CancelFunc
+}
+
+// chatPromptToolCallMsg / chatPromptToolResultMsg surface tool
+// invocations to the chat transcript. Mirrors the cli REPL's
+// "tool.call" / "tool.result" TrackerInput kinds so the user sees
+// what the agent is doing on each iteration.
+type chatPromptToolCallMsg struct {
+	id, name, inputJSON string
+}
+type chatPromptToolResultMsg struct {
+	callID, content string
+	isError         bool
+}
+
+// chatPromptSessionAllocatedMsg fires once when the daemon allocated
+// a session in response to an empty session_id. The model pins
+// activeID and continues draining.
+type chatPromptSessionAllocatedMsg struct {
+	sessionID string
+}
+
+// chatPromptMetricsMsg carries per-turn tokens / latency for the
+// status pill.
+type chatPromptMetricsMsg struct {
+	tokensIn, tokensOut, latencyMs int64
+}
+
+// nextChatPromptEventCmd reads one Part from the prompt stream and
+// dispatches to the right msg. Mirrors nextChatEventCmd shape so the
+// chat model's Update can re-pump after each event.
+func nextChatPromptEventCmd(stream gilv1.SessionService_PromptClient) tea.Cmd {
+	return func() tea.Msg {
+		ev, err := stream.Recv()
+		if err != nil {
+			// Both EOF and stream errors collapse to the existing
+			// chatStreamDoneMsg / chatStreamErrMsg handlers — turn
+			// is over either way.
+			if errors.Is(err, io.EOF) {
+				return chatStreamDoneMsg{}
+			}
+			return chatStreamErrMsg{err: err.Error()}
+		}
+		if t := ev.GetText(); t != nil {
+			return chatAssistantChunkMsg{text: t.GetContent()}
+		}
+		if c := ev.GetToolCall(); c != nil {
+			return chatPromptToolCallMsg{
+				id: c.GetId(), name: c.GetName(), inputJSON: c.GetInputJson(),
+			}
+		}
+		if r := ev.GetToolResult(); r != nil {
+			return chatPromptToolResultMsg{
+				callID: r.GetCallId(), content: r.GetContent(), isError: r.GetIsError(),
+			}
+		}
+		if a := ev.GetSessionAllocated(); a != nil {
+			return chatPromptSessionAllocatedMsg{sessionID: a.GetSessionId()}
+		}
+		if mt := ev.GetMetrics(); mt != nil {
+			return chatPromptMetricsMsg{
+				tokensIn:  mt.GetTokensIn(),
+				tokensOut: mt.GetTokensOut(),
+				latencyMs: mt.GetLatencyMs(),
+			}
+		}
+		if d := ev.GetDone(); d != nil {
+			if d.GetStopReason() == "error" {
+				return chatStreamErrMsg{err: d.GetErrorMessage()}
+			}
+			return chatStreamDoneMsg{}
+		}
+		// Unknown body — re-pump.
 		return chatStreamEventSkipMsg{}
 	}
 }

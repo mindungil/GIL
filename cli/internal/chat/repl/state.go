@@ -53,6 +53,16 @@ type TrackerInput struct {
 	// the provider took for the call this event represents. Snapshot,
 	// not accumulated; surfaces the most recent latency in the strip.
 	LatencyMs int64
+
+	// Tool* fields populated when Kind == "tool.call" or "tool.result".
+	// The chat surface renders these as inline transcript lines so the
+	// user sees what tools the agent invoked. ToolID correlates the
+	// call → result pair.
+	ToolName    string
+	ToolID      string
+	ToolInput   string
+	ToolContent string
+	ToolIsError bool
 }
 
 type Tracker struct {
@@ -145,5 +155,25 @@ func (t *Tracker) Apply(in TrackerInput) {
 		}
 		t.s.ChecksPassed = in.ChecksPassed
 		t.s.ChecksTotal = in.ChecksTotal
+
+	case "session.allocated":
+		// Daemon auto-created a session in response to a Prompt with
+		// empty session_id. Tracker doesn't change phase — the chat
+		// surface already shows ChatPhaseIdle / interview as
+		// appropriate; this kind exists so emitDeltaNotes can mention
+		// the new id once.
+
+	case "tool.call", "tool.result":
+		// Tool invocations don't change phase. emitDeltaNotes prints
+		// them as ⚒ lines in the transcript so the user sees what
+		// the agent is doing.
+
+	case "prompt.metrics":
+		if in.Tokens > 0 {
+			t.s.Tokens = in.Tokens
+		}
+		if in.LatencyMs > 0 {
+			t.s.LatencyMs = in.LatencyMs
+		}
 	}
 }

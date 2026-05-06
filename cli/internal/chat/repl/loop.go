@@ -10,8 +10,21 @@ import (
 
 	"github.com/mindungil/gil/cli/internal/chat/render"
 	"github.com/mindungil/gil/cli/internal/errmap"
-	"github.com/mindungil/gil/core/intent"
 )
+
+// isTerminalExit reports whether a bare line should exit the REPL.
+// Per docs/design/chat-architecture.md §3.1, terminal exit is the
+// ONE client-side recognition that survives the slash-removal pass —
+// the chat surface never matches strings to verbs otherwise. Slash-
+// prefixed forms (`/quit`, `/exit`) also exit so users with the
+// muscle memory don't get punished.
+func isTerminalExit(line string) bool {
+	switch strings.ToLower(strings.TrimSpace(line)) {
+	case "quit", "exit", "bye", "/quit", "/exit":
+		return true
+	}
+	return false
+}
 
 // SessionSummary carries the display-relevant fields for a single session
 // in the /sessions listing. Name is a short human label (typically the
@@ -26,21 +39,18 @@ type SessionSummary struct {
 // SessionClient abstracts the gRPC session boundary so loop tests
 // don't need a live daemon. The cmd/chat.go integration provides a
 // real implementation backed by sdk.Client.
+//
+// M2 narrowed this interface to just what the chat surface needs.
+// Verb dispatch (Spec/Status/Diff/Merge/StartRun/Compact/SwitchSession/
+// NewSession) was removed — the agent calls those as tools server-side.
+// ListSessions stays for the pre-first-turn entry disclosure.
 type SessionClient interface {
 	SendPrompt(ctx context.Context, prompt string) error
 	NextAssistantChunk(ctx context.Context) (chunk string, more bool, err error)
 	NextEvent(ctx context.Context) (in TrackerInput, ok bool, err error)
 
 	ActiveSessionID() string
-	Spec(ctx context.Context) (*render.SpecView, error)
-	Status(ctx context.Context) (string, error)
-	Diff(ctx context.Context) ([]render.DiffHunk, error)
-	Merge(ctx context.Context) error
-	StartRun(ctx context.Context) error
-	Compact(ctx context.Context) (queued bool, reason string, err error)
 	ListSessions(ctx context.Context) ([]SessionSummary, error)
-	SwitchSession(ctx context.Context, idOrName string) error
-	NewSession(ctx context.Context) error
 
 	Close() error
 }
@@ -49,10 +59,11 @@ type Config struct {
 	In       io.Reader
 	Renderer render.Renderer
 	Client   SessionClient
-	// Router classifies natural-language prompts into verb dispatches
-	// per design.md §2.6(b). When nil the loop forwards every
-	// InputPrompt directly (pre-26.6 behavior, --no-intent-router).
-	Router *intent.Router
+	// Router was a §2.6(b) verb classifier on the client; M2 removed
+	// it (see core/intent/router.go header). Field stays here (always
+	// nil) to keep the cobra wiring in cli/internal/cmd/chat.go from
+	// breaking until M3 deletes both sides. Effectively dead.
+	Router *struct{}
 }
 
 // Run executes the chat REPL until the user types /quit, EOF, or an
@@ -106,50 +117,24 @@ func Run(ctx context.Context, cfg Config) error {
 			}
 			return nil // EOF
 		}
-		line := scanner.Text()
-
-		kind, cmd, args := ParseInput(line)
-		switch kind {
-		case InputBlank:
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
 			continue
-
-		case InputSlash:
-			if !IsKnownSlash(cmd) {
-				cfg.Renderer.SystemNote(render.NoteSystem,
-					fmt.Sprintf("unknown slash: /%s — try /help", cmd))
-				continue
-			}
-			if cmd == "quit" {
-				return nil
-			}
-			if SlashRequiresSession(cmd) && cfg.Client.ActiveSessionID() == "" {
-				cfg.Renderer.SystemNote(render.NoteSystem,
-					"no active session — start one with a prompt or /sessions")
-				continue
-			}
-			if err := dispatchSlash(ctx, cfg, tr, cmd, args); err != nil {
-				cfg.Renderer.SystemNote(render.NoteSystem,
-					fmt.Sprintf("/%s failed: %s", cmd, errmap.FormatForChat(err)))
-			}
-
-		case InputPrompt:
-			if tr.State().Phase == render.PhaseRun || tr.State().Phase == render.PhaseStuck {
-				cfg.Renderer.SystemNote(render.NoteV11,
-					"run-time prompts are V1.1 — wait for done; there is no in-chat stop verb yet")
-				continue
-			}
-			// §2.6: natural-language single surface. The router is a
-			// stub now (see core/intent/router.go header) — it always
-			// returns KindForward. Verb/ambiguity/too-vague resolution
-			// moved to the daemon's LLM-driven loop. Keeping the
-			// Classify call here as a stable seam for the future
-			// LLM-side router path; the switch is reduced to its only
-			// reachable arm.
-			if err := cfg.Client.SendPrompt(ctx, args); err != nil {
-				cfg.Renderer.SystemNote(render.NoteSystem,
-					"send failed: "+errmap.FormatForChat(err))
-				continue
-			}
+		}
+		// Terminal exit is the ONE non-agent client-side recognition
+		// per docs/design/chat-architecture.md §3.1 — the chat surface
+		// is a 100% natural-language path otherwise. A bare "quit",
+		// "exit", or "bye" exits cleanly. Anything else, including
+		// slash-prefixed input, forwards to the daemon's agent.
+		if isTerminalExit(line) {
+			return nil
+		}
+		if err := cfg.Client.SendPrompt(ctx, line); err != nil {
+			cfg.Renderer.SystemNote(render.NoteSystem,
+				"send failed: "+errmap.FormatForChat(err))
+			continue
+		}
+		{
 			// Stream assistant chunks until the client signals done.
 			// A 30s watchdog converts a silent hang (gild waiting on a
 			// dead provider, no events ever) into a visible note so the
@@ -215,6 +200,41 @@ func drainEvents(ctx context.Context, cfg Config, tr *Tracker) {
 // notes so the user sees what shifted between strips.
 func emitDeltaNotes(r render.Renderer, prev, cur render.SessionState, ev TrackerInput) {
 	switch ev.Kind {
+	case "session.allocated":
+		// Daemon allocated a fresh session in response to a
+		// SessionService.Prompt call with empty session_id. Render
+		// once so the user can pin the id (paste it elsewhere /
+		// reference it in chat). Subsequent prompts reuse the id
+		// silently.
+		r.SystemNote(render.NoteSystem,
+			"session "+shortID(ev.SessionID)+" started")
+	case "tool.call":
+		// Agent invoked a server-side tool. Show ⚒ + name + brief
+		// input so the user sees what the agent is doing.
+		input := ev.ToolInput
+		if len(input) > 80 {
+			input = input[:80] + "…"
+		}
+		msg := "⚒ " + ev.ToolName
+		if input != "" && input != "{}" {
+			msg += "  " + input
+		}
+		r.SystemNote(render.NoteSystem, msg)
+	case "tool.result":
+		glyph := "⚒ ✓"
+		body := ev.ToolContent
+		if ev.ToolIsError {
+			glyph = "⚒ ✗"
+		}
+		if len(body) > 200 {
+			body = body[:200] + "…"
+		}
+		body = strings.ReplaceAll(body, "\n", " · ")
+		r.SystemNote(render.NoteSystem, glyph+"  "+body)
+	case "prompt.metrics":
+		// Tokens / latency are reflected in the strip via
+		// Tracker.Apply — no need for a system note. Left as a
+		// no-op case to document where the kind comes from.
 	case "interview.slot_filled":
 		if cur.SlotsFilled > prev.SlotsFilled {
 			r.SystemNote(render.NoteSpec,
@@ -383,125 +403,11 @@ func truncateRetryReason(s string) string {
 	return s[:max] + "…"
 }
 
-// buildSessionContext snapshots the runtime state the router needs.
-// Pulls the recent-session list from the client (best-effort — empty on
-// error) so "switch to the dark one"-style prompts can be resolved.
-func buildSessionContext(ctx context.Context, cfg Config, tr *Tracker) intent.SessionContext {
-	out := intent.SessionContext{
-		Phase:           string(tr.State().Phase),
-		ActiveSessionID: cfg.Client.ActiveSessionID(),
-	}
-	list, err := cfg.Client.ListSessions(ctx)
-	if err != nil {
-		return out
-	}
-	const topN = 10
-	if len(list) > topN {
-		list = list[:topN]
-	}
-	for _, s := range list {
-		out.RecentSessions = append(out.RecentSessions, intent.SessionRef{
-			ID:   s.ID,
-			Slug: s.GoalHint,
-		})
-	}
-	return out
-}
-
-// verbToSlashArgs maps an intent.Classification verb to the same
-// (cmd, args) shape dispatchSlash already accepts. The router's verb
-// names are deliberately the slash names so this is a 1:1 hop.
-func verbToSlashArgs(cl intent.Classification) (string, string) {
-	cmd := string(cl.Verb)
-	if cl.Verb == intent.VerbSwitch {
-		return cmd, cl.Args["target"]
-	}
-	return cmd, ""
-}
-
-// dispatchSlash routes each known slash command to the appropriate
-// SessionClient call or renderer method.
-func dispatchSlash(ctx context.Context, cfg Config, tr *Tracker, cmd, args string) error {
-	r := cfg.Renderer
-	c := cfg.Client
-	switch cmd {
-	case "help":
-		r.SystemNote(render.NoteSystem,
-			"talk in plain language — gil routes it. slash escape-hatch: /sessions /switch /new /spec /status /diff /merge /run /compact /quit /help")
-	case "sessions":
-		list, err := c.ListSessions(ctx)
-		if err != nil {
-			return err
-		}
-		if len(list) == 0 {
-			r.SystemNote(render.NoteSystem, "no sessions — describe what you want to build")
-			return nil
-		}
-		for i, s := range list {
-			r.SystemNote(render.NoteSystem, formatSessionRow(i+1, s))
-		}
-	case "switch":
-		if args == "" {
-			r.SystemNote(render.NoteSystem, "/switch <id|name>")
-			return nil
-		}
-		return c.SwitchSession(ctx, args)
-	case "new":
-		return c.NewSession(ctx)
-	case "spec":
-		v, err := c.Spec(ctx)
-		if err != nil {
-			return err
-		}
-		r.Spec(v)
-	case "status":
-		s, err := c.Status(ctx)
-		if err != nil {
-			return err
-		}
-		r.SystemNote(render.NoteSystem, s)
-	case "diff":
-		h, err := c.Diff(ctx)
-		if err != nil {
-			return err
-		}
-		r.Diff(h)
-	case "merge":
-		ok, err := r.Confirm("Apply diff to working tree?", false)
-		if err != nil || !ok {
-			return err
-		}
-		return c.Merge(ctx)
-	case "run":
-		if tr.State().Phase != render.PhaseAwaitingConfirm {
-			r.SystemNote(render.NoteSystem,
-				"spec is not ready to freeze yet — keep iterating with prompts")
-			return nil
-		}
-		return c.StartRun(ctx)
-	case "compact":
-		// Queue a compaction at the next turn boundary. Server returns
-		// queued=false when no run is in flight; the reason is safe to
-		// surface to the user verbatim. compact_start/compact_done
-		// events flow back through the run stream and emit SystemNotes
-		// from emitDeltaNotes — no need to block here.
-		queued, reason, err := c.Compact(ctx)
-		if err != nil {
-			return err
-		}
-		if !queued {
-			msg := "compaction not queued"
-			if reason != "" {
-				msg += " — " + reason
-			}
-			r.SystemNote(render.NoteSystem, msg)
-			return nil
-		}
-		r.SystemNote(render.NoteSystem,
-			"compaction queued — will run at the next turn boundary")
-	}
-	return nil
-}
+// (buildSessionContext / verbToSlashArgs / dispatchSlash deleted in M2 —
+// the chat surface no longer dispatches verbs. The agent calls tools
+// in the daemon. cli/internal/cmd/* keeps the verb-mode subcommands for
+// headless / script use; that path uses the SDK directly, not these
+// helpers.)
 
 // formatSessionRow renders one session as a numbered listing row used by
 // both the entry self-disclosure and /sessions. Single source of truth

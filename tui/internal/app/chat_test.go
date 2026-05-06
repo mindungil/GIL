@@ -241,7 +241,11 @@ func TestChatUpdate_EnterSubmitsAndAppendsToTranscript(t *testing.T) {
 // or "goodbye" forward to the daemon; the LLM-driven loop there
 // resolves them. These tests pin the new contract.
 
-func TestChatUpdate_SlashSpec_AppendsArrowNote(t *testing.T) {
+func TestChatUpdate_SlashLikeInputForwards_NoArrowNote(t *testing.T) {
+	// M2: slashes don't dispatch client-side anymore. `/spec` is just
+	// text that gets forwarded to the daemon's agent loop. The chat
+	// surface emits the user echo `›  /spec` and nothing else (no
+	// arrow note that would indicate verb dispatch).
 	m := newChatModel("/tmp/test.sock")
 	m.width = 100
 	m.height = 32
@@ -251,15 +255,13 @@ func TestChatUpdate_SlashSpec_AppendsArrowNote(t *testing.T) {
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	cm := updated.(*chatModel)
 
-	var foundArrow bool
 	for _, line := range cm.transcript {
 		if strings.Contains(line, "→") {
-			foundArrow = true
-			break
+			t.Errorf("/spec should forward, got arrow note %q", line)
 		}
 	}
-	if !foundArrow {
-		t.Fatalf("expected → arrow note for /spec, got %v", cm.transcript)
+	if !transcriptContains(cm.transcript, "/spec") {
+		t.Fatalf("user echo missing in transcript, got %v", cm.transcript)
 	}
 }
 

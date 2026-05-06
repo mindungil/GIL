@@ -48,11 +48,6 @@ type GRPCClient struct {
 	providerName string
 	model        string
 
-	// inInterview tracks whether StartInterview has been called for the
-	// current session. Once true, subsequent SendPrompt calls use
-	// ReplyInterview instead of StartInterview.
-	inInterview bool
-
 	// chunkCh receives assistant text chunks for the current turn.
 	chunkCh chan string
 	// chunkDone is closed when the current interview stream ends.
@@ -108,7 +103,6 @@ func (g *GRPCClient) newSession(ctx context.Context, hint string) error {
 		return errmap.WrapRPCError(err)
 	}
 	g.activeSess = sess.ID
-	g.inInterview = false
 	return nil
 }
 
@@ -133,7 +127,6 @@ func (g *GRPCClient) SwitchSession(ctx context.Context, idOrName string) error {
 	for _, s := range list {
 		if s.ID == idOrName || strings.HasPrefix(s.ID, idOrName) {
 			g.activeSess = s.ID
-			g.inInterview = false
 			return nil
 		}
 	}
@@ -170,60 +163,48 @@ func (g *GRPCClient) ListSessions(ctx context.Context) ([]SessionSummary, error)
 // Each turn allocates fresh chunkCh/chunkDone so chunks cannot leak
 // between turns and the previous goroutine cannot close the new turn's
 // done channel.
+//
+// Per docs/design/chat-architecture.md M2 this routes through the
+// single SessionService.Prompt RPC. Verb dispatch (diff, merge,
+// freeze, run) lands as agent tool_calls inside the Part stream, not
+// as separate RPCs. session_id may be empty for the first turn — the
+// first streamed Part carries SessionAllocatedPart with the new id.
 func (g *GRPCClient) SendPrompt(ctx context.Context, prompt string) error {
-	if g.activeSess == "" {
-		if err := g.newSession(ctx, prompt); err != nil {
-			return err
-		}
-	}
 	// Allocate fresh per-turn channels and snapshot for the goroutine.
 	g.chunkCh = make(chan string, 64)
 	g.chunkDone = make(chan struct{})
 	chunkCh := g.chunkCh
 	done := g.chunkDone
-	sessID := g.activeSess
 
-	if !g.inInterview {
-		stream, err := g.sdk.StartInterview(ctx, sessID, prompt, g.providerName, g.model, sdk.InterviewModels{})
-		if err != nil {
-			return errmap.WrapRPCError(err)
-		}
-		g.inInterview = true
-		go g.drainInterviewStream(stream, chunkCh, done, sessID)
-	} else {
-		stream, err := g.sdk.ReplyInterview(ctx, sessID, prompt)
-		if err != nil {
-			return errmap.WrapRPCError(err)
-		}
-		go g.drainInterviewStream(stream, chunkCh, done, sessID)
+	stream, err := g.sdk.Prompt(ctx, sdk.PromptOptions{
+		SessionID: g.activeSess,
+		Text:      prompt,
+		Provider:  g.providerName,
+		Model:     g.model,
+	})
+	if err != nil {
+		return errmap.WrapRPCError(err)
 	}
+	go g.drainPromptStream(stream, chunkCh, done)
 	return nil
 }
 
-// drainInterviewStream consumes a server-streaming InterviewEvent stream.
-// AgentTurn payloads are forwarded as chunks; other payloads become
-// TrackerInput events. The stream always ends with a close of the
-// supplied done channel — which is the *snapshot* taken at goroutine
+// drainPromptStream consumes the SessionService.Prompt Part stream
+// for one turn. TextDelta parts feed chunkCh; ToolCallPart and
+// ToolResultPart become TrackerInput events the loop renders inline;
+// SessionAllocatedPart pins g.activeSess; PromptMetrics + DonePart
+// signal end-of-turn. Same per-turn snapshotting pattern as the old
+// drainInterviewStream — done is the snapshot taken at goroutine
 // launch, not whatever g.chunkDone happens to be later.
-//
-// Snapshotting prevents a stale goroutine from closing the new turn's
-// done channel after SendPrompt allocates fresh per-turn channels.
-func (g *GRPCClient) drainInterviewStream(
-	stream interface {
-		Recv() (*gilv1.InterviewEvent, error)
-	},
+func (g *GRPCClient) drainPromptStream(
+	stream gilv1.SessionService_PromptClient,
 	chunkCh chan<- string,
 	done chan struct{},
-	sessionID string,
 ) {
 	defer close(done)
 	for {
 		ev, err := stream.Recv()
 		if err != nil {
-			// EOF is the normal end-of-turn signal. Any other error
-			// (transport, gRPC status) is a real failure — record it so
-			// NextAssistantChunk can surface it to the chat user instead
-			// of silently looping back to idle.
 			if !errors.Is(err, io.EOF) {
 				g.streamErrMu.Lock()
 				g.streamErr = err
@@ -231,63 +212,57 @@ func (g *GRPCClient) drainInterviewStream(
 			}
 			return
 		}
-		switch v := ev.GetPayload().(type) {
-		case *gilv1.InterviewEvent_AgentTurn:
-			if v.AgentTurn != nil && v.AgentTurn.Content != "" {
-				chunkCh <- v.AgentTurn.Content
+		switch b := ev.GetBody().(type) {
+		case *gilv1.Part_Text:
+			if b.Text != nil && b.Text.GetContent() != "" {
+				chunkCh <- b.Text.GetContent()
 			}
-		case *gilv1.InterviewEvent_SaturationUpdate:
-			if v.SaturationUpdate != nil {
+		case *gilv1.Part_ToolCall:
+			if b.ToolCall != nil {
 				g.eventCh <- TrackerInput{
-					Kind:        "interview.slot_filled",
-					SessionID:   sessionID,
-					SlotsFilled: int(v.SaturationUpdate.SlotsFilled),
-					SlotsTotal:  int(v.SaturationUpdate.SlotsTotal),
-					Saturation:  v.SaturationUpdate.Saturation,
+					Kind:      "tool.call",
+					SessionID: g.activeSess,
+					ToolName:  b.ToolCall.GetName(),
+					ToolID:    b.ToolCall.GetId(),
+					ToolInput: b.ToolCall.GetInputJson(),
 				}
 			}
-		case *gilv1.InterviewEvent_AdversaryFindings:
-			if v.AdversaryFindings != nil {
+		case *gilv1.Part_ToolResult:
+			if b.ToolResult != nil {
 				g.eventCh <- TrackerInput{
-					Kind:        "interview.adversary",
-					SessionID:   sessionID,
-					AdvFindings: int(v.AdversaryFindings.Count),
+					Kind:        "tool.result",
+					SessionID:   g.activeSess,
+					ToolID:      b.ToolResult.GetCallId(),
+					ToolContent: b.ToolResult.GetContent(),
+					ToolIsError: b.ToolResult.GetIsError(),
 				}
 			}
-		case *gilv1.InterviewEvent_Stage:
-			// Earlier this branch only forwarded To=="ready_to_freeze",
-			// but nothing in the server emits that string — the actual
-			// stage names are "sensing"/"conversation"/"confirm" plus
-			// the synthetic "resume" From-marker. Net result: every
-			// stage transition was silently dropped except the dead
-			// "ready_to_freeze" path. Forward all transitions and let
-			// the tracker / loop note layer decide what's worth
-			// surfacing to the user.
-			if v.Stage != nil {
-				kind := ""
-				switch {
-				case v.Stage.From == "resume":
-					kind = "interview.resumed"
-				case v.Stage.To == "conversation":
-					kind = "interview.started"
-				case v.Stage.To == "confirm":
-					// Keep the internal Kind that state.go and loop.go
-					// already taxonomy-bind to (PhaseAwaitingConfirm
-					// + the "ready to freeze — /run to start" note).
-					kind = "interview.ready_to_freeze"
-				}
-				if kind != "" {
-					g.eventCh <- TrackerInput{
-						Kind:      kind,
-						SessionID: sessionID,
-						Reason:    v.Stage.Reason,
-					}
+		case *gilv1.Part_SessionAllocated:
+			if b.SessionAllocated != nil {
+				g.activeSess = b.SessionAllocated.GetSessionId()
+				g.eventCh <- TrackerInput{
+					Kind:      "session.allocated",
+					SessionID: g.activeSess,
 				}
 			}
-		case *gilv1.InterviewEvent_SpecUpdate:
-			// SpecUpdate events are informational; no TrackerInput mapping.
-		case *gilv1.InterviewEvent_Error:
-			// Error events surface at stream close via deferred done.
+		case *gilv1.Part_Metrics:
+			if b.Metrics != nil {
+				g.eventCh <- TrackerInput{
+					Kind:      "prompt.metrics",
+					SessionID: g.activeSess,
+					Tokens:    b.Metrics.GetTokensIn() + b.Metrics.GetTokensOut(),
+					LatencyMs: b.Metrics.GetLatencyMs(),
+				}
+			}
+		case *gilv1.Part_Done:
+			if b.Done != nil && b.Done.GetStopReason() == "error" {
+				// Stream-level error signal; surface via streamErr so
+				// the chat surface renders rather than silently EOFing.
+				g.streamErrMu.Lock()
+				g.streamErr = errors.New(b.Done.GetErrorMessage())
+				g.streamErrMu.Unlock()
+			}
+			return
 		}
 	}
 }
@@ -344,15 +319,10 @@ func (g *GRPCClient) NextAssistantChunk(ctx context.Context) (string, bool, erro
 			return chunk, true, nil
 		default:
 		}
-		// Reset the in-interview flag on transport-level failure so the
-		// next prompt can rebuild a fresh stream.
 		g.streamErrMu.Lock()
 		serr := g.streamErr
 		g.streamErr = nil
 		g.streamErrMu.Unlock()
-		if serr != nil {
-			g.inInterview = false
-		}
 		return "", false, serr
 	}
 }

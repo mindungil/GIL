@@ -13,7 +13,6 @@ import (
 	"github.com/mindungil/gil/cli/internal/chat/render"
 	"github.com/mindungil/gil/cli/internal/chat/repl"
 	"github.com/mindungil/gil/cli/internal/cmd/uistyle"
-	intentpkg "github.com/mindungil/gil/core/intent"
 	"github.com/mindungil/gil/sdk"
 )
 
@@ -120,15 +119,15 @@ func runChat(cmd *cobra.Command, socket, providerName, model string) error {
 	renderer := render.NewStdoutChatRenderer(out, in, asciiMode, noColor)
 	defer renderer.Close()
 
-	var router *intentpkg.Router
-	if !noIntentRouter {
-		router = intentpkg.NewRouter()
-	}
+	// The intent router is gone (see core/intent/router.go header).
+	// noIntentRouter flag is still parsed for backwards-compatibility
+	// with shell history but has no effect now — every prompt forwards
+	// to the daemon's agent loop.
+	_ = noIntentRouter
 	return repl.Run(ctx, repl.Config{
 		In:       in,
 		Renderer: renderer,
 		Client:   grpcClient,
-		Router:   router,
 	})
 }
 

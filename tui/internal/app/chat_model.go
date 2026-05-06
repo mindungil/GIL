@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"github.com/mindungil/gil/core/intent"
 	"github.com/mindungil/gil/core/paths"
 	"github.com/mindungil/gil/core/workspace"
+	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
 	"github.com/mindungil/gil/sdk"
 )
 
@@ -48,8 +50,16 @@ type chatModel struct {
 	// Input state owned by chat_input.go (textinput model + history).
 	input chatInputState
 
-	// Streaming state owned by chat_stream.go.
+	// Streaming state owned by chat_stream.go. Legacy interview pump.
+	// M3 will delete this once InterviewService is gone.
 	stream chatStreamState
+
+	// promptStream is the M2 SessionService.Prompt stream cursor.
+	// Distinct from stream because the proto types differ (Part vs
+	// InterviewEvent). Active while the chat agent is mid-turn; nil
+	// otherwise.
+	promptStream gilv1.SessionService_PromptClient
+	promptCancel context.CancelFunc
 
 	// Run-tail state owned by chat_run.go. Non-nil while a
 	// RunService.Tail subscription is active; lets /quit cancel the
@@ -134,52 +144,20 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if text == "" {
 				return m, nil
 			}
-			if text == "/quit" || text == "/exit" {
+			if isTerminalExit(text) {
 				m.cancelAllStreams()
 				return m, tea.Quit
 			}
 			m.transcript = append(m.transcript, "›  "+text)
 			m.firstTurnDone = true
 
-			// §2.6: natural-language single surface. The intent
-			// router is a stub now (see core/intent/router.go header
-			// for why). All non-slash input forwards to the daemon
-			// where the LLM-driven loop decides what it means —
-			// greeting, meta-question, task description, or verb
-			// invocation phrased naturally.
-			//
-			// Slash-prefixed input is the explicit escape hatch.
-			// Strip the slash, treat the head token as the verb name,
-			// and dispatch through the same dispatchVerb pipeline as
-			// before.
-			if strings.HasPrefix(text, "/") {
-				rest := strings.TrimPrefix(text, "/")
-				parts := strings.SplitN(rest, " ", 2)
-				slashCmd := parts[0]
-				slashArgs := ""
-				if len(parts) == 2 {
-					slashArgs = strings.TrimSpace(parts[1])
-				}
-				return m, m.dispatchVerb(intent.Classification{
-					Kind: intent.KindVerb,
-					Verb: intent.Verb(slashCmd),
-					Args: map[string]string{"target": slashArgs, "raw": slashArgs},
-				})
-			}
-
+			// §2.6 + chat-architecture.md M2: 100% natural-language
+			// surface. No slash dispatch, no client-side classification.
+			// The daemon's agent loop receives every prompt and decides
+			// what to do — including verb-style requests like "show me
+			// the diff" or "merge it" via tool calls.
 			if m.client == nil {
 				return m, nil // test mode — no stream dispatch
-			}
-			// First-turn auto-create. Stash the prompt and ask the
-			// daemon for a session; chatNewSessionMsg will pick it up
-			// and start the interview with the original text. This
-			// mirrors the cli REPL's SendPrompt flow which auto-creates
-			// when activeSess is empty — the previous TUI behaviour
-			// errored out with "no active session" and required the
-			// user to manually `/new` first, which §2.6 forbids.
-			if m.activeID == "" {
-				m.pendingPrompt = text
-				return m, newSessionCmd(m.client)
 			}
 			// Cancel any in-flight stream from a previous turn so the
 			// new submit takes priority.
@@ -187,16 +165,7 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.stream.cancel()
 				m.stream = chatStreamState{}
 			}
-			// First call to this session uses StartInterview; every
-			// subsequent reply uses ReplyInterview (mirrors the cli
-			// REPL's inInterview flag). Without this branch the daemon
-			// re-ran sensing on every prompt and never delivered the
-			// agent's actual reply.
-			if !m.inInterview {
-				m.inInterview = true
-				return m, startInterviewCmd(m.client, m.activeID, text)
-			}
-			return m, replyInterviewCmd(m.client, m.activeID, text)
+			return m, startChatPromptCmd(m.client, m.activeID, text)
 		default:
 			// Forward to the textinput so typing works.
 			var cmd tea.Cmd
@@ -213,6 +182,62 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.stream.cancel = msg.cancel
 		return m, nextChatEventCmd(msg.stream)
 
+	case chatPromptStreamStartedMsg:
+		// M2: post-Prompt-RPC stream handle. Same pump pattern as the
+		// interview stream but a different Recv() shape.
+		m.promptStream = msg.stream
+		m.promptCancel = msg.cancel
+		return m, nextChatPromptEventCmd(msg.stream)
+
+	case chatPromptToolCallMsg:
+		// Render the tool call inline so the user sees what the agent
+		// is doing. Chat surface convention: ⚒ glyph + tool name +
+		// brief input. Don't coalesce — each tool call is its own line.
+		input := msg.inputJSON
+		if len(input) > 80 {
+			input = input[:80] + "…"
+		}
+		line := "   ⚒ " + msg.name
+		if input != "" && input != "{}" {
+			line += "  " + input
+		}
+		m.transcript = append(m.transcript, line)
+		if m.promptStream != nil {
+			return m, nextChatPromptEventCmd(m.promptStream)
+		}
+		return m, nil
+
+	case chatPromptToolResultMsg:
+		glyph := "   ⚒ ✓ "
+		body := msg.content
+		if msg.isError {
+			glyph = "   ⚒ ✗ "
+		}
+		if len(body) > 200 {
+			body = body[:200] + "…"
+		}
+		body = strings.ReplaceAll(body, "\n", " · ")
+		m.transcript = append(m.transcript, glyph+body)
+		if m.promptStream != nil {
+			return m, nextChatPromptEventCmd(m.promptStream)
+		}
+		return m, nil
+
+	case chatPromptSessionAllocatedMsg:
+		m.activeID = msg.sessionID
+		if m.promptStream != nil {
+			return m, nextChatPromptEventCmd(m.promptStream)
+		}
+		return m, nil
+
+	case chatPromptMetricsMsg:
+		m.runTokens = msg.tokensIn + msg.tokensOut
+		m.runLatencyMs = msg.latencyMs
+		if m.promptStream != nil {
+			return m, nextChatPromptEventCmd(m.promptStream)
+		}
+		return m, nil
+
 	case chatAssistantChunkMsg:
 		// Coalesce consecutive assistant chunks onto the same line so
 		// the user sees a flowing reply rather than one `‹` header
@@ -222,7 +247,12 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.transcript = append(m.transcript, "‹  "+msg.text)
 		}
-		// Keep draining.
+		// Keep draining whichever pump is active. Prompt stream wins
+		// when both are set (M2 path); falls back to interview pump
+		// for legacy code paths still alive until M3.
+		if m.promptStream != nil {
+			return m, nextChatPromptEventCmd(m.promptStream)
+		}
 		if m.stream.stream != nil {
 			return m, nextChatEventCmd(m.stream.stream)
 		}
@@ -285,14 +315,16 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case chatStreamDoneMsg:
-		// Turn complete. Reset stream cursor; keep cancel so quit
-		// path can call it harmlessly.
+		// Turn complete. Reset both stream cursors; keep cancel funcs
+		// so quit path can call them harmlessly.
 		m.stream.stream = nil
+		m.promptStream = nil
 		return m, nil
 
 	case chatStreamErrMsg:
 		m.err = msg.err
 		m.stream.stream = nil
+		m.promptStream = nil
 		return m, nil
 
 	case chatVerbResultMsg:
@@ -400,6 +432,9 @@ func (m *chatModel) cancelAllStreams() {
 	if m.stream.cancel != nil {
 		m.stream.cancel()
 	}
+	if m.promptCancel != nil {
+		m.promptCancel()
+	}
 	if m.runTail.handle != nil {
 		m.runTail.handle.cancel()
 	}
@@ -422,6 +457,17 @@ func toIntentRefs(in []*sdk.Session) []intent.SessionRef {
 
 // newChatModel constructs a chatModel ready for tea.NewProgram.
 // socket is dialed lazily by the stream layer (Task 8).
+// isTerminalExit reports whether a bare line should exit the TUI.
+// Per docs/design/chat-architecture.md §3.1 this is the ONE non-agent
+// client-side recognition that survives the slash-removal pass.
+func isTerminalExit(line string) bool {
+	switch strings.ToLower(strings.TrimSpace(line)) {
+	case "quit", "exit", "bye", "/quit", "/exit":
+		return true
+	}
+	return false
+}
+
 func newChatModel(socket string) *chatModel {
 	prov, model := resolveDisplayLabels()
 	return &chatModel{
