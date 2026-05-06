@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/mindungil/gil/cli/internal/chat/render"
+	"github.com/mindungil/gil/cli/internal/errmap"
 	"github.com/mindungil/gil/core/intent"
 )
 
@@ -113,7 +114,7 @@ func Run(ctx context.Context, cfg Config) error {
 			}
 			if err := dispatchSlash(ctx, cfg, tr, cmd, args); err != nil {
 				cfg.Renderer.SystemNote(render.NoteSystem,
-					fmt.Sprintf("/%s failed: %v", cmd, err))
+					fmt.Sprintf("/%s failed: %s", cmd, errmap.FormatForChat(err)))
 			}
 
 		case InputPrompt:
@@ -142,7 +143,7 @@ func Run(ctx context.Context, cfg Config) error {
 					}
 					if err := dispatchSlash(ctx, cfg, tr, verbCmd, verbArgs); err != nil {
 						cfg.Renderer.SystemNote(render.NoteSystem,
-							fmt.Sprintf("%s failed: %v", verbCmd, err))
+							fmt.Sprintf("%s failed: %s", verbCmd, errmap.FormatForChat(err)))
 					}
 					continue
 				case intent.KindAmbiguous:
@@ -157,7 +158,7 @@ func Run(ctx context.Context, cfg Config) error {
 			}
 			if err := cfg.Client.SendPrompt(ctx, args); err != nil {
 				cfg.Renderer.SystemNote(render.NoteSystem,
-					fmt.Sprintf("send failed: %v", err))
+					"send failed: "+errmap.FormatForChat(err))
 				continue
 			}
 			// Stream assistant chunks until the client signals done.
@@ -174,6 +175,9 @@ func Run(ctx context.Context, cfg Config) error {
 					cfg.Renderer.SystemNote(render.NoteSystem,
 						"stream error: "+humanizeStreamErr(err))
 					streamErrored = true
+					// #30: drainInterviewStream captures the error into
+					// streamErr; surface the wrapped form (with Hint when
+					// available) instead of dropping it on the floor.
 					break
 				}
 				if chunk != "" {
@@ -206,7 +210,7 @@ func drainEvents(ctx context.Context, cfg Config, tr *Tracker) {
 		in, ok, err := cfg.Client.NextEvent(ctx)
 		if err != nil {
 			cfg.Renderer.SystemNote(render.NoteSystem,
-				fmt.Sprintf("event stream error: %v", err))
+				"event stream error: "+errmap.FormatForChat(err))
 			return
 		}
 		if !ok {
@@ -475,6 +479,13 @@ func humanStuckPattern(p string) string {
 func humanizeStreamErr(err error) string {
 	if err == nil {
 		return ""
+	}
+	// First try the shared dispatch table so a known server message
+	// (credentials missing, no active run, etc.) surfaces with the
+	// same Hint cobra commands give. Falls through to the raw-strip
+	// path for unrecognised errors so we never lose information.
+	if wrapped := errmap.WrapRPCError(err); wrapped != err {
+		return errmap.FormatForChat(wrapped)
 	}
 	s := err.Error()
 	if i := strings.Index(s, "desc = "); i >= 0 {

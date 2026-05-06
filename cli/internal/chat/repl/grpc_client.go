@@ -15,6 +15,7 @@ import (
 	"github.com/mindungil/gil/sdk"
 
 	"github.com/mindungil/gil/cli/internal/chat/render"
+	"github.com/mindungil/gil/cli/internal/errmap"
 )
 
 // GRPCClient adapts sdk.Client to the SessionClient interface.
@@ -104,7 +105,7 @@ func (g *GRPCClient) newSession(ctx context.Context, hint string) error {
 		GoalHint:   truncateHint(hint, 80),
 	})
 	if err != nil {
-		return err
+		return errmap.WrapRPCError(err)
 	}
 	g.activeSess = sess.ID
 	g.inInterview = false
@@ -127,7 +128,7 @@ func truncateHint(s string, max int) string {
 func (g *GRPCClient) SwitchSession(ctx context.Context, idOrName string) error {
 	list, err := g.sdk.ListSessions(ctx, 100)
 	if err != nil {
-		return err
+		return errmap.WrapRPCError(err)
 	}
 	for _, s := range list {
 		if s.ID == idOrName || strings.HasPrefix(s.ID, idOrName) {
@@ -143,7 +144,7 @@ func (g *GRPCClient) SwitchSession(ctx context.Context, idOrName string) error {
 func (g *GRPCClient) ListSessions(ctx context.Context) ([]SessionSummary, error) {
 	list, err := g.sdk.ListSessions(ctx, 100)
 	if err != nil {
-		return nil, err
+		return nil, errmap.WrapRPCError(err)
 	}
 	out := make([]SessionSummary, 0, len(list))
 	for _, s := range list {
@@ -185,14 +186,14 @@ func (g *GRPCClient) SendPrompt(ctx context.Context, prompt string) error {
 	if !g.inInterview {
 		stream, err := g.sdk.StartInterview(ctx, sessID, prompt, g.providerName, g.model, sdk.InterviewModels{})
 		if err != nil {
-			return err
+			return errmap.WrapRPCError(err)
 		}
 		g.inInterview = true
 		go g.drainInterviewStream(stream, chunkCh, done, sessID)
 	} else {
 		stream, err := g.sdk.ReplyInterview(ctx, sessID, prompt)
 		if err != nil {
-			return err
+			return errmap.WrapRPCError(err)
 		}
 		go g.drainInterviewStream(stream, chunkCh, done, sessID)
 	}
@@ -376,7 +377,7 @@ func (g *GRPCClient) NextEvent(ctx context.Context) (TrackerInput, bool, error) 
 func (g *GRPCClient) Spec(ctx context.Context) (*render.SpecView, error) {
 	fs, err := g.sdk.GetSpec(ctx, g.activeSess)
 	if err != nil {
-		return nil, err
+		return nil, errmap.WrapRPCError(err)
 	}
 	m := protojson.MarshalOptions{
 		Multiline:       true,
@@ -394,7 +395,7 @@ func (g *GRPCClient) Spec(ctx context.Context) (*render.SpecView, error) {
 func (g *GRPCClient) Status(ctx context.Context) (string, error) {
 	s, err := g.sdk.GetSession(ctx, g.activeSess)
 	if err != nil {
-		return "", err
+		return "", errmap.WrapRPCError(err)
 	}
 	return fmt.Sprintf("%s · %s · iter %d · $%.4f",
 		shortID(s.ID), s.Status, s.CurrentIteration, s.TotalCostUSD), nil
@@ -406,7 +407,7 @@ func (g *GRPCClient) Status(ctx context.Context) (string, error) {
 func (g *GRPCClient) Diff(ctx context.Context) ([]render.DiffHunk, error) {
 	result, err := g.sdk.Diff(ctx, g.activeSess)
 	if err != nil {
-		return nil, err
+		return nil, errmap.WrapRPCError(err)
 	}
 	if result.UnifiedDiff == "" {
 		return nil, nil
@@ -432,7 +433,7 @@ func (g *GRPCClient) Merge(_ context.Context) error {
 func (g *GRPCClient) StartRun(ctx context.Context) error {
 	_, err := g.sdk.StartRun(ctx, g.activeSess, "", "", true /* detach */)
 	if err != nil {
-		return err
+		return errmap.WrapRPCError(err)
 	}
 	g.startTailLoop(ctx)
 	return nil
