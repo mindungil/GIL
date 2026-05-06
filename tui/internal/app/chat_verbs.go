@@ -64,6 +64,12 @@ func (m *chatModel) dispatchVerb(cl intent.Classification) tea.Cmd {
 			return nil
 		}
 		m.activeID = target
+		// New session ID → reset the inInterview flag so the next
+		// prompt opens with StartInterview (daemon will resume if
+		// the target already has interview state) instead of
+		// jumping straight to ReplyInterview against a possibly-
+		// fresh session.
+		m.inInterview = false
 		// Cancel any in-flight stream so it doesn't bleed into the
 		// next session's transcript.
 		if m.stream.cancel != nil {

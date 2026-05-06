@@ -82,6 +82,14 @@ type chatModel struct {
 	// preallocated session it never asked for.
 	pendingPrompt string
 
+	// inInterview tracks whether StartInterview has been called for
+	// the current session. Once true, subsequent prompts use
+	// ReplyInterview — calling Start again would re-run the sensing
+	// engine and emit a fresh "interview started" stage event each
+	// time, which is what the TUI was doing pre-fix (every keystroke
+	// re-classified the domain and produced no agent reply).
+	inInterview bool
+
 	// providerLabel / modelLabel describe the LLM that backs this chat.
 	// Resolved from the layered workspace config at construction time
 	// so the header doesn't lie ("claude-opus-4-7" was hardcoded
@@ -179,7 +187,16 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.stream.cancel()
 				m.stream = chatStreamState{}
 			}
-			return m, startInterviewCmd(m.client, m.activeID, text)
+			// First call to this session uses StartInterview; every
+			// subsequent reply uses ReplyInterview (mirrors the cli
+			// REPL's inInterview flag). Without this branch the daemon
+			// re-ran sensing on every prompt and never delivered the
+			// agent's actual reply.
+			if !m.inInterview {
+				m.inInterview = true
+				return m, startInterviewCmd(m.client, m.activeID, text)
+			}
+			return m, replyInterviewCmd(m.client, m.activeID, text)
 		default:
 			// Forward to the textinput so typing works.
 			var cmd tea.Cmd
@@ -300,9 +317,11 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.sessions = append([]*sdk.Session{msg.session}, m.sessions...)
 		// If the user submitted a prompt that triggered this auto-
 		// create, dispatch it now without forcing a second keystroke.
+		// Mark inInterview so subsequent replies use ReplyInterview.
 		if m.pendingPrompt != "" {
 			prompt := m.pendingPrompt
 			m.pendingPrompt = ""
+			m.inInterview = true
 			return m, startInterviewCmd(m.client, m.activeID, prompt)
 		}
 		m.transcript = append(m.transcript,

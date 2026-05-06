@@ -93,6 +93,30 @@ func startInterviewCmd(client *sdk.Client, sessionID, firstInput string) tea.Cmd
 	}
 }
 
+// replyInterviewCmd is the post-first-turn analogue of
+// startInterviewCmd. After the daemon has begun an interview for a
+// session, subsequent user replies must use ReplyInterview so the
+// engine continues the conversation instead of restarting sensing
+// (which it does on every Start call). Without this distinction the
+// TUI was driving sensing on every keystroke — domain classification
+// re-ran for "예 ?" / "응 ?" and produced new "interview started" notes
+// instead of forwarding the reply to the open conversation.
+//
+// Returns the same chatStreamStartedMsg shape because the Reply
+// stream type is identical to Start (both are aliased to
+// grpc.ServerStreamingClient[InterviewEvent]).
+func replyInterviewCmd(client *sdk.Client, sessionID, content string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithCancel(context.Background())
+		stream, err := client.ReplyInterview(ctx, sessionID, content)
+		if err != nil {
+			cancel()
+			return chatStreamErrMsg{err: err.Error()}
+		}
+		return chatStreamStartedMsg{stream: stream, cancel: cancel}
+	}
+}
+
 // nextChatEventCmd reads one event from the active stream and
 // converts it to the appropriate Msg. Re-issued by Update after
 // each event so the stream drains continuously.
