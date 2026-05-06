@@ -428,6 +428,17 @@ func (g *GRPCClient) Merge(_ context.Context) error {
 	return fmt.Errorf("merge is not yet supported by the server; apply the diff manually or use `git apply`")
 }
 
+// Compact asks the server to queue a compaction at the next turn
+// boundary. Returns (queued, reason). When queued=false the reason
+// is server-supplied (e.g. "no run in flight") and safe to display.
+func (g *GRPCClient) Compact(ctx context.Context) (bool, string, error) {
+	queued, reason, err := g.sdk.RequestCompact(ctx, g.activeSess)
+	if err != nil {
+		return false, "", errmap.WrapRPCError(err)
+	}
+	return queued, reason, nil
+}
+
 // StartRun starts the agent run for the active session in detached mode.
 // A background tail loop is launched to forward run events to the eventCh.
 func (g *GRPCClient) StartRun(ctx context.Context) error {
@@ -511,6 +522,42 @@ func mapRunEventToTracker(sessionID string, ev *gilv1.Event) TrackerInput {
 		in.Kind = "run.done"
 		if ev.GetMetrics() != nil {
 			in.CostUSD = ev.GetMetrics().CostUsd
+		}
+	case "compact_start":
+		// Runner crossed the threshold (or /compact forced one) and
+		// is about to compress the conversation history. Surfacing
+		// gives the user a heads-up before the next iteration's
+		// provider request looks suspiciously fast.
+		in.Kind = "compact_start"
+		var d map[string]any
+		if jerr := json.Unmarshal(ev.GetDataJson(), &d); jerr == nil {
+			if forced, _ := d["forced"].(bool); forced {
+				in.Reason = "forced via /compact"
+			} else if v, ok := d["estimated_tokens"].(float64); ok {
+				in.Tokens = int64(v) // reuse Tokens to carry the estimate
+			}
+		}
+	case "compact_done":
+		in.Kind = "compact_done"
+		var d map[string]any
+		if jerr := json.Unmarshal(ev.GetDataJson(), &d); jerr == nil {
+			if v, ok := d["saved_tokens"].(float64); ok {
+				in.Tokens = int64(v) // reuse Tokens to carry savings
+			}
+			if v, ok := d["original"].(float64); ok {
+				in.RetryAttempt = int(v) // reuse counter for original count
+			}
+			if v, ok := d["compacted"].(float64); ok {
+				in.RetryMax = int(v) // reuse for compacted count
+			}
+		}
+	case "compact_error":
+		in.Kind = "compact_error"
+		var d map[string]any
+		if jerr := json.Unmarshal(ev.GetDataJson(), &d); jerr == nil {
+			if e, ok := d["err"].(string); ok {
+				in.Reason = e
+			}
 		}
 	case "subagent_started":
 		// Parent agent kicked off a sub-loop investigation (the

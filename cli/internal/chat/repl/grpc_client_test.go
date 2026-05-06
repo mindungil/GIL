@@ -43,6 +43,43 @@ func TestMapRunEvent_LegacyRunStuckNameNoLongerFires(t *testing.T) {
 	require.Equal(t, "", in.Kind, "legacy event name must NOT be matched")
 }
 
+func TestMapRunEvent_CompactionLifecycle(t *testing.T) {
+	// Compaction events were dropped on the chat floor — users
+	// would see suspicious gaps when the runner crossed the threshold
+	// or `/compact` was forced. Adapter now extracts forced/estimate/
+	// before-after counts/saved tokens so emitDeltaNotes can render
+	// the lifecycle visibly.
+	start := mapRunEventToTracker("01HQ", &gilv1.Event{
+		Type:     "compact_start",
+		DataJson: []byte(`{"estimated_tokens":12500,"threshold":10000,"forced":false}`),
+	})
+	require.Equal(t, "compact_start", start.Kind)
+	require.EqualValues(t, 12500, start.Tokens)
+
+	forced := mapRunEventToTracker("01HQ", &gilv1.Event{
+		Type:     "compact_start",
+		DataJson: []byte(`{"estimated_tokens":1000,"threshold":10000,"forced":true}`),
+	})
+	require.Equal(t, "compact_start", forced.Kind)
+	require.Contains(t, forced.Reason, "forced")
+
+	done := mapRunEventToTracker("01HQ", &gilv1.Event{
+		Type:     "compact_done",
+		DataJson: []byte(`{"original":24,"compacted":6,"saved_tokens":4321,"skipped":false}`),
+	})
+	require.Equal(t, "compact_done", done.Kind)
+	require.Equal(t, 24, done.RetryAttempt)
+	require.Equal(t, 6, done.RetryMax)
+	require.EqualValues(t, 4321, done.Tokens)
+
+	cerr := mapRunEventToTracker("01HQ", &gilv1.Event{
+		Type:     "compact_error",
+		DataJson: []byte(`{"err":"compactor: provider returned empty response"}`),
+	})
+	require.Equal(t, "compact_error", cerr.Kind)
+	require.Contains(t, cerr.Reason, "empty response")
+}
+
 func TestMapRunEvent_SubagentLifecycle(t *testing.T) {
 	// Subagent events were dropped on the floor — long sub-loops
 	// looked like the parent stopped working. Adapter forwards the

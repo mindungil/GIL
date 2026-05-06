@@ -28,6 +28,9 @@ type fakeClient struct {
 	merged          bool
 	runStarted      bool
 	sessionList     []SessionSummary
+	compactCalled   bool
+	compactQueued   bool
+	compactReason   string
 }
 
 func (f *fakeClient) SendPrompt(_ context.Context, prompt string) error {
@@ -62,6 +65,10 @@ func (f *fakeClient) Status(_ context.Context) (string, error)                  
 func (f *fakeClient) Diff(_ context.Context) ([]render.DiffHunk, error)           { return f.diffHunks, nil }
 func (f *fakeClient) Merge(_ context.Context) error                               { f.merged = true; return nil }
 func (f *fakeClient) StartRun(_ context.Context) error                            { f.runStarted = true; return nil }
+func (f *fakeClient) Compact(_ context.Context) (bool, string, error) {
+	f.compactCalled = true
+	return f.compactQueued, f.compactReason, nil
+}
 func (f *fakeClient) ListSessions(_ context.Context) ([]SessionSummary, error)    { return f.sessionList, nil }
 func (f *fakeClient) SwitchSession(_ context.Context, _ string) error             { f.sessionID = "switched"; return nil }
 func (f *fakeClient) NewSession(_ context.Context) error                          { f.sessionID = "new"; return nil }

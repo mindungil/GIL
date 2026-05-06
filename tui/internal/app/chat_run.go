@@ -145,6 +145,41 @@ func formatChatRunEvent(ev *gilv1.Event) (phase ChatPhase, lines []string, keepD
 			errMsg = string(ev.GetDataJson())
 		}
 		return "", []string{"   !  run error: " + errMsg}, true
+	case "compact_start":
+		var d map[string]any
+		_ = json.Unmarshal(ev.GetDataJson(), &d)
+		forced, _ := d["forced"].(bool)
+		est, _ := d["estimated_tokens"].(float64)
+		line := "   ‹  compacting conversation history"
+		if forced {
+			line += " — forced via /compact"
+		} else if est > 0 {
+			line += fmt.Sprintf(" — ~%s estimated tokens", formatChatTokens(int64(est)))
+		}
+		return "", []string{line}, true
+	case "compact_done":
+		var d map[string]any
+		_ = json.Unmarshal(ev.GetDataJson(), &d)
+		original, _ := d["original"].(float64)
+		compacted, _ := d["compacted"].(float64)
+		saved, _ := d["saved_tokens"].(float64)
+		line := "   ‹  compaction done"
+		if original > 0 && compacted > 0 {
+			line = fmt.Sprintf("   ‹  compaction done — %d → %d msgs", int(original), int(compacted))
+		}
+		if saved > 0 {
+			line += fmt.Sprintf(" (saved ~%s tokens)", formatChatTokens(int64(saved)))
+		}
+		return "", []string{line}, true
+	case "compact_error":
+		var d map[string]any
+		_ = json.Unmarshal(ev.GetDataJson(), &d)
+		errMsg, _ := d["err"].(string)
+		line := "   !  compaction failed — continuing with current history"
+		if errMsg != "" {
+			line = "   !  compaction failed — " + truncateChat(errMsg, 80)
+		}
+		return "", []string{line}, true
 	case "subagent_started":
 		// Parent agent dispatched a sub-loop. Without this surfacing
 		// the user sees a long quiet gap until subagent_done fires.
@@ -324,6 +359,16 @@ func humanChatStuckPattern(p string) string {
 		return "no file progress"
 	}
 	return p
+}
+
+// formatChatTokens compacts a token count for the transcript.
+// Mirrors formatTokens in cli/internal/chat/render/stdout.go so the
+// cli REPL and the TUI describe token counts with the same units.
+func formatChatTokens(n int64) string {
+	if n < 1000 {
+		return fmt.Sprintf("%d", n)
+	}
+	return fmt.Sprintf("%.1fk", float64(n)/1000)
 }
 
 // formatChatRetryWait turns wait-ms into a compact label for the

@@ -37,6 +37,7 @@ type SessionClient interface {
 	Diff(ctx context.Context) ([]render.DiffHunk, error)
 	Merge(ctx context.Context) error
 	StartRun(ctx context.Context) error
+	Compact(ctx context.Context) (queued bool, reason string, err error)
 	ListSessions(ctx context.Context) ([]SessionSummary, error)
 	SwitchSession(ctx context.Context, idOrName string) error
 	NewSession(ctx context.Context) error
@@ -273,6 +274,33 @@ func emitDeltaNotes(r render.Renderer, prev, cur render.SessionState, ev Tracker
 		r.SystemNote(render.NoteSystem, msg)
 	case "run.done":
 		r.SystemNote(render.NoteSystem, "done — /diff to review, /merge to apply")
+	case "compact_start":
+		// Tokens carries the estimated-token count when not forced.
+		msg := "compacting conversation history"
+		if ev.Reason != "" {
+			msg = "compacting — " + ev.Reason
+		} else if ev.Tokens > 0 {
+			msg = fmt.Sprintf("compacting — ~%s estimated tokens", formatTokensCompact(ev.Tokens))
+		}
+		r.SystemNote(render.NoteSystem, msg)
+	case "compact_done":
+		// RetryAttempt = original message count, RetryMax = compacted
+		// message count, Tokens = saved-tokens delta. Original 24 → 6
+		// reads better than "saved 1.2k tokens" alone.
+		msg := "compaction done"
+		if ev.RetryAttempt > 0 && ev.RetryMax > 0 {
+			msg = fmt.Sprintf("compaction done — %d → %d msgs", ev.RetryAttempt, ev.RetryMax)
+		}
+		if ev.Tokens > 0 {
+			msg += fmt.Sprintf(" (saved ~%s tokens)", formatTokensCompact(ev.Tokens))
+		}
+		r.SystemNote(render.NoteSystem, msg)
+	case "compact_error":
+		msg := "compaction failed — continuing with current history"
+		if ev.Reason != "" {
+			msg = "compaction failed — " + ev.Reason
+		}
+		r.SystemNote(render.NoteSystem, msg)
 	case "subagent_started":
 		// Show the goal so a long sub-loop doesn't look like a hang.
 		// The subagent tool clamps goal length at the server side; we
@@ -329,6 +357,15 @@ func emitDeltaNotes(r render.Renderer, prev, cur render.SessionState, ev Tracker
 		}
 		r.SystemNote(render.NoteSystem, msg)
 	}
+}
+
+// formatTokensCompact returns "1.2k" for ≥1000, the bare integer
+// otherwise. Used by emitDeltaNotes to keep compaction notes short.
+func formatTokensCompact(n int64) string {
+	if n < 1000 {
+		return fmt.Sprintf("%d", n)
+	}
+	return fmt.Sprintf("%.1fk", float64(n)/1000)
 }
 
 // formatRetryWait turns a wait duration in ms into a compact label
@@ -402,7 +439,7 @@ func dispatchSlash(ctx context.Context, cfg Config, tr *Tracker, cmd, args strin
 	switch cmd {
 	case "help":
 		r.SystemNote(render.NoteSystem,
-			"talk in plain language — gil routes it. slash escape-hatch: /sessions /switch /new /spec /status /diff /merge /run /quit /help")
+			"talk in plain language — gil routes it. slash escape-hatch: /sessions /switch /new /spec /status /diff /merge /run /compact /quit /help")
 	case "sessions":
 		list, err := c.ListSessions(ctx)
 		if err != nil {
@@ -454,6 +491,26 @@ func dispatchSlash(ctx context.Context, cfg Config, tr *Tracker, cmd, args strin
 			return nil
 		}
 		return c.StartRun(ctx)
+	case "compact":
+		// Queue a compaction at the next turn boundary. Server returns
+		// queued=false when no run is in flight; the reason is safe to
+		// surface to the user verbatim. compact_start/compact_done
+		// events flow back through the run stream and emit SystemNotes
+		// from emitDeltaNotes — no need to block here.
+		queued, reason, err := c.Compact(ctx)
+		if err != nil {
+			return err
+		}
+		if !queued {
+			msg := "compaction not queued"
+			if reason != "" {
+				msg += " — " + reason
+			}
+			r.SystemNote(render.NoteSystem, msg)
+			return nil
+		}
+		r.SystemNote(render.NoteSystem,
+			"compaction queued — will run at the next turn boundary")
 	}
 	return nil
 }

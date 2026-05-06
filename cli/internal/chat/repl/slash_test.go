@@ -38,7 +38,7 @@ func TestKnownSlash_HasV1Set(t *testing.T) {
 	for _, name := range []string{
 		"sessions", "switch", "new", "quit",
 		"spec", "status", "diff", "merge",
-		"run", "help",
+		"run", "help", "compact",
 	} {
 		require.True(t, IsKnownSlash(name), "missing slash: /%s", name)
 	}

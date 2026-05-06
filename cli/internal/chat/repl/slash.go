@@ -38,7 +38,7 @@ func ParseInput(line string) (kind InputKind, cmd string, args string) {
 var v1Slash = map[string]bool{
 	"sessions": true, "switch": true, "new": true, "quit": true,
 	"spec": true, "status": true, "diff": true, "merge": true,
-	"run": true, "help": true,
+	"run": true, "help": true, "compact": true,
 }
 
 func IsKnownSlash(name string) bool { return v1Slash[name] }
@@ -47,7 +47,7 @@ func IsKnownSlash(name string) bool { return v1Slash[name] }
 // active session in client state.
 func SlashRequiresSession(name string) bool {
 	switch name {
-	case "spec", "status", "diff", "merge", "run":
+	case "spec", "status", "diff", "merge", "run", "compact":
 		return true
 	}
 	return false
