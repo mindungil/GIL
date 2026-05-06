@@ -127,11 +127,16 @@ var asciiMode = detectAscii()
 // Unicode glyphs. Heuristics, in order:
 //
 //  1. GIL_ASCII=1 (explicit override)
-//  2. LANG/LC_ALL/LC_CTYPE in {"C", "POSIX"}
+//  2. LANG/LC_ALL/LC_CTYPE has a UTF-8 codeset (`.UTF-8` / `.utf8`) → Unicode
+//  3. Bare "C" or "POSIX" (no codeset) → ASCII
+//  4. Anything else (a real locale name like "en_US.UTF-8") → Unicode
 //
-// Empty locale → assume Unicode (most modern terminals work; falsely
-// degrading to ASCII looks worse than risking a glyph fallback). The
-// TUI binary's --ascii flag can call SetAsciiMode(true) to override.
+// The codeset check is what distinguishes `C` (legacy 7-bit ASCII C
+// locale) from `C.UTF-8` (POSIX with UTF-8 codeset, the modern Ubuntu/
+// Debian default). A previous version of this function dot-split first
+// and matched the language tag as `C`, which falsely degraded
+// `C.UTF-8` users to ASCII glyphs even though their terminal handled
+// Unicode fine.
 func detectAscii() bool {
 	if os.Getenv("GIL_ASCII") == "1" {
 		return true
@@ -141,12 +146,23 @@ func detectAscii() bool {
 		if v == "" {
 			continue
 		}
-		// First-occurrence wins (POSIX).
-		switch strings.ToUpper(strings.SplitN(v, ".", 2)[0]) {
+		// First-occurrence wins (POSIX). Check codeset suffix first
+		// — `C.UTF-8` and `en_US.utf8` are both Unicode-capable
+		// regardless of the language tag.
+		upper := strings.ToUpper(v)
+		if strings.Contains(upper, ".UTF-8") || strings.Contains(upper, ".UTF8") {
+			return false
+		}
+		// No codeset (or non-UTF-8 codeset). Bare "C"/"POSIX" means
+		// 7-bit ASCII; anything else (e.g. "en_US") falls back to
+		// Unicode-on by default on the assumption that modern
+		// terminals handle UTF-8 even without a codeset declaration.
+		head := strings.SplitN(upper, ".", 2)[0]
+		switch head {
 		case "C", "POSIX":
 			return true
 		}
-		return false // a real locale won; assume Unicode.
+		return false
 	}
 	return false
 }
