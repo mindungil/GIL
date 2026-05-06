@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sync"
@@ -80,25 +81,42 @@ func (s *SessionService) WithProviderFactory(f ProviderFactory) *SessionService 
 // without enumerating slash commands (there are none — see
 // docs/design/chat-architecture.md §1).
 //
-// V1 deliberately does not yet describe tool calls — no tools are
-// registered. The prompt will grow as M1 lands the tool registry.
+// The prompt instructs the agent to call tools (show_diff /
+// show_spec / show_status / list_sessions / request_compact) when
+// the user asks about workspace state, rather than describing what
+// it would do.
 const defaultChatSystemPrompt = `You are gil, an autonomous coding harness assistant.
 
-The user types in natural language. There are no slash commands. You
-respond conversationally. When the user describes a task, ask a few
-focused clarifying questions to understand the goal, scope,
-constraints, and what success looks like. Keep your tone direct and
-low-ceremony.
+The user types in natural language. There are no slash commands.
+Respond conversationally and call tools when they map to what the
+user is asking for — don't describe what you would do, just do it.
 
-Guidance:
-- Don't enumerate commands or menus to the user.
-- Don't describe yourself unless asked.
-- If the user greets you, greet them back briefly and invite them to
-  describe a task they'd like the harness to run.
-- If the user asks about you ("what model are you", "어떤 모델이야"),
-  answer plainly with the configured provider/model from the system
-  context.
+Tool guidance:
+- show_diff when they ask to see changes ("diff", "what changed",
+  "변경사항", "지금까지 뭐 바꿨어").
+- show_spec when they ask about the spec, plan, brief, or what was
+  agreed.
+- show_status when they ask "how's it going", "진행 상황", current
+  iteration, or live cost.
+- list_sessions when they ask about past tasks, recent work, "뭐
+  하고 있었지", "어떤 세션 있어".
+- request_compact when they mention context being long, asking to
+  compact, summarise, or free tokens.
+
+When the user describes a NEW task to build, don't call tools — ask
+a few focused clarifying questions first (goal, scope, constraints,
+success criteria) and offer to start once you understand. (Spec
+freezing and run-starting tools land in a follow-up commit.)
+
+Other guidance:
+- Don't enumerate available commands to the user.
+- If the user greets you, greet briefly and invite them to describe
+  a task they'd like the harness to run.
+- If asked "what model are you" / "어떤 모델이야", answer plainly with
+  the configured provider and model from the system context line below.
 - Match the user's language (English or Korean).
+
+System context: provider=%s model=%s session=%s
 `
 
 // Prompt is the streaming agent-loop RPC. See file header for the
@@ -167,67 +185,154 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 	if userText == "" {
 		return status.Error(codes.InvalidArgument, "prompt requires a non-empty text part")
 	}
+	// Persist the user turn upfront so the history reflects the
+	// real conversation even if the agent loop terminates early
+	// (provider error, max iterations).
+	s.chatHistory().append(sessionID, provider.Message{Role: provider.RoleUser, Content: userText})
 	msgs := append(hist, provider.Message{
 		Role:    provider.RoleUser,
 		Content: userText,
 	})
 
-	// 4. Call the provider. V1 uses no tools — that lands in the next
-	//    commit. Single-shot completion; whole text streams as one
-	//    TextDelta. Latency is captured for the metrics part.
-	t0 := time.Now()
-	resp, err := prov.Complete(ctx, provider.Request{
-		Model:       modelID,
-		Messages:    msgs,
-		System:      defaultChatSystemPrompt,
-		MaxTokens:   2048,
-		Temperature: 0.7,
-	})
-	latency := time.Since(t0)
-	if err != nil {
-		// Stream-level error: emit a Done with stop_reason="error" so
-		// the chat surface renders something instead of just an EOF.
-		_ = stream.Send(&gilv1.Part{
-			Body: &gilv1.Part_Done{
-				Done: &gilv1.DonePart{StopReason: "error", ErrorMessage: err.Error()},
-			},
+	// 4. Build the tool registry for this turn. The agent loop calls
+	//    one of these tools when the user asks about workspace state.
+	registry := s.buildChatToolRegistry(s.runService())
+	toolDefs := registry.defs()
+
+	// 5. Multi-turn agent loop. Each iteration calls the LLM; if it
+	//    emits tool_calls, we dispatch them, append the results, and
+	//    re-call. The loop terminates when the LLM returns no tool
+	//    calls (StopReason="end_turn") or we hit the iteration cap.
+	const maxAgentTurns = 8
+	systemPrompt := fmt.Sprintf(defaultChatSystemPrompt, provName, modelID, sessionID)
+	var totalTokensIn, totalTokensOut int64
+	var totalLatency time.Duration
+
+	for turn := 0; turn < maxAgentTurns; turn++ {
+		t0 := time.Now()
+		resp, err := prov.Complete(ctx, provider.Request{
+			Model:       modelID,
+			Messages:    msgs,
+			System:      systemPrompt,
+			Tools:       toolDefs,
+			MaxTokens:   2048,
+			Temperature: 0.7,
 		})
-		return status.Errorf(codes.Internal, "provider.Complete: %v", err)
-	}
-
-	// 5. Stream the response.
-	if resp.Text != "" {
-		if err := stream.Send(&gilv1.Part{
-			Body: &gilv1.Part_Text{Text: &gilv1.TextDelta{Content: resp.Text}},
-		}); err != nil {
-			return err
+		totalLatency += time.Since(t0)
+		if err != nil {
+			_ = stream.Send(&gilv1.Part{
+				Body: &gilv1.Part_Done{
+					Done: &gilv1.DonePart{StopReason: "error", ErrorMessage: err.Error()},
+				},
+			})
+			return status.Errorf(codes.Internal, "provider.Complete: %v", err)
 		}
+		totalTokensIn += resp.InputTokens
+		totalTokensOut += resp.OutputTokens
+
+		// Stream any text the LLM emitted on this turn.
+		if resp.Text != "" {
+			if err := stream.Send(&gilv1.Part{
+				Body: &gilv1.Part_Text{Text: &gilv1.TextDelta{Content: resp.Text}},
+			}); err != nil {
+				return err
+			}
+		}
+
+		// If no tool calls, the LLM is done.
+		if len(resp.ToolCalls) == 0 {
+			s.chatHistory().append(sessionID,
+				provider.Message{Role: provider.RoleAssistant, Content: resp.Text})
+			break
+		}
+
+		// Append the assistant turn (with tool calls) to messages so
+		// the LLM sees the call→result correlation on the next turn.
+		assistantTurn := provider.Message{
+			Role:      provider.RoleAssistant,
+			Content:   resp.Text,
+			ToolCalls: resp.ToolCalls,
+		}
+		msgs = append(msgs, assistantTurn)
+		s.chatHistory().append(sessionID, assistantTurn)
+
+		// Dispatch each tool call, stream Parts, collect results.
+		toolResults := make([]provider.ToolResult, 0, len(resp.ToolCalls))
+		for _, call := range resp.ToolCalls {
+			if err := stream.Send(&gilv1.Part{
+				Body: &gilv1.Part_ToolCall{ToolCall: &gilv1.ToolCallPart{
+					Id:        call.ID,
+					Name:      call.Name,
+					InputJson: string(call.Input),
+				}},
+			}); err != nil {
+				return err
+			}
+			result, runErr := dispatchTool(ctx, registry, sessionID, call)
+			if runErr != nil {
+				result = provider.ToolResult{
+					ToolUseID: call.ID,
+					Content:   "tool dispatch failed: " + runErr.Error(),
+					IsError:   true,
+				}
+			}
+			toolResults = append(toolResults, result)
+			if err := stream.Send(&gilv1.Part{
+				Body: &gilv1.Part_ToolResult{ToolResult: &gilv1.ToolResultPart{
+					CallId:  call.ID,
+					Content: result.Content,
+					IsError: result.IsError,
+				}},
+			}); err != nil {
+				return err
+			}
+		}
+
+		// Feed the tool results back as a synthetic user turn (per
+		// Anthropic's tool_result block convention) so the LLM can
+		// see them on the next iteration.
+		toolFeedback := provider.Message{
+			Role:        provider.RoleUser,
+			ToolResults: toolResults,
+		}
+		msgs = append(msgs, toolFeedback)
+		s.chatHistory().append(sessionID, toolFeedback)
 	}
 
-	// 6. Persist the user + assistant turn to in-memory history.
-	s.chatHistory().append(sessionID, provider.Message{Role: provider.RoleUser, Content: userText})
-	s.chatHistory().append(sessionID, provider.Message{Role: provider.RoleAssistant, Content: resp.Text})
-
-	// 7. Metrics + Done.
+	// 6. Metrics + Done.
 	if err := stream.Send(&gilv1.Part{
 		Body: &gilv1.Part_Metrics{Metrics: &gilv1.PromptMetrics{
-			TokensIn:  resp.InputTokens,
-			TokensOut: resp.OutputTokens,
-			LatencyMs: latency.Milliseconds(),
+			TokensIn:  totalTokensIn,
+			TokensOut: totalTokensOut,
+			LatencyMs: totalLatency.Milliseconds(),
 		}},
 	}); err != nil {
 		return err
 	}
-	stopReason := resp.StopReason
-	if stopReason == "" {
-		stopReason = "end_turn"
-	}
 	if err := stream.Send(&gilv1.Part{
-		Body: &gilv1.Part_Done{Done: &gilv1.DonePart{StopReason: stopReason}},
+		Body: &gilv1.Part_Done{Done: &gilv1.DonePart{StopReason: "end_turn"}},
 	}); err != nil {
 		return err
 	}
 	return nil
+}
+
+// dispatchTool looks up a tool by name and invokes it with the
+// LLM-provided input. Returns a typed ToolResult ready to feed back
+// to the LLM. Unknown tool names produce an IsError result so the
+// LLM can self-correct without crashing the stream.
+func dispatchTool(ctx context.Context, registry *chatToolRegistry, sessionID string, call provider.ToolCall) (provider.ToolResult, error) {
+	tool, ok := registry.lookup(call.Name)
+	if !ok {
+		return provider.ToolResult{
+			ToolUseID: call.ID,
+			Content:   "unknown tool: " + call.Name,
+			IsError:   true,
+		}, nil
+	}
+	r, err := tool.run(ctx, sessionID, call.Input)
+	r.ToolUseID = call.ID
+	return r, err
 }
 
 // chatHistory lazily allocates the message log map. Stored on the
