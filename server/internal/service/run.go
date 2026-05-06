@@ -83,6 +83,11 @@ type pendingClarify struct {
 	ch chan string
 }
 
+// ProviderFactory returns a Provider + default model name for the given
+// provider name. Used by RunService and SessionService to dial the
+// configured LLM. Lived in interview.go before M3 deleted that file.
+type ProviderFactory func(name string) (provider.Provider, string, error)
+
 // RunService handles RunService gRPC. Loads frozen spec, builds tools/verifier,
 // runs AgentLoop synchronously or in background (detach mode). Tail subscribes
 // to the live event stream.

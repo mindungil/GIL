@@ -12,12 +12,12 @@ import (
 	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
 )
 
-// Client is a gRPC client for the Gil SessionService, InterviewService, and RunService.
+// Client is a gRPC client for the Gil SessionService and RunService.
+// InterviewService removed in M3.
 type Client struct {
-	conn       *grpc.ClientConn
-	sessions   gilv1.SessionServiceClient
-	interviews gilv1.InterviewServiceClient
-	runs       gilv1.RunServiceClient
+	conn     *grpc.ClientConn
+	sessions gilv1.SessionServiceClient
+	runs     gilv1.RunServiceClient
 }
 
 // Dial connects to a Gil gRPC server at the given Unix socket path.
@@ -33,10 +33,9 @@ func Dial(sockPath string) (*Client, error) {
 		return nil, err
 	}
 	return &Client{
-		conn:       conn,
-		sessions:   gilv1.NewSessionServiceClient(conn),
-		interviews: gilv1.NewInterviewServiceClient(conn),
-		runs:       gilv1.NewRunServiceClient(conn),
+		conn:     conn,
+		sessions: gilv1.NewSessionServiceClient(conn),
+		runs:     gilv1.NewRunServiceClient(conn),
 	}, nil
 }
 
@@ -157,56 +156,10 @@ func fromProto(s *gilv1.Session) *Session {
 	return out
 }
 
-// InterviewModels lets callers specify per-stage models for an interview.
-// Empty fields fall back to the request's primary Model field.
-type InterviewModels struct {
-	SlotModel      string // slot extraction; empty → falls back to Model
-	AdversaryModel string // critique; empty → falls back to Model
-	AuditModel     string // self-audit gate; empty → falls back to Model
-}
-
-// StartInterview begins an interview for sessionID. Returns a server stream
-// that emits agent events (stage transitions, agent turns, errors). The caller
-// must drain the stream until io.EOF or first AgentTurn before calling Reply.
-//
-// providerName is "anthropic", "mock", or "" (server default = anthropic).
-// model is provider-specific (empty → server default for that provider).
-// models is optional; pass zero value (sdk.InterviewModels{}) to use model for all stages.
-func (c *Client) StartInterview(ctx context.Context, sessionID, firstInput, providerName, model string, models InterviewModels) (gilv1.InterviewService_StartClient, error) {
-	return c.interviews.Start(ctx, &gilv1.StartInterviewRequest{
-		SessionId:      sessionID,
-		FirstInput:     firstInput,
-		Provider:       providerName,
-		Model:          model,
-		SlotModel:      models.SlotModel,
-		AdversaryModel: models.AdversaryModel,
-		AuditModel:     models.AuditModel,
-	})
-}
-
-// ReplyInterview sends a user reply mid-interview. Returns a stream of
-// subsequent agent events.
-func (c *Client) ReplyInterview(ctx context.Context, sessionID, content string) (gilv1.InterviewService_ReplyClient, error) {
-	return c.interviews.Reply(ctx, &gilv1.ReplyRequest{
-		SessionId: sessionID,
-		Content:   content,
-	})
-}
-
-// ConfirmInterview freezes the spec for sessionID. Returns the spec ID and
-// SHA-256 hex of the frozen content.
-func (c *Client) ConfirmInterview(ctx context.Context, sessionID string) (specID, contentSha256 string, err error) {
-	resp, err := c.interviews.Confirm(ctx, &gilv1.ConfirmRequest{SessionId: sessionID})
-	if err != nil {
-		return "", "", err
-	}
-	return resp.SpecId, resp.ContentSha256, nil
-}
-
-// GetSpec returns the current (possibly partial) spec for sessionID.
-func (c *Client) GetSpec(ctx context.Context, sessionID string) (*gilv1.FrozenSpec, error) {
-	return c.interviews.GetSpec(ctx, &gilv1.GetSpecRequest{SessionId: sessionID})
-}
+// InterviewModels / StartInterview / ReplyInterview / ConfirmInterview /
+// GetSpec were the SDK surface for the now-deleted InterviewService
+// (M3, docs/design/chat-architecture.md). Chat surfaces use Prompt
+// instead; spec freezing moves to an agent tool in a future commit.
 
 // StartRun executes the agent loop. When detach=false (default), blocks until
 // completion and returns the final result. When detach=true, returns immediately

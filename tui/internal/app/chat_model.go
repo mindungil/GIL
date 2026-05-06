@@ -2,13 +2,11 @@ package app
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/mindungil/gil/core/intent"
 	"github.com/mindungil/gil/core/paths"
 	"github.com/mindungil/gil/core/workspace"
 	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
@@ -50,14 +48,8 @@ type chatModel struct {
 	// Input state owned by chat_input.go (textinput model + history).
 	input chatInputState
 
-	// Streaming state owned by chat_stream.go. Legacy interview pump.
-	// M3 will delete this once InterviewService is gone.
-	stream chatStreamState
-
-	// promptStream is the M2 SessionService.Prompt stream cursor.
-	// Distinct from stream because the proto types differ (Part vs
-	// InterviewEvent). Active while the chat agent is mid-turn; nil
-	// otherwise.
+	// promptStream is the SessionService.Prompt stream cursor.
+	// Active while the chat agent is mid-turn; nil otherwise.
 	promptStream gilv1.SessionService_PromptClient
 	promptCancel context.CancelFunc
 
@@ -82,24 +74,6 @@ type chatModel struct {
 
 	err string
 
-	// pendingPrompt holds the user's first prompt while we wait for
-	// the daemon to allocate a session. The first time the user
-	// submits text without an active session, the chat fires
-	// newSessionCmd and stashes the prompt here; when chatNewSessionMsg
-	// arrives with an ID, the prompt is dispatched via
-	// startInterviewCmd. Without this, first-turn prompts errored out
-	// with "no active session" — the chat surface required a
-	// preallocated session it never asked for.
-	pendingPrompt string
-
-	// inInterview tracks whether StartInterview has been called for
-	// the current session. Once true, subsequent prompts use
-	// ReplyInterview — calling Start again would re-run the sensing
-	// engine and emit a fresh "interview started" stage event each
-	// time, which is what the TUI was doing pre-fix (every keystroke
-	// re-classified the domain and produced no agent reply).
-	inInterview bool
-
 	// providerLabel / modelLabel describe the LLM that backs this chat.
 	// Resolved from the layered workspace config at construction time
 	// so the header doesn't lie ("claude-opus-4-7" was hardcoded
@@ -108,10 +82,6 @@ type chatModel struct {
 	providerLabel string
 	modelLabel    string
 
-	// router classifies natural-language prompts into verb dispatches
-	// per design.md §2.6(b). When nil the model forwards every prompt
-	// directly (matches --no-intent-router on the cli surface).
-	router *intent.Router
 }
 
 func (m *chatModel) Init() tea.Cmd { return nil }
@@ -159,11 +129,12 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.client == nil {
 				return m, nil // test mode — no stream dispatch
 			}
-			// Cancel any in-flight stream from a previous turn so the
-			// new submit takes priority.
-			if m.stream.cancel != nil {
-				m.stream.cancel()
-				m.stream = chatStreamState{}
+			// Cancel any in-flight prompt stream from a previous turn
+			// so the new submit takes priority.
+			if m.promptCancel != nil {
+				m.promptCancel()
+				m.promptStream = nil
+				m.promptCancel = nil
 			}
 			return m, startChatPromptCmd(m.client, m.activeID, text)
 		default:
@@ -176,11 +147,6 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.input.ta.SetHeight(m.input.rowCount())
 			return m, cmd
 		}
-
-	case chatStreamStartedMsg:
-		m.stream.stream = msg.stream
-		m.stream.cancel = msg.cancel
-		return m, nextChatEventCmd(msg.stream)
 
 	case chatPromptStreamStartedMsg:
 		// M2: post-Prompt-RPC stream handle. Same pump pattern as the
@@ -247,137 +213,44 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.transcript = append(m.transcript, "‹  "+msg.text)
 		}
-		// Keep draining whichever pump is active. Prompt stream wins
-		// when both are set (M2 path); falls back to interview pump
-		// for legacy code paths still alive until M3.
+		// Keep draining the prompt pump.
 		if m.promptStream != nil {
 			return m, nextChatPromptEventCmd(m.promptStream)
-		}
-		if m.stream.stream != nil {
-			return m, nextChatEventCmd(m.stream.stream)
 		}
 		return m, nil
 
 	case chatPhaseMsg:
+		// Phase transitions are still emitted by the run-tail pump
+		// (chat_run.go). Update the phase; no stream re-pump here
+		// because that pump owns its own cycle.
 		m.phase = msg.phase
-		if m.stream.stream != nil {
-			return m, nextChatEventCmd(m.stream.stream)
-		}
 		return m, nil
 
 	case chatStreamEventSkipMsg:
-		if m.stream.stream != nil {
-			return m, nextChatEventCmd(m.stream.stream)
-		}
-		return m, nil
-
-	case chatStageReasonMsg:
-		// Same effect as chatPhaseMsg (flips the strip) but also
-		// surfaces the human-readable reason in the transcript so
-		// the user sees what the engine inferred.
-		m.phase = msg.phase
-		var note string
-		switch msg.phase {
-		case ChatPhaseInterview:
-			note = "interview started"
-		case ChatPhaseAwaitingConfirm:
-			note = "ready to freeze — say `run` to start the agent"
-		}
-		if note != "" {
-			line := "   ‹  " + note
-			if msg.reason != "" {
-				line += " — " + msg.reason
-			}
-			m.transcript = append(m.transcript, line)
-		}
-		if m.stream.stream != nil {
-			return m, nextChatEventCmd(m.stream.stream)
-		}
-		return m, nil
-
-	case chatSaturationMsg:
-		m.transcript = append(m.transcript,
-			fmt.Sprintf("   ‹  slot filled (%d/%d, sat %d%%)",
-				msg.filled, msg.total, int(msg.saturation*100+0.5)))
-		if m.stream.stream != nil {
-			return m, nextChatEventCmd(m.stream.stream)
-		}
-		return m, nil
-
-	case chatAdversaryMsg:
-		if msg.count > 0 {
-			m.transcript = append(m.transcript,
-				fmt.Sprintf("   ‹  adversary: %d finding(s)", msg.count))
-		}
-		if m.stream.stream != nil {
-			return m, nextChatEventCmd(m.stream.stream)
+		if m.promptStream != nil {
+			return m, nextChatPromptEventCmd(m.promptStream)
 		}
 		return m, nil
 
 	case chatStreamDoneMsg:
-		// Turn complete. Reset both stream cursors; keep cancel funcs
-		// so quit path can call them harmlessly.
-		m.stream.stream = nil
 		m.promptStream = nil
 		return m, nil
 
 	case chatStreamErrMsg:
 		m.err = msg.err
-		m.stream.stream = nil
 		m.promptStream = nil
 		return m, nil
 
-	case chatVerbResultMsg:
-		// Multi-line results (sessions list, spec, diff) get split so
-		// each line aligns with the transcript's leading 3-space gutter.
-		glyph := "   ‹"
-		if msg.kind == "err" {
-			glyph = "   !"
-		}
-		for _, line := range strings.Split(msg.text, "\n") {
-			m.transcript = append(m.transcript, glyph+"  "+line)
-		}
-		return m, nil
+	// chatVerbResultMsg / chatNewSessionMsg removed in M3 — verb
+	// dispatch and standalone session creation are gone. The daemon
+	// auto-allocates a session on the first SessionService.Prompt
+	// call and the agent's tools cover what verbs used to do.
 
-	case chatNewSessionMsg:
-		if msg.err != "" {
-			m.transcript = append(m.transcript, "   !  new: "+msg.err)
-			m.pendingPrompt = "" // drop, user will retry
-			return m, nil
-		}
-		m.activeID = msg.session.ID
-		m.sessions = append([]*sdk.Session{msg.session}, m.sessions...)
-		// If the user submitted a prompt that triggered this auto-
-		// create, dispatch it now without forcing a second keystroke.
-		// Mark inInterview so subsequent replies use ReplyInterview.
-		if m.pendingPrompt != "" {
-			prompt := m.pendingPrompt
-			m.pendingPrompt = ""
-			m.inInterview = true
-			return m, startInterviewCmd(m.client, m.activeID, prompt)
-		}
-		m.transcript = append(m.transcript,
-			"   ‹  created "+shortChatID(msg.session.ID)+" — describe the task to begin")
-		return m, nil
-
-	case chatRunStartedMsg:
-		// StartRun returned ok; flip phase and open the Tail
-		// subscription so the run becomes visible in the transcript.
-		// A second /run replaces the prior tail (cancel first).
-		if m.runTail.handle != nil {
-			m.runTail.handle.cancel()
-			m.runTail = chatRunTailState{}
-		}
-		m.phase = ChatPhaseRun
-		m.transcript = append(m.transcript, "   ‹  run started — tailing")
-		if m.client == nil {
-			return m, nil
-		}
-		return m, startChatRunTailCmd(m.client, msg.sessionID)
-
-	case chatRunStartFailedMsg:
-		m.transcript = append(m.transcript, "   !  run: "+msg.err)
-		return m, nil
+	// chatRunStartedMsg / chatRunStartFailedMsg deleted in M3 — the
+	// agent's start_run tool will emit a RunStarted Part directly
+	// when that tool lands. For now run-tail attachment is driven by
+	// the agent itself; chat_run.go provides the subscription pump
+	// the agent can hook into.
 
 	case chatRunTailStartedMsg:
 		m.runTail.handle = msg.handle
@@ -429,9 +302,6 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // chat model. Called from /quit, /exit, and Ctrl+C so we don't leave
 // goroutines waiting on Recv after the bubbletea program exits.
 func (m *chatModel) cancelAllStreams() {
-	if m.stream.cancel != nil {
-		m.stream.cancel()
-	}
 	if m.promptCancel != nil {
 		m.promptCancel()
 	}
@@ -442,21 +312,8 @@ func (m *chatModel) cancelAllStreams() {
 
 func (m *chatModel) View() string { return m.chatView() }
 
-// toIntentRefs flattens the chatModel's session list into the slim
-// SessionRef shape the intent router uses for slug matching.
-func toIntentRefs(in []*sdk.Session) []intent.SessionRef {
-	out := make([]intent.SessionRef, 0, len(in))
-	for _, s := range in {
-		if s == nil {
-			continue
-		}
-		out = append(out, intent.SessionRef{ID: s.ID, Slug: s.GoalHint})
-	}
-	return out
-}
+// (toIntentRefs deleted in M3 — the intent router is gone.)
 
-// newChatModel constructs a chatModel ready for tea.NewProgram.
-// socket is dialed lazily by the stream layer (Task 8).
 // isTerminalExit reports whether a bare line should exit the TUI.
 // Per docs/design/chat-architecture.md §3.1 this is the ONE non-agent
 // client-side recognition that survives the slash-removal pass.
@@ -474,7 +331,6 @@ func newChatModel(socket string) *chatModel {
 		socket:        socket,
 		phase:         ChatPhaseIdle,
 		input:         newChatInput(),
-		router:        intent.NewRouter(),
 		providerLabel: prov,
 		modelLabel:    model,
 	}

@@ -9,12 +9,9 @@ import (
 	"strings"
 	"sync"
 
-	"google.golang.org/protobuf/encoding/protojson"
-
 	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
 	"github.com/mindungil/gil/sdk"
 
-	"github.com/mindungil/gil/cli/internal/chat/render"
 	"github.com/mindungil/gil/cli/internal/errmap"
 )
 
@@ -340,85 +337,11 @@ func (g *GRPCClient) NextEvent(ctx context.Context) (TrackerInput, bool, error) 
 	}
 }
 
-// Spec returns the current spec for the active session as a SpecView.
-// The spec content is marshalled from the FrozenSpec proto to JSON
-// (YAML marshalling is not available without an extra dependency; the
-// render.SpecView.YAML field receives JSON-formatted content).
-func (g *GRPCClient) Spec(ctx context.Context) (*render.SpecView, error) {
-	fs, err := g.sdk.GetSpec(ctx, g.activeSess)
-	if err != nil {
-		return nil, errmap.WrapRPCError(err)
-	}
-	m := protojson.MarshalOptions{
-		Multiline:       true,
-		Indent:          "  ",
-		EmitUnpopulated: false,
-	}
-	jsonBytes, err := m.Marshal(fs)
-	if err != nil {
-		return nil, fmt.Errorf("spec marshal: %w", err)
-	}
-	return &render.SpecView{YAML: string(jsonBytes)}, nil
-}
-
-// Status returns a one-line status string for the active session.
-func (g *GRPCClient) Status(ctx context.Context) (string, error) {
-	s, err := g.sdk.GetSession(ctx, g.activeSess)
-	if err != nil {
-		return "", errmap.WrapRPCError(err)
-	}
-	return fmt.Sprintf("%s · %s · iter %d · $%.4f",
-		shortID(s.ID), s.Status, s.CurrentIteration, s.TotalCostUSD), nil
-}
-
-// Diff returns the workspace diff for the active session. The SDK returns a
-// unified diff string; it is mapped to a single DiffHunk with the raw diff
-// in the Snippet field.
-func (g *GRPCClient) Diff(ctx context.Context) ([]render.DiffHunk, error) {
-	result, err := g.sdk.Diff(ctx, g.activeSess)
-	if err != nil {
-		return nil, errmap.WrapRPCError(err)
-	}
-	if result.UnifiedDiff == "" {
-		return nil, nil
-	}
-	return []render.DiffHunk{{
-		Path:    "(unified)",
-		Added:   int(result.LinesAdded),
-		Removed: int(result.LinesRemoved),
-		Snippet: result.UnifiedDiff,
-	}}, nil
-}
-
-// Merge is not implemented in the current SDK. It returns an error indicating
-// the user should apply the diff externally.
-//
-// TODO(T16): wire to a server-side apply endpoint when available.
-func (g *GRPCClient) Merge(_ context.Context) error {
-	return fmt.Errorf("merge is not yet supported by the server; apply the diff manually or use `git apply`")
-}
-
-// Compact asks the server to queue a compaction at the next turn
-// boundary. Returns (queued, reason). When queued=false the reason
-// is server-supplied (e.g. "no run in flight") and safe to display.
-func (g *GRPCClient) Compact(ctx context.Context) (bool, string, error) {
-	queued, reason, err := g.sdk.RequestCompact(ctx, g.activeSess)
-	if err != nil {
-		return false, "", errmap.WrapRPCError(err)
-	}
-	return queued, reason, nil
-}
-
-// StartRun starts the agent run for the active session in detached mode.
-// A background tail loop is launched to forward run events to the eventCh.
-func (g *GRPCClient) StartRun(ctx context.Context) error {
-	_, err := g.sdk.StartRun(ctx, g.activeSess, "", "", true /* detach */)
-	if err != nil {
-		return errmap.WrapRPCError(err)
-	}
-	g.startTailLoop(ctx)
-	return nil
-}
+// (Spec / Status / Diff / Merge / Compact / StartRun verb methods
+// removed in M3 — chat surface routes through SessionService.Prompt
+// and the agent calls these as tools server-side. The verb-mode
+// cobra subcommands in cli/internal/cmd/* still call the SDK
+// directly for headless / script use.)
 
 // Close closes the underlying gRPC connection.
 func (g *GRPCClient) Close() error {

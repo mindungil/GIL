@@ -550,7 +550,9 @@ func newServer(dbPath, sockPath, sessionsBase, authFile string, authMW *auth.Mid
 		WithSessionsBase(sessionsBase).
 		WithBudgetGetter(runSvc).
 		WithProviderFactory(factory))
-	gilv1.RegisterInterviewServiceServer(g, service.NewInterviewService(repo, sessionsBase, factory))
+	// InterviewService deleted in M3 — chat surface routes through
+	// SessionService.Prompt with the agent's tool registry handling
+	// what sensing/slot-fill/audit used to do.
 	gilv1.RegisterRunServiceServer(g, runSvc)
 
 	return &server{grpc: g, lis: lis, db: db}, nil
@@ -909,9 +911,7 @@ func runHTTPGateway(addr, sockPath string) error {
 	if err := gilv1.RegisterRunServiceHandlerFromEndpoint(ctx, mux, target, opts); err != nil {
 		return err
 	}
-	if err := gilv1.RegisterInterviewServiceHandlerFromEndpoint(ctx, mux, target, opts); err != nil {
-		return err
-	}
+	// InterviewService gateway removed in M3.
 	slog.Info("http gateway listening", "addr", addr)
 	return http.ListenAndServe(addr, mux)
 }

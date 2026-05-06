@@ -21,7 +21,7 @@ func TestRoot_HasAdvancedGroup(t *testing.T) {
 func TestRoot_VerbsHaveGroupID(t *testing.T) {
 	root := Root()
 	expectAdvanced := []string{
-		"interview", "run", "spec", "watch", "events",
+		"run", "watch", "events",
 		"stats", "import", "export",
 	}
 	advancedSet := map[string]bool{}

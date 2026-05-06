@@ -189,13 +189,15 @@ func Root() *cobra.Command {
 
 	addCmd(chatCmd(), "session")
 	addCmd(newCmd(), "session")
-	addCmd(interviewCmd(), "advanced")
-	addCmd(resumeCmd(), "session")
+	// `gil interview` / `gil resume` / `gil spec` / `gil clarify`
+	// removed in M3 — those were thin wrappers over InterviewService
+	// which is gone. Spec inspection moves into the chat agent's
+	// show_spec tool.
 	addCmd(runCmd(), "advanced")
 	addCmd(watchCmd(), "advanced")
 	addCmd(eventsCmd(), "advanced")
-	addCmd(specCmd(), "advanced")
-	addCmd(clarifyCmd(), "session")
+	// specCmd removed (see comment above interview/resume).
+	// clarifyCmd removed in M3 (interview engine deletion).
 	addCmd(sessionCmd(), "session")
 
 	addCmd(statusCmd(), "diag")

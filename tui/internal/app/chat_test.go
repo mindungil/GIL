@@ -260,7 +260,8 @@ func TestChatUpdate_SlashLikeInputForwards_NoArrowNote(t *testing.T) {
 			t.Errorf("/spec should forward, got arrow note %q", line)
 		}
 	}
-	if !transcriptContains(cm.transcript, "/spec") {
+	joined := strings.Join(cm.transcript, "\n")
+	if !strings.Contains(joined, "/spec") {
 		t.Fatalf("user echo missing in transcript, got %v", cm.transcript)
 	}
 }
