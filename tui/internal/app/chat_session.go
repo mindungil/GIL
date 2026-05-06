@@ -16,35 +16,79 @@ func (m *chatModel) renderPreFirstTurn(convH int) string {
 	const topN = 5
 
 	var b strings.Builder
-	b.WriteString("\n") // 1 row of breathing space
+	b.WriteString("\n\n") // 2 rows of breathing space — the editorial
+	// approach (terminal-aesthetic.md §5) gives the first content
+	// line generous top whitespace instead of slamming against the
+	// header rule.
+
+	// Section glyph: small horizontal mark per spec §3 sub-divider
+	// rhythm. Two-char `╴╴` (or `--` in ASCII) reads as a sub-section
+	// delimiter without the visual weight of `────────`.
+	sectionGlyph := Glyphs().Section
+	const indent = "   "
 
 	if len(m.sessions) == 0 {
-		empty := truncRunes("no past sessions  — describe what you want to build below", max(0, m.width-6), true)
-		b.WriteString("      ")
-		b.WriteString(styleSurface(empty))
+		// Empty-state pre-first-turn becomes a 2-section invite:
+		// (1) acknowledge no history, (2) show 3 example prompts so
+		// the user has a concrete handle. Without examples the empty
+		// chat reads as "I don't know what to type" — the followup
+		// principle of self-disclosure (#42) says the surface should
+		// answer that question without slash docs.
+		writeSection(&b, indent, sectionGlyph, "no past sessions")
+		writeIndentedLine(&b, indent+"      ",
+			styleSurface(truncRunes("describe a task to begin",
+				max(0, m.width-len(indent)-7), true)))
 		b.WriteString("\n")
+
+		writeSection(&b, indent, sectionGlyph, "examples")
+		for _, ex := range []string{
+			`"refactor my auth middleware for the new oidc spec"`,
+			`"build a CLI that scans go files for TODO comments"`,
+			`"port the Python date-parser to TypeScript"`,
+		} {
+			writeIndentedLine(&b, indent+"      ",
+				styleMeta(truncRunes("· "+ex,
+					max(0, m.width-len(indent)-7), true)))
+		}
 		return padToHeight(b.String(), convH)
 	}
 
-	lead := truncRunes(chatLeadIn(len(m.sessions), topN), max(0, m.width-6), true)
-	b.WriteString("      ")
-	b.WriteString(styleSurface(lead))
-	b.WriteString("\n\n")
+	writeSection(&b, indent, sectionGlyph, chatLeadIn(len(m.sessions), topN))
 
 	shown := m.sessions
 	if len(shown) > topN {
 		shown = shown[:topN]
 	}
 	for _, s := range shown {
-		b.WriteString("         ")
+		b.WriteString(indent + "      ")
 		b.WriteString(formatChatSessionRow(s, m.width))
 		b.WriteString("\n")
 	}
 	b.WriteString("\n")
-	b.WriteString("         ")
-	b.WriteString(styleMeta(truncRunes("›  describe a new task, or resume one above by name", max(0, m.width-9), true)))
-	b.WriteString("\n")
+	writeIndentedLine(&b, indent+"      ",
+		styleMeta(truncRunes("›  describe a new task, or resume one above by name",
+			max(0, m.width-len(indent)-7), true)))
 	return padToHeight(b.String(), convH)
+}
+
+// writeSection emits one section header line: indent + glyph + space + title.
+// Section title gets dim italic styling (terminal-aesthetic.md §2 Meta).
+// Followed by one blank row so the items underneath have breathing space
+// before the next section.
+func writeSection(b *strings.Builder, indent, glyph, title string) {
+	b.WriteString(indent)
+	b.WriteString(styleDim(glyph))
+	b.WriteString("  ")
+	b.WriteString(styleMeta(title))
+	b.WriteString("\n\n")
+}
+
+// writeIndentedLine writes prefix + content + "\n". Tiny helper to
+// keep the section composition readable at call sites.
+func writeIndentedLine(b *strings.Builder, prefix, content string) {
+	b.WriteString(prefix)
+	b.WriteString(content)
+	b.WriteString("\n")
 }
 
 // chatLeadIn produces the prose lead-in line above the session rows.

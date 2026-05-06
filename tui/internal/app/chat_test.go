@@ -101,8 +101,14 @@ func TestChatView_RendersAllRegions_AtFullSize(t *testing.T) {
 	if !strings.Contains(out, "describe a task") {
 		t.Errorf("affordance subtitle missing: %q", out)
 	}
-	if !strings.Contains(out, "═") && !strings.Contains(out, "=") {
+	// Prompt panel uses the thin rounded light frame in magenta as of
+	// the 2026-05-06 redesign — the heavy double-line `═` was traded
+	// down because magenta + rounded already singles the prompt out.
+	if !strings.Contains(out, "─") && !strings.Contains(out, "-") {
 		t.Errorf("prompt panel border missing: %q", out)
+	}
+	if !strings.Contains(out, "╭") && !strings.Contains(out, "+") {
+		t.Errorf("prompt panel rounded corner missing: %q", out)
 	}
 }
 

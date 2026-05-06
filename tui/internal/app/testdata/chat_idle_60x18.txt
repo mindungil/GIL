@@ -1,18 +1,18 @@
-╭──────────────────────────────────────────────────────────╮ 
-│ ▏  G  I  L       /snap/cwd   claude-opus-4-7  ·  <version> │ 
-╰──────────────────────────────────────────────────────────╯ 
-                                                             
-      no past sessions  — describe what you want to build b… 
+   ▏  G  I  L      ────          /snap/cwd   claude-opus-4-… 
                                                              
                                                              
+   ╴╴  no past sessions                                      
                                                              
+         describe a task to begin                            
                                                              
+   ╴╴  examples                                              
                                                              
-──────────────────────────────────────────────────────────── 
-                                        idle  ·  agent ready 
-╔══════════════════════════════════════════════════════════╗ 
-║                                                          ║ 
-║  ›                                                       ║ 
-║                                                          ║ 
-╚══════════════════════════════════════════════════════════╝ 
+         · "refactor my auth middleware for the new oidc s…  
+         · "build a CLI that scans go files for TODO comme…  
+         · "port the Python date-parser to TypeScript"       
+                                                             
+                                       [ idle  ·  ready ]    
+   ╭────────────────────────────────────────────────────╮    
+   │ ›                                                  │    
+   ╰────────────────────────────────────────────────────╯    
       describe a task, resume by slug, or ask what's running 

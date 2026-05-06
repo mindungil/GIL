@@ -1,14 +1,18 @@
-╭──────────────────────────────────────╮ 
-│ ▏  G  I  L /snap/cwd   claude-opus-… │ 
-╰──────────────────────────────────────╯ 
-                                         
-      no past sessions  — describe what… 
+   ▏  G  I  L      ────          /snap/… 
                                          
                                          
+   ╴╴  no past sessions                  
                                          
-──────────────────────────────────────── 
-                    idle  ·  agent ready 
-╔══════════════════════════════════════╗ 
-║  ›                                   ║ 
-╚══════════════════════════════════════╝ 
+         describe a task to begin        
+                                         
+   ╴╴  examples                          
+                                         
+         · "refactor my auth middlewar…  
+         · "build a CLI that scans go …  
+         · "port the Python date-parse…  
+                                         
+                   [ idle  ·  ready ]    
+   ╭────────────────────────────────╮    
+   │ ›                              │    
+   ╰────────────────────────────────╯    
       describe a task, resume by slug, … 

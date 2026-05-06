@@ -10,16 +10,21 @@ import (
 	"github.com/mindungil/gil/core/version"
 )
 
-// chatView assembles the five-region layout described in
-// docs/plans/phase-26.6-prompt-centric-tui.md §3.1.
+// chatView assembles the five-region chat surface. The layout was
+// rebuilt 2026-05-06 to drop the heavy magenta box + 3-row rounded
+// header that read like generic dev-tool chrome (#tui-redesign). The
+// new design follows docs/design/terminal-aesthetic.md mission-control
+// direction more strictly: borderless 1-row header, thin rounded
+// magenta prompt (3 rows, single content line), borderless status pill,
+// editorial left-rail + timestamps in transcript.
 //
-// Region heights at full size (height >= 24):
+// Region heights at full size (height ≥ 24):
 //
-//	header        = 3
-//	prompt panel  = 5
+//	header        = 1
+//	conversation  = remaining
+//	status strip  = 1
+//	prompt panel  = 3
 //	affordance    = 1
-//	status strip  = 2
-//	conversation  = remaining (>= 8)
 func (m *chatModel) chatView() string {
 	if m.width == 0 || m.height == 0 {
 		return styleDim("loading" + Glyphs().Ellipsis)
@@ -55,70 +60,86 @@ var chatCwd = func() string {
 	return cwd
 }
 
-// renderChatHeader is the rounded box at the top per design §3.
+// renderChatHeader is one row, borderless. Per terminal-aesthetic.md §2
+// the brand bar is `▏` quote-glyph + letterspaced bold "G  I  L". A
+// dim 4-char rule separates brand from context. cwd / model collapse
+// from the right when the terminal is narrow.
+//
+// Pre-redesign this was a 3-row rounded box that wasted vertical space
+// for fields the user only glances at. The new shape mirrors the
+// `gil status` visual mode header — same brand, same right-side meta,
+// no chrome.
 func (m *chatModel) renderChatHeader() string {
-	g := Glyphs()
 	cwd := chatCwd()
 	if cwd == "" {
 		cwd = "?"
 	}
-	left := styleDim(g.QuoteBar) + "  " + styleHeader("G  I  L")
-	right := styleDim(cwd) + "   " + styleMeta("claude-opus-4-7  "+g.Dot+"  "+version.String())
-	left, right = fitTwoColumn(left, right, m.width-4)
-	body := padBetween(left, right, m.width-4)
+	g := Glyphs()
+	left := "   " + styleDim(g.QuoteBar) + "  " + styleHeader("G  I  L")
+	rule := "      " + styleDim(strings.Repeat(g.HSep, 4)) + "      "
+	right := styleDim(cwd) + "   " + styleMeta("claude-opus-4-7  ·  "+version.String())
 
+	leftAndRule := left + rule
+	leftAndRule, right = fitTwoColumn(leftAndRule, right, m.width-3)
+	return padBetween(leftAndRule, right, m.width)
+}
+
+// renderPromptPanel returns (height, rendered). Thin rounded magenta
+// frame, 3 rows tall (top + content + bottom). Magenta is reserved
+// for this panel per spec §4.1 — it's the single-purpose accent that
+// signals "this is where you type."
+//
+// Pre-redesign this was a 5-row heavy `╔══╗` box with two blank
+// padding rows. The heavy double-line + extra padding read as
+// alarming/modal-warning rather than "primary input affordance," and
+// the magenta treatment alone is enough emphasis.
+func (m *chatModel) renderPromptPanel() (int, string) {
+	g := Glyphs()
+	// Use light rounded frame in magenta — magenta still owns the
+	// prompt-panel-singular rule, but the line weight stops shouting.
 	tl, tr := g.BoxLightTL, g.BoxLightTR
 	bl, br := g.BoxLightBL, g.BoxLightBR
 	hr := g.BoxLightHRule
 	vr := g.BoxLightVRule
-
-	top := styleDim(tl + strings.Repeat(hr, m.width-2) + tr)
-	mid := styleDim(vr) + " " + body + " " + styleDim(vr)
-	bot := styleDim(bl + strings.Repeat(hr, m.width-2) + br)
-	return lipgloss.JoinVertical(lipgloss.Left, top, mid, bot)
-}
-
-// renderPromptPanel returns (height, rendered). Heavy magenta box —
-// the visual focal point per design §3.
-func (m *chatModel) renderPromptPanel() (int, string) {
-	g := Glyphs()
-	tl, tr := g.BoxHeavyTL, g.BoxHeavyTR
-	bl, br := g.BoxHeavyBL, g.BoxHeavyBR
-	hr := g.BoxHeavyHRule
-	vr := g.BoxHeavyVRule
 
 	bordStyle := stylePromptBorder
 	if !m.inputEnabled() {
 		bordStyle = stylePromptBorderDim
 	}
 
-	top := bordStyle(tl + strings.Repeat(hr, m.width-2) + tr)
-	bot := bordStyle(bl + strings.Repeat(hr, m.width-2) + br)
+	// 3-col left margin so the prompt sits inside the page rhythm
+	// (matches header indentation).
+	const indent = 3
+	innerW := m.width - 2*indent - 2 // -2 for the two vertical borders
+	if innerW < 4 {
+		innerW = 4
+	}
+	leftPad := strings.Repeat(" ", indent)
+
+	top := leftPad + bordStyle(tl+strings.Repeat(hr, innerW)+tr) + leftPad
 
 	cue := lipgloss.NewStyle().Bold(true).Render(g.Arrow)
 	inputView := m.input.ti.View()
-	inner := "  " + cue + "  " + inputView
+	inner := " " + cue + "  " + inputView
 	innerLen := lipgloss.Width(inner)
-	if innerLen < m.width-2 {
-		inner += strings.Repeat(" ", m.width-2-innerLen)
+	if innerLen < innerW {
+		inner += strings.Repeat(" ", innerW-innerLen)
 	}
-	pad := bordStyle(vr) + strings.Repeat(" ", m.width-2) + bordStyle(vr)
-	mid := bordStyle(vr) + inner + bordStyle(vr)
+	mid := leftPad + bordStyle(vr) + inner + bordStyle(vr) + leftPad
+	bot := leftPad + bordStyle(bl+strings.Repeat(hr, innerW)+br) + leftPad
 
-	if m.height < 16 {
-		return 3, lipgloss.JoinVertical(lipgloss.Left, top, mid, bot)
-	}
-	return 5, lipgloss.JoinVertical(lipgloss.Left, top, pad, mid, pad, bot)
+	return 3, lipgloss.JoinVertical(lipgloss.Left, top, mid, bot)
 }
 
 // renderAffordanceLine is the single row of helper text below the
-// prompt panel.
+// prompt panel. Phase-aware NL subtitle on the left, stable footer
+// hints on the right.
 func (m *chatModel) renderAffordanceLine() string {
 	subtitle := chatSubtitle(m.phase)
 	hints := fmt.Sprintf("%s  %s  %s history  /  %s cmds",
 		version.String(), Glyphs().Dot, "↑↓", "/")
 	left := "      " + styleMeta(subtitle)
-	right := styleMeta(hints)
+	right := styleMeta(hints) + "   "
 	left, right = fitTwoColumn(left, right, m.width)
 	return padBetween(left, right, m.width)
 }
@@ -143,55 +164,78 @@ func chatSubtitle(p ChatPhase) string {
 	}
 }
 
-// renderStatusStrip is the divider rule + one phase-state line above
-// the prompt panel. Two rows total (rule + body). The body reflects
-// what the agent is actually doing (running iter X · cost, stuck on
-// pattern Y, etc.) rather than a generic "agent ready".
+// renderStatusStrip is a single right-aligned status pill on its own
+// row. The previous version drew a full-width `─` rule above the body
+// row — that rule is now redundant because the prompt panel's top
+// border (immediately below) already provides the visual divider, and
+// dropping it reclaims a full row of conversation space.
+//
+// The pill carries terse phase-state. styleAlert when stuck or
+// erroring; mint-cyan info accent when actively running; dim surface
+// otherwise.
 func (m *chatModel) renderStatusStrip() string {
-	g := Glyphs()
-	rule := styleDim(strings.Repeat(g.HSep, m.width))
-	body := chatStatusBody(m, g.Dot)
-	right := styleMeta(body)
-	if m.phase == ChatPhaseStuck || m.err != "" {
-		right = styleAlert(body)
+	body := chatStatusBody(m, Glyphs().Dot)
+	pill := chatStripPill(m, body)
+	left := "   "
+	row := padBetween(left, pill+"   ", m.width)
+	return row
+}
+
+// chatStripPill wraps body in `[ … ]` brackets and applies a phase-
+// appropriate accent. Brackets are always dim so the body is the
+// emphasised part of the pill.
+func chatStripPill(m *chatModel, body string) string {
+	br := styleDim("[ ")
+	cl := styleDim(" ]")
+	switch {
+	case m.err != "":
+		return br + styleAlert(body) + cl
+	case m.phase == ChatPhaseStuck:
+		return br + styleAlert(body) + cl
+	case m.phase == ChatPhaseRun:
+		return br + styleInfo(body) + cl
+	case m.phase == ChatPhaseDone:
+		return br + styleSuccess(body) + cl
+	default:
+		return br + styleSurface(body) + cl
 	}
-	left := strings.Repeat(" ", 6)
-	row := padBetween(left, right, m.width)
-	return lipgloss.JoinVertical(lipgloss.Left, rule, row)
 }
 
 // chatStatusBody composes the phase-aware right-side strip text.
 // Pure — testable without rendering. Errors win over phase so the
-// user always sees the most urgent state on top.
+// user always sees the most urgent state on top. The leading
+// `<phase>  ·` form was redundant once chatStripPill wraps the result —
+// the brackets and accent already tell the user "this is the phase
+// pill," so we strip the phase-name redundancy in the body and lead
+// with the human reading directly.
 func chatStatusBody(m *chatModel, dot string) string {
 	if m.err != "" {
-		return "error: " + m.err
+		return "error  " + dot + "  " + m.err
 	}
 	switch m.phase {
 	case ChatPhaseIdle:
-		return fmt.Sprintf("%s  %s  agent ready", string(m.phase), dot)
+		return "idle  " + dot + "  ready"
 	case ChatPhaseInterview:
-		return fmt.Sprintf("%s  %s  gathering context", string(m.phase), dot)
+		return "interview  " + dot + "  gathering context"
 	case ChatPhaseAwaitingConfirm:
-		return fmt.Sprintf("%s  %s  ready to freeze", string(m.phase), dot)
+		return "interview  " + dot + "  ready to freeze"
 	case ChatPhaseRun:
 		if m.runIter > 0 || m.runCost > 0 {
-			return fmt.Sprintf("%s  %s  iter %d  %s  $%.4f",
-				string(m.phase), dot, m.runIter, dot, m.runCost)
+			return fmt.Sprintf("run  %s  iter %d  %s  $%.4f",
+				dot, m.runIter, dot, m.runCost)
 		}
-		return fmt.Sprintf("%s  %s  agent working", string(m.phase), dot)
+		return "run  " + dot + "  agent working"
 	case ChatPhaseStuck:
 		if m.stuckPattern != "" {
-			return fmt.Sprintf("%s  %s  %s",
-				string(m.phase), dot, humanChatStuckPattern(m.stuckPattern))
+			return "stuck  " + dot + "  " + humanChatStuckPattern(m.stuckPattern)
 		}
-		return fmt.Sprintf("%s  %s  recovery in progress", string(m.phase), dot)
+		return "stuck  " + dot + "  recovery in progress"
 	case ChatPhaseDone:
 		if m.runIter > 0 {
-			return fmt.Sprintf("%s  %s  %d iters  %s  $%.4f",
-				string(m.phase), dot, m.runIter, dot, m.runCost)
+			return fmt.Sprintf("done  %s  %d iters  %s  $%.4f",
+				dot, m.runIter, dot, m.runCost)
 		}
-		return fmt.Sprintf("%s  %s  finished", string(m.phase), dot)
+		return "done  " + dot + "  finished"
 	}
 	return string(m.phase)
 }

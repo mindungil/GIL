@@ -1,17 +1,15 @@
-╭──────────────────────────────────────────────────────────────────────────────────────────────────╮
-│ ▏  G  I  L                                               /snap/cwd   claude-opus-4-7  ·  <version> │
-╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
-                                                                                                    
-      no past sessions  — describe what you want to build below                                     
+   ▏  G  I  L      ────                                      /snap/cwd   claude-opus-4-7  ·  <version>
                                                                                                     
                                                                                                     
+   ╴╴  no past sessions                                                                             
                                                                                                     
+         describe a task to begin                                                                   
                                                                                                     
+   ╴╴  examples                                                                                     
                                                                                                     
-                                                                                                    
-                                                                                                    
-                                                                                                    
-                                                                                                    
+         · "refactor my auth middleware for the new oidc spec"                                      
+         · "build a CLI that scans go files for TODO comments"                                      
+         · "port the Python date-parser to TypeScript"                                              
                                                                                                     
                                                                                                     
                                                                                                     
@@ -22,11 +20,13 @@
                                                                                                     
                                                                                                     
                                                                                                     
-────────────────────────────────────────────────────────────────────────────────────────────────────
-                                                                                idle  ·  agent ready
-╔══════════════════════════════════════════════════════════════════════════════════════════════════╗
-║                                                                                                  ║
-║  ›                                                                                               ║
-║                                                                                                  ║
-╚══════════════════════════════════════════════════════════════════════════════════════════════════╝
-      describe a task, resume by slug, or ask what's running       <version>  ·  ↑↓ history  /  / cmds
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                               [ idle  ·  ready ]   
+   ╭────────────────────────────────────────────────────────────────────────────────────────────╮   
+   │ ›                                                                                          │   
+   ╰────────────────────────────────────────────────────────────────────────────────────────────╯   
+      describe a task, resume by slug, or ask what's running    <version>  ·  ↑↓ history  /  / cmds   
