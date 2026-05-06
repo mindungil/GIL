@@ -2,11 +2,14 @@ package app
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/mindungil/gil/core/intent"
+	"github.com/mindungil/gil/core/paths"
+	"github.com/mindungil/gil/core/workspace"
 	"github.com/mindungil/gil/sdk"
 )
 
@@ -68,6 +71,24 @@ type chatModel struct {
 	firstTurnDone bool
 
 	err string
+
+	// pendingPrompt holds the user's first prompt while we wait for
+	// the daemon to allocate a session. The first time the user
+	// submits text without an active session, the chat fires
+	// newSessionCmd and stashes the prompt here; when chatNewSessionMsg
+	// arrives with an ID, the prompt is dispatched via
+	// startInterviewCmd. Without this, first-turn prompts errored out
+	// with "no active session" — the chat surface required a
+	// preallocated session it never asked for.
+	pendingPrompt string
+
+	// providerLabel / modelLabel describe the LLM that backs this chat.
+	// Resolved from the layered workspace config at construction time
+	// so the header doesn't lie ("claude-opus-4-7" was hardcoded
+	// previously, regardless of what the user actually configured).
+	// Empty values fall through to a generic "model" placeholder.
+	providerLabel string
+	modelLabel    string
 
 	// router classifies natural-language prompts into verb dispatches
 	// per design.md §2.6(b). When nil the model forwards every prompt
@@ -141,9 +162,16 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.client == nil {
 				return m, nil // test mode — no stream dispatch
 			}
+			// First-turn auto-create. Stash the prompt and ask the
+			// daemon for a session; chatNewSessionMsg will pick it up
+			// and start the interview with the original text. This
+			// mirrors the cli REPL's SendPrompt flow which auto-creates
+			// when activeSess is empty — the previous TUI behaviour
+			// errored out with "no active session" and required the
+			// user to manually `/new` first, which §2.6 forbids.
 			if m.activeID == "" {
-				m.err = "no active session — daemon must allocate one before chat"
-				return m, nil
+				m.pendingPrompt = text
+				return m, newSessionCmd(m.client)
 			}
 			// Cancel any in-flight stream from a previous turn so the
 			// new submit takes priority.
@@ -265,10 +293,18 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case chatNewSessionMsg:
 		if msg.err != "" {
 			m.transcript = append(m.transcript, "   !  new: "+msg.err)
+			m.pendingPrompt = "" // drop, user will retry
 			return m, nil
 		}
 		m.activeID = msg.session.ID
 		m.sessions = append([]*sdk.Session{msg.session}, m.sessions...)
+		// If the user submitted a prompt that triggered this auto-
+		// create, dispatch it now without forcing a second keystroke.
+		if m.pendingPrompt != "" {
+			prompt := m.pendingPrompt
+			m.pendingPrompt = ""
+			return m, startInterviewCmd(m.client, m.activeID, prompt)
+		}
 		m.transcript = append(m.transcript,
 			"   ‹  created "+shortChatID(msg.session.ID)+" — describe the task to begin")
 		return m, nil
@@ -368,12 +404,31 @@ func toIntentRefs(in []*sdk.Session) []intent.SessionRef {
 // newChatModel constructs a chatModel ready for tea.NewProgram.
 // socket is dialed lazily by the stream layer (Task 8).
 func newChatModel(socket string) *chatModel {
+	prov, model := resolveDisplayLabels()
 	return &chatModel{
-		socket: socket,
-		phase:  ChatPhaseIdle,
-		input:  newChatInput(),
-		router: intent.NewRouter(),
+		socket:        socket,
+		phase:         ChatPhaseIdle,
+		input:         newChatInput(),
+		router:        intent.NewRouter(),
+		providerLabel: prov,
+		modelLabel:    model,
 	}
+}
+
+// resolveDisplayLabels reads the layered workspace config (global +
+// project) and returns (provider, model) suitable for the chat
+// header. Best-effort — any error returns ("", "") and the header
+// falls back to a generic placeholder. Project-local config wins
+// over global; defaults supplied by workspace.Defaults are used when
+// neither layer sets a value.
+func resolveDisplayLabels() (string, string) {
+	layout, err := paths.FromEnv()
+	if err != nil {
+		return "", ""
+	}
+	cwd, _ := os.Getwd()
+	cfg, _ := workspace.Resolve(layout.ConfigFile(), workspace.LocalConfigFile(cwd))
+	return cfg.Provider, cfg.Model
 }
 
 // NewChatModelForRun is the public constructor used by tui/run.Chat.

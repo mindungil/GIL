@@ -1,4 +1,4 @@
-   ▏  G  I  L      ────                                      /snap/cwd   claude-opus-4-7  ·  <version>
+   ▏  G  I  L      ────                                          /snap/cwd   qwen3.6-27b  ·  <version>
                                                                                                     
                                                                                                     
    ╴╴  no past sessions                                                                             

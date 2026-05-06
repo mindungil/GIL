@@ -77,7 +77,19 @@ func (m *chatModel) renderChatHeader() string {
 	g := Glyphs()
 	left := "   " + styleDim(g.QuoteBar) + "  " + styleHeader("G  I  L")
 	rule := "      " + styleDim(strings.Repeat(g.HSep, 4)) + "      "
-	right := styleDim(cwd) + "   " + styleMeta("claude-opus-4-7  ·  "+version.String())
+	// Model label comes from the layered workspace config, not a
+	// hardcoded "claude-opus-4-7" string. Empty fields fall back to
+	// "model" so the header always has something — but the previous
+	// behaviour of LYING about the active model is gone.
+	modelLabel := m.modelLabel
+	if modelLabel == "" {
+		if m.providerLabel != "" {
+			modelLabel = m.providerLabel
+		} else {
+			modelLabel = "model"
+		}
+	}
+	right := styleDim(cwd) + "   " + styleMeta(modelLabel+"  ·  "+version.String())
 
 	leftAndRule := left + rule
 	leftAndRule, right = fitTwoColumn(leftAndRule, right, m.width-3)

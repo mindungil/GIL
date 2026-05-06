@@ -1,4 +1,4 @@
-   ▏  G  I  L      ────                                      /snap/cwd   claude-opus-4-7  ·  <version>
+   ▏  G  I  L      ────                                          /snap/cwd   qwen3.6-27b  ·  <version>
   ▏ ›  build me a CLI that scans go files for TODO comments                                         
   ▏ ‹  Sure. I'll start by mapping the repo and then build a single-file scanner.                   
   ▏    ‹  agent run started                                                                         
