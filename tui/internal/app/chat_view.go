@@ -221,8 +221,18 @@ func chatStatusBody(m *chatModel, dot string) string {
 		return "interview  " + dot + "  ready to freeze"
 	case ChatPhaseRun:
 		if m.runIter > 0 || m.runCost > 0 {
-			return fmt.Sprintf("run  %s  iter %d  %s  $%.4f",
+			body := fmt.Sprintf("run  %s  iter %d  %s  $%.4f",
 				dot, m.runIter, dot, m.runCost)
+			// Tokens / latency only show when the daemon has emitted
+			// them — otherwise the pill stays at 3 cells. Tokens
+			// compact to k at 1000+, latency to s at 1000ms+.
+			if m.runTokens > 0 {
+				body += "  " + dot + "  " + formatChatTokens(m.runTokens) + " toks"
+			}
+			if m.runLatencyMs > 0 {
+				body += "  " + dot + "  " + formatChatLatency(m.runLatencyMs)
+			}
+			return body
 		}
 		return "run  " + dot + "  agent working"
 	case ChatPhaseStuck:
@@ -242,6 +252,12 @@ func chatStatusBody(m *chatModel, dot string) string {
 
 // renderConversation fills the middle region. Pre-first-turn shows the
 // past-session list; after the first turn the transcript replaces it.
+//
+// Each transcript line is decorated with a dim left-rail `▏` glyph at
+// render time per terminal-aesthetic.md §2 ("Quote / log line — left
+// ▏ margin + dim"). The rail is render-only — it never appears in the
+// stored transcript strings — so coalescing logic in Update() that
+// checks `strings.HasPrefix(line, "‹")` still matches.
 func (m *chatModel) renderConversation(convH int) string {
 	if !m.firstTurnDone {
 		return m.renderPreFirstTurn(convH)
@@ -253,7 +269,12 @@ func (m *chatModel) renderConversation(convH int) string {
 	if len(m.transcript) > convH {
 		start = len(m.transcript) - convH
 	}
-	body := strings.Join(m.transcript[start:], "\n")
+	rail := styleDim(Glyphs().QuoteBar) + " "
+	decorated := make([]string, len(m.transcript[start:]))
+	for i, line := range m.transcript[start:] {
+		decorated[i] = "  " + rail + line
+	}
+	body := strings.Join(decorated, "\n")
 	lines := strings.Count(body, "\n") + 1
 	if lines < convH {
 		body += strings.Repeat("\n", convH-lines)

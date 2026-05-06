@@ -310,6 +310,18 @@ func updateChatRunTelemetry(m *chatModel, ev *gilv1.Event) {
 	if m == nil || ev == nil {
 		return
 	}
+	// Accumulate Tokens and snapshot LatencyMs from EventMetrics on
+	// every event that carries them — same shape as the cli REPL's
+	// Tracker.Apply. Lifted out of the kind switch so any future
+	// metric-bearing event flows through without an explicit case.
+	if mt := ev.GetMetrics(); mt != nil {
+		if t := mt.GetTokens(); t > 0 {
+			m.runTokens += t
+		}
+		if l := mt.GetLatencyMs(); l > 0 {
+			m.runLatencyMs = l
+		}
+	}
 	switch ev.GetType() {
 	case "run.iter":
 		var d map[string]any
@@ -369,6 +381,16 @@ func formatChatTokens(n int64) string {
 		return fmt.Sprintf("%d", n)
 	}
 	return fmt.Sprintf("%.1fk", float64(n)/1000)
+}
+
+// formatChatLatency renders the most recent provider RTT as a
+// compact label. Sub-second uses ms; 1s+ collapses to "X.Ys" so the
+// pill stays narrow when the model is slow.
+func formatChatLatency(ms int64) string {
+	if ms < 1000 {
+		return fmt.Sprintf("%dms", ms)
+	}
+	return fmt.Sprintf("%.1fs", float64(ms)/1000)
 }
 
 // formatChatRetryWait turns wait-ms into a compact label for the

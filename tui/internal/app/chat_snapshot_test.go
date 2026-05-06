@@ -111,6 +111,61 @@ func TestChatView_AsciiSnapshot(t *testing.T) {
 	}
 }
 
+// TestChatView_RunPhaseSnapshot pins the look of the chat surface
+// mid-run so future aesthetic changes have to consciously rebase the
+// transcript treatment (left rail, glyph prefixes, status pill colour).
+func TestChatView_RunPhaseSnapshot(t *testing.T) {
+	prevNoColor := IsNoColor()
+	prevAscii := IsAsciiMode()
+	prevCwd := chatCwd
+	SetNoColor(true)
+	SetAsciiMode(false)
+	chatCwd = func() string { return "/snap/cwd" }
+	defer SetNoColor(prevNoColor)
+	defer SetAsciiMode(prevAscii)
+	defer func() { chatCwd = prevCwd }()
+
+	m := newChatModel("/tmp/test.sock")
+	m.width = 100
+	m.height = 32
+	m.phase = ChatPhaseRun
+	m.firstTurnDone = true
+	m.runIter = 4
+	m.runCost = 0.1834
+	m.runTokens = 4231
+	m.runLatencyMs = 1240
+	m.transcript = []string{
+		"›  build me a CLI that scans go files for TODO comments",
+		"‹  Sure. I'll start by mapping the repo and then build a single-file scanner.",
+		"   ‹  agent run started",
+		"   ‹  iter 1 · $0.0042",
+		"   ‹  ⚒ Read  main.go",
+		"   ‹  ⚒ Read → ok",
+		"‹  Reading main.go. Found 12 functions, no TODO scanner yet.",
+		"   ‹  iter 2 · $0.0411",
+		"   ‹  ⚒ Edit  main.go",
+		"   ‹  ⚒ Edit → ok",
+		"   ‹  iter 3 · $0.1102",
+		"   ‹  ⚒ Bash  go test ./...",
+		"   ‹  ⚒ Bash → ok",
+	}
+
+	got := stripDynamic(m.View())
+	path := filepath.Join("testdata", "chat_run_100x32.txt")
+
+	if os.Getenv("UPDATE_SNAPSHOTS") == "1" {
+		_ = os.WriteFile(path, []byte(got), 0o644)
+		return
+	}
+	want, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("missing snapshot %s — run UPDATE_SNAPSHOTS=1", path)
+	}
+	if got != string(want) {
+		t.Errorf("run-phase snapshot mismatch:\n--- want ---\n%s\n--- got ---\n%s", string(want), got)
+	}
+}
+
 func TestChatView_ColorSnapshot(t *testing.T) {
 	// Inverse of the NO_COLOR snapshot — verifies magenta SGR is
 	// emitted on the prompt panel border when colors are on.

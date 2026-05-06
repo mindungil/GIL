@@ -59,6 +59,8 @@ type chatModel struct {
 	// reflects what the agent is actually doing.
 	runIter      int64
 	runCost      float64
+	runTokens    int64 // accumulated total — sum of EventMetrics.Tokens
+	runLatencyMs int64 // most-recent provider call wall time (snapshot)
 	stuckPattern string // last detected pattern; cleared on recovered
 
 	// firstTurnDone flips true the moment the user submits the first
