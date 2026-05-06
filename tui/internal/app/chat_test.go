@@ -271,15 +271,20 @@ func TestChatUpdate_TooVague_AppendsClarification(t *testing.T) {
 	m.input.ta.SetValue("hi")
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	cm := updated.(*chatModel)
-	var foundQ bool
+	var foundNote bool
 	for _, line := range cm.transcript {
-		if strings.Contains(line, "?") && strings.Contains(line, "tell me what you want") {
-			foundQ = true
+		// `gil →` prefix replaced the previous `?` glyph so users
+		// don't read the deflect as a model response. Body still
+		// includes substantive guidance (mention of "task" /
+		// "greetings").
+		if strings.Contains(line, "gil →") &&
+			(strings.Contains(line, "task") || strings.Contains(line, "greetings")) {
+			foundNote = true
 			break
 		}
 	}
-	if !foundQ {
-		t.Fatalf("expected too-vague clarification in transcript, got %v", cm.transcript)
+	if !foundNote {
+		t.Fatalf("expected too-vague router note in transcript, got %v", cm.transcript)
 	}
 }
 

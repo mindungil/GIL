@@ -133,8 +133,9 @@ func (r *Router) Classify(_ context.Context, prompt string, ctx SessionContext) 
 	//    consume.
 	if ctx.ActiveSessionID == "" && isTooVague(trimmed) {
 		return Classification{
-			Kind:          KindTooVague,
-			Clarification: "tell me what you want to build (a feature, a fix, a refactor) — short is fine, but 'hi' or 'asdf' won't start a useful session",
+			Kind: KindTooVague,
+			Clarification: "I work better with task descriptions than greetings — try " +
+				`"add X to Y", "fix the bug in Z", or ask me a question (e.g. "what model are you?").`,
 		}
 	}
 	return Classification{Kind: KindForward}
@@ -145,19 +146,50 @@ func (r *Router) Classify(_ context.Context, prompt string, ctx SessionContext) 
 // path-like tokens. Used by isTooVague to gate session creation.
 var taskSignalRE = regexp.MustCompile(`(?i)\b(add|fix|build|write|create|make|implement|refactor|update|migrate|test|deploy|debug|remove|delete|rename|move|extract|inline|setup|set\s*up|install|configure|wire|connect|hook|generate|stub|port|swap|replace)\b|\.(go|py|js|jsx|ts|tsx|rs|java|cpp|c|h|hpp|sh|md|yaml|yml|json|toml|sql|html|css|proto|rb|php|swift|kt|scala|clj|lua)\b|\/[\S]+`)
 
-// isTooVague returns true when the input is too short OR has no
-// recognizable task signal — a deliberate floor below which we don't
-// commit to creating a session. Korean greetings (안녕, ㅎㅇ) and
-// English greetings (hi, hello) get caught by the length floor; one-
-// word non-verbs ("ok", "thanks") get caught by the missing-signal
-// check.
+// interrogativeRE matches question markers in English and Korean. A
+// prompt that includes one is treated as a meta-question worth
+// forwarding to the daemon (the model can answer "what model are
+// you?" without needing a task signal). Includes English wh-words
+// and Korean interrogatives (뭐/무슨/어떤/어떻게/왜/누가/언제/어디/어떡).
+var interrogativeRE = regexp.MustCompile(`(?i)(\?|？|\b(what|which|who|when|where|why|how|whose|whom)\b|뭐|뭔|무슨|무엇|어떤|어디|언제|누가|누구|왜|어떻게|어떡|어쩌)`)
+
+// isTooVague returns true when the input is too short AND has no
+// recognizable task signal AND is not a meta-question — a deliberate
+// floor below which we don't commit to creating a session. The
+// thresholds differ between scripts:
+//
+//   - Latin scripts: 12 runes (≈ 12 ASCII characters)
+//   - Non-Latin scripts (Korean, Japanese, Chinese): 5 runes — these
+//     are information-dense, "테스트 추가해줘" is 8 runes but a clear
+//     task; the original 12-rune floor swallowed substantive Korean
+//     prompts.
+//
+// Meta-questions ("너 무슨 모델임?", "what model are you?") forward
+// regardless of length so users can ask gil about itself without
+// hitting the deflect.
 func isTooVague(msg string) bool {
+	if interrogativeRE.MatchString(msg) {
+		return false
+	}
+	if taskSignalRE.MatchString(msg) {
+		return false
+	}
 	r := []rune(msg)
-	if len(r) < 12 {
-		// Short inputs need a task signal to count.
-		// "fix bug" (7 chars, has "fix") → not vague.
-		// "안녕" (2 chars, no verb) → vague.
-		return !taskSignalRE.MatchString(msg)
+	floor := 12
+	if hasNonLatin(r) {
+		floor = 5
+	}
+	return len(r) < floor
+}
+
+// hasNonLatin reports whether any rune is outside the basic Latin /
+// Latin-1 / Latin-Extended blocks. Used to relax the length floor for
+// CJK and other non-Latin scripts which carry more meaning per rune.
+func hasNonLatin(r []rune) bool {
+	for _, c := range r {
+		if c > 0x024F {
+			return true
+		}
 	}
 	return false
 }

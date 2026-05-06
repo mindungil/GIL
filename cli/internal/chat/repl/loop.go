@@ -162,10 +162,14 @@ func Run(ctx context.Context, cfg Config) error {
 					}
 					continue
 				case intent.KindAmbiguous:
-					cfg.Renderer.SystemNote(render.NoteSystem, "?  "+cl.Clarification)
+					// `gil →` prefix makes this read as a router
+					// note, not as the model asking back. The
+					// previous `?` glyph alone confused users into
+					// thinking the AI hadn't responded.
+					cfg.Renderer.SystemNote(render.NoteSystem, "gil → "+cl.Clarification)
 					continue
 				case intent.KindTooVague:
-					cfg.Renderer.SystemNote(render.NoteSystem, "?  "+cl.Clarification)
+					cfg.Renderer.SystemNote(render.NoteSystem, "gil → "+cl.Clarification)
 					continue
 				case intent.KindForward:
 					// fall through to SendPrompt below

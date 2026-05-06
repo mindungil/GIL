@@ -128,10 +128,16 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				case intent.KindVerb:
 					return m, m.dispatchVerb(cl)
 				case intent.KindAmbiguous:
-					m.transcript = append(m.transcript, "   ?  "+cl.Clarification)
+					// styleMeta (dim italic) + a `gil →` prefix marks
+					// this as a router note, not a model response.
+					// The previous `?` glyph alone read like the AI
+					// was asking back, especially with greetings.
+					m.transcript = append(m.transcript,
+						"   "+styleMeta("gil → "+cl.Clarification))
 					return m, nil
 				case intent.KindTooVague:
-					m.transcript = append(m.transcript, "   ?  "+cl.Clarification)
+					m.transcript = append(m.transcript,
+						"   "+styleMeta("gil → "+cl.Clarification))
 					return m, nil
 				case intent.KindForward:
 					// fall through to the daemon dispatch below

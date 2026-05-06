@@ -233,6 +233,59 @@ func TestRouter_TooVague_NoActiveSession(t *testing.T) {
 	}
 }
 
+func TestRouter_QuestionsForwardEvenWhenShort(t *testing.T) {
+	// Meta-questions (questions about gil itself) must forward to the
+	// daemon — the model can answer them. Previously these were
+	// caught by the rune-count floor and got the canned deflect,
+	// reading like "the AI didn't respond".
+	r := NewRouter()
+	cases := []string{
+		"너 무슨 모델임",
+		"너 무슨 모델임?",
+		"what model are you?",
+		"who are you",
+		"어떻게 동작해",
+		"왜 안 돼",
+	}
+	for _, in := range cases {
+		got := r.Classify(context.Background(), in, SessionContext{})
+		if got.Kind == KindTooVague {
+			t.Errorf("Classify(%q) should forward (interrogative), got too-vague", in)
+		}
+	}
+}
+
+func TestRouter_KoreanThresholdRelaxed(t *testing.T) {
+	// Korean is information-dense; the original 12-rune floor
+	// swallowed substantive Korean prompts. Non-Latin scripts get a
+	// 5-rune floor so "테스트 추가해줘" (8 runes, has 추가/add via the
+	// task signal regex) and "버그 잡아줘" (6 runes) forward.
+	r := NewRouter()
+	forwarded := []string{
+		"버그 잡아줘 main.go에서",      // file extension signals task
+		"리팩터링 도와줘 auth 모듈을",   // 16 runes total > 5 floor
+		"하나 새로 만들어줘",          // 10 runes > 5 floor
+	}
+	for _, in := range forwarded {
+		got := r.Classify(context.Background(), in, SessionContext{})
+		if got.Kind == KindTooVague {
+			t.Errorf("Classify(%q) Korean prompt should forward, got too-vague", in)
+		}
+	}
+	// Pure greetings still deflect (length below 5 OR no signal).
+	deflected := []string{
+		"안녕",      // 2 runes
+		"ㅎㅇ",      // 2 runes
+		"하이",      // 2 runes
+	}
+	for _, in := range deflected {
+		got := r.Classify(context.Background(), in, SessionContext{})
+		if got.Kind != KindTooVague {
+			t.Errorf("Classify(%q) bare Korean greeting should still deflect, got kind=%d", in, got.Kind)
+		}
+	}
+}
+
 func TestRouter_TooVague_DoesNotFireDuringActiveSession(t *testing.T) {
 	r := NewRouter()
 	// During an active session a one-word reply ("yes", "postgres") is
