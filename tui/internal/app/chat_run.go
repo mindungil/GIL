@@ -124,7 +124,7 @@ func formatChatRunEvent(ev *gilv1.Event) (phase ChatPhase, lines []string, keepD
 				msg += " (" + detail + ")"
 			}
 		}
-		msg += ". recovery in progress; if it persists, `gil stop <id>` from another shell"
+		msg += ". recovery in progress — no in-chat stop verb yet (V1.1)"
 		return ChatPhaseStuck, []string{"   !  " + msg}, true
 	case "stuck_recovered":
 		var d map[string]any

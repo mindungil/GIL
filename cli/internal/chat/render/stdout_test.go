@@ -11,6 +11,16 @@ import (
 func newStdoutForTest(t *testing.T) (*StdoutChatRenderer, *bytes.Buffer) {
 	t.Helper()
 	var buf bytes.Buffer
+	// Default helper renders unicode glyphs so the canonical strip
+	// shape ("· " separators, "✓"/"✗" check marks) is what tests pin.
+	// ASCII-mode collapse is exercised by dedicated tests below.
+	r := NewStdoutChatRenderer(&buf, nil, false /*ascii*/, true /*noColor*/)
+	return r, &buf
+}
+
+func newStdoutAsciiForTest(t *testing.T) (*StdoutChatRenderer, *bytes.Buffer) {
+	t.Helper()
+	var buf bytes.Buffer
 	r := NewStdoutChatRenderer(&buf, nil, true /*ascii*/, true /*noColor*/)
 	return r, &buf
 }
@@ -101,8 +111,27 @@ func TestStdout_StatusStrip_Done(t *testing.T) {
 		Phase: PhaseDone, Iter: 87, CostUSD: 2.34,
 		ChecksPassed: 4, ChecksTotal: 4,
 	})
-	// ASCII mode (newStdoutForTest passes ascii=true): ✓ → OK, ✗ → FAIL.
-	require.Equal(t, "[done · 87 iters · $2.34 · OK 4/4 checks · /diff /merge]\n", buf.String())
+	// Unicode mode: ✓ for pass, ✗ for fail.
+	require.Equal(t, "[done · 87 iters · $2.34 · ✓ 4/4 checks · /diff /merge]\n", buf.String())
+}
+
+func TestStdout_StatusStrip_AsciiCollapsesMiddleDot(t *testing.T) {
+	// --ascii mode must substitute ` · ` for ` | ` in the strip body
+	// so terminals without UTF-8 don't render the middle-dot as
+	// mojibake. Done-strip's check mark also flips ✓/✗ → OK/FAIL.
+	r, buf := newStdoutAsciiForTest(t)
+	r.StatusStrip(SessionState{
+		Phase: PhaseRun, Iter: 4, MaxIter: 50,
+		CostUSD: 0.18, Autonomy: "FULL_AUTO",
+	})
+	require.Equal(t, "[run | iter 4/50 | $0.18 | FULL_AUTO]\n", buf.String())
+
+	buf.Reset()
+	r.StatusStrip(SessionState{
+		Phase: PhaseDone, Iter: 87, CostUSD: 2.34,
+		ChecksPassed: 4, ChecksTotal: 4,
+	})
+	require.Equal(t, "[done | 87 iters | $2.34 | OK 4/4 checks | /diff /merge]\n", buf.String())
 }
 
 // Pluralization: "0 adv finding" should not show, "2 adv findings".
@@ -129,7 +158,7 @@ func TestStdout_StatusStrip_DoneWithFailures(t *testing.T) {
 		Phase: PhaseDone, Iter: 50, CostUSD: 1.10,
 		ChecksPassed: 2, ChecksTotal: 4,
 	})
-	require.Equal(t, "[done · 50 iters · $1.10 · FAIL 2/4 checks · /diff /merge]\n", buf.String())
+	require.Equal(t, "[done · 50 iters · $1.10 · ✗ 2/4 checks · /diff /merge]\n", buf.String())
 }
 
 // Silence "imported and not used" if strings isn't referenced yet

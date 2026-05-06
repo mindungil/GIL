@@ -50,6 +50,18 @@ func statusCmd() *cobra.Command {
 	c := &cobra.Command{
 		Use:   "status",
 		Short: "List sessions",
+		// Reject positional args with a redirect, not cobra's default
+		// "accepts 0 arg(s), received 1" — the previous behaviour was
+		// to silently ignore `gil status <id>`, matching neither what
+		// users wanted nor what cobra's stock error suggested.
+		Args: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 0 {
+				return nil
+			}
+			return cliutil.New(
+				fmt.Sprintf("status takes no positional args (got %q)", args[0]),
+				`use "gil session show <id>" for one session, or "gil status" for the list`)
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if limit <= 0 {
 				return cliutil.New(

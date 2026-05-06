@@ -442,10 +442,22 @@ func newServer(dbPath, sockPath, sessionsBase, authFile string, authMW *auth.Mid
 					},
 				}), "mock-model", nil
 			default:
-				// Text-only Mock for InterviewService scenarios
-				return provider.NewMock([]string{
+				// Text-only Mock for InterviewService scenarios. Uses
+				// the cycling variant so an open-ended chat session
+				// (`gil chat --provider mock`) doesn't crash on turn 3 —
+				// the previous 2-entry list exhausted the moment the
+				// user typed a reply, making mock unusable for dogfood.
+				// The list still leads with the sensing-engine domain
+				// JSON, then rotates clarifying questions and a confirm.
+				return provider.NewMockLoop([]string{
 					`{"domain":"unknown","domain_confidence":0.5,"tech_hints":[],"scale_hint":"unknown","ambiguity":"none"}`,
 					"What's your project goal?",
+					"Got it. What success looks like to you for this run?",
+					"Are there constraints (language, framework, deadlines) I should respect?",
+					"Any files or modules I should focus on first?",
+					"Should the agent stop and ask before destructive actions?",
+					"Tell me one example output you'd accept as 'done'.",
+					"Anything else I should know before we kick off?",
 				}), "mock-model", nil
 			}
 		case "anthropic", "":

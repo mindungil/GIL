@@ -66,7 +66,22 @@ func (r *StdoutChatRenderer) StatusStrip(s SessionState) {
 	default:
 		body = string(s.Phase)
 	}
+	// --ascii: collapse the `·` middle-dot separator into a 7-bit
+	// alternative so terminals without UTF-8 don't render mojibake
+	// (the previous behaviour). Format strings keep `·` for readability
+	// of the source — the substitution happens once per strip render.
+	if r.ascii {
+		body = stripMiddleDot(body)
+	}
 	fmt.Fprintf(r.out, "[%s]\n", body)
+}
+
+// stripMiddleDot replaces ` · ` (space + middle-dot + space) with ` | `
+// (space + pipe + space). The flanking spaces preserve column rhythm
+// so an ASCII-mode strip lines up with the unicode version, just with
+// a different separator glyph.
+func stripMiddleDot(s string) string {
+	return strings.ReplaceAll(s, " · ", " | ")
 }
 
 func formatInterviewStrip(s SessionState) string {

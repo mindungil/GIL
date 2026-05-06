@@ -120,7 +120,7 @@ func Run(ctx context.Context, cfg Config) error {
 		case InputPrompt:
 			if tr.State().Phase == render.PhaseRun || tr.State().Phase == render.PhaseStuck {
 				cfg.Renderer.SystemNote(render.NoteV11,
-					"run-time prompts are V1.1; for now wait for done, or `gil stop <id>` from another shell")
+					"run-time prompts are V1.1 — wait for done; there is no in-chat stop verb yet")
 				continue
 			}
 			// §2.6(b): natural-language verb routing. Slash-prefixed
@@ -263,7 +263,7 @@ func emitDeltaNotes(r render.Renderer, prev, cur render.SessionState, ev Tracker
 				msg += " (" + ev.StuckDetail + ")"
 			}
 		}
-		msg += ". recovery in progress; if it persists, `gil stop <id>` from another shell"
+		msg += ". recovery in progress — no in-chat stop verb yet (V1.1)"
 		r.SystemNote(render.NoteSystem, msg)
 	case "run.recovered":
 		msg := "recovered — agent unblocked"
