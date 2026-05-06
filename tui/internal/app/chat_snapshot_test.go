@@ -111,6 +111,71 @@ func TestChatView_AsciiSnapshot(t *testing.T) {
 	}
 }
 
+// TestRenderAgentMarkdown_PassesThroughPlainText verifies the
+// markdown renderer leaves prose alone when no markdown markers are
+// present. We only want to pay glamour's layout cost when there's
+// real structure to style.
+func TestRenderAgentMarkdown_PassesThroughPlainText(t *testing.T) {
+	prevNoColor := IsNoColor()
+	SetNoColor(false)
+	defer SetNoColor(prevNoColor)
+
+	body := "Sure, I can help with that. Let me start by reading the file."
+	if got := renderAgentMarkdown(body); got != body {
+		t.Errorf("plain text should pass through unchanged.\nwant: %q\n got: %q", body, got)
+	}
+}
+
+// TestRenderAgentMarkdown_RendersFencedCode verifies fenced code
+// blocks survive glamour rendering and produce multi-line output.
+// We don't pin the exact ANSI bytes — chroma styles drift with
+// glamour upgrades — but we do check that the rendered output is
+// (a) different from the source and (b) contains the code's literal
+// payload somewhere inside.
+func TestRenderAgentMarkdown_RendersFencedCode(t *testing.T) {
+	prevNoColor := IsNoColor()
+	prevAscii := IsAsciiMode()
+	SetNoColor(false)
+	SetAsciiMode(false)
+	defer SetNoColor(prevNoColor)
+	defer SetAsciiMode(prevAscii)
+
+	body := "Here's the function:\n\n```go\nfunc main() {\n    fmt.Println(\"hi\")\n}\n```"
+	got := renderAgentMarkdown(body)
+	if got == body {
+		t.Fatalf("expected glamour-rendered output, got verbatim source")
+	}
+	// chroma splits keywords + identifiers into separate ANSI runs
+	// (`func` ... `main` ... `()`), so a literal substring assertion
+	// on "func main()" fails. Check that the keyword and identifier
+	// each appear somewhere in the rendered output instead.
+	for _, token := range []string{"func", "main", "fmt", "Println"} {
+		if !strings.Contains(got, token) {
+			t.Errorf("rendered output missing code token %q: %q", token, got)
+		}
+	}
+	// At minimum the rendered output should be visibly different
+	// from the source — non-trivial ANSI volume confirms styling
+	// happened.
+	if !strings.Contains(got, "\x1b[") {
+		t.Errorf("rendered code block should contain ANSI escapes; got %q", got)
+	}
+}
+
+// TestRenderAgentMarkdown_NoColorNoOps confirms NO_COLOR users see
+// raw text, not glamour-rendered ANSI. NO_COLOR's contract is "no
+// styling," so even the inline-code highlight should be absent.
+func TestRenderAgentMarkdown_NoColorNoOps(t *testing.T) {
+	prevNoColor := IsNoColor()
+	SetNoColor(true)
+	defer SetNoColor(prevNoColor)
+
+	body := "Use `gil status` to list sessions."
+	if got := renderAgentMarkdown(body); got != body {
+		t.Errorf("NO_COLOR should bypass glamour\nwant: %q\n got: %q", body, got)
+	}
+}
+
 // TestChatView_MultilineInput pins the prompt panel's vertical
 // growth as the user composes a multi-line buffer. The textarea
 // reports LineCount → chatInputState.rowCount() → renderPromptPanel

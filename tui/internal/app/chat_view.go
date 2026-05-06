@@ -321,9 +321,16 @@ func (m *chatModel) renderConversation(convH int) string {
 		start = len(m.transcript) - convH
 	}
 	rail := styleDim(Glyphs().QuoteBar) + " "
-	decorated := make([]string, len(m.transcript[start:]))
-	for i, line := range m.transcript[start:] {
-		decorated[i] = "  " + rail + line
+	// Each transcript entry may itself contain newlines — multi-line
+	// agent responses, rendered code blocks (after glamour), pasted
+	// stack traces, etc. Decorate every display row with the rail so
+	// the column rhythm holds, not just the first line of each entry.
+	var decorated []string
+	for _, entry := range m.transcript[start:] {
+		body := renderTranscriptEntry(entry)
+		for _, line := range strings.Split(body, "\n") {
+			decorated = append(decorated, "  "+rail+line)
+		}
 	}
 	body := strings.Join(decorated, "\n")
 	lines := strings.Count(body, "\n") + 1
@@ -331,6 +338,42 @@ func (m *chatModel) renderConversation(convH int) string {
 		body += strings.Repeat("\n", convH-lines)
 	}
 	return body
+}
+
+// renderTranscriptEntry pre-processes a single transcript entry
+// before it's wrapped with the rail at view time. Agent lines
+// (entries that start with `‹  `) flow through the markdown renderer
+// when the body looks like markdown — fenced code blocks pick up
+// chroma syntax highlighting, inline code/bold/italic read styled.
+// Other entries (user echo `›`, system events `   ‹`, errors `!`)
+// pass through verbatim.
+//
+// We keep the leading `‹  ` glyph + 2-space gutter on the FIRST
+// rendered line so the eye still sees the agent-prefix marker; the
+// rest of the rendered output (multi-line code blocks, lists)
+// inherits the rail decoration applied by the caller.
+func renderTranscriptEntry(entry string) string {
+	if !strings.HasPrefix(entry, "‹  ") {
+		return entry
+	}
+	body := entry[len("‹  "):]
+	rendered := renderAgentMarkdown(body)
+	if rendered == body {
+		return entry
+	}
+	// Re-attach the glyph prefix to the first line; subsequent lines
+	// get a 4-space gutter so multi-line markdown output (code
+	// blocks, lists) aligns under the body, not under the glyph.
+	lines := strings.Split(rendered, "\n")
+	if len(lines) == 0 {
+		return entry
+	}
+	out := make([]string, len(lines))
+	out[0] = "‹  " + lines[0]
+	for i := 1; i < len(lines); i++ {
+		out[i] = "    " + lines[i]
+	}
+	return strings.Join(out, "\n")
 }
 
 // inputEnabled reports whether the prompt panel should accept input.
