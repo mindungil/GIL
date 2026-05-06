@@ -44,6 +44,15 @@ type TrackerInput struct {
 	RetryAttempt int
 	RetryMax     int
 	RetryWaitMs  int64
+
+	// Tokens is the EventMetrics.Tokens value for this single event.
+	// Tracker.Apply sums it into SessionState.Tokens so the strip and
+	// /tokens slash see a running total, not the per-event delta.
+	Tokens int64
+	// LatencyMs is the EventMetrics.LatencyMs value — the wall time
+	// the provider took for the call this event represents. Snapshot,
+	// not accumulated; surfaces the most recent latency in the strip.
+	LatencyMs int64
 }
 
 type Tracker struct {
@@ -68,6 +77,16 @@ func (t *Tracker) Apply(in TrackerInput) {
 	}
 	if in.Autonomy != "" {
 		t.s.Autonomy = in.Autonomy
+	}
+	// Tokens accumulate; LatencyMs is a snapshot. EventMetrics carries
+	// per-event values, so we sum tokens here once instead of in every
+	// case below — keeps the kind-switch focused on phase logic and
+	// avoids missing the accumulator on a future event type.
+	if in.Tokens > 0 {
+		t.s.Tokens += in.Tokens
+	}
+	if in.LatencyMs > 0 {
+		t.s.LatencyMs = in.LatencyMs
 	}
 
 	switch in.Kind {

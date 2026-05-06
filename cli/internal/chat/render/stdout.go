@@ -58,7 +58,7 @@ func (r *StdoutChatRenderer) StatusStrip(s SessionState) {
 	case PhaseAwaitingConfirm:
 		body = "interview · ready to freeze · /run to start, prompt to keep iterating"
 	case PhaseRun:
-		body = fmt.Sprintf("run · iter %d/%d · $%.2f · %s", s.Iter, s.MaxIter, s.CostUSD, s.Autonomy)
+		body = formatRunStrip(s)
 	case PhaseStuck:
 		body = fmt.Sprintf("run · iter %d/%d · STUCK after recovery", s.Iter, s.MaxIter)
 	case PhaseDone:
@@ -80,6 +80,47 @@ func formatInterviewStrip(s SessionState) string {
 	default:
 		return fmt.Sprintf("%s · %d adv findings", base, s.AdvFindings)
 	}
+}
+
+// formatRunStrip composes the in-flight run strip. Tokens / latency
+// are appended only when the daemon has reported them so a
+// just-started run still reads "run · iter 1/N · $0.00 · ASK_DESTRUCTIVE"
+// instead of "0 toks · 0ms" placeholders.
+func formatRunStrip(s SessionState) string {
+	body := fmt.Sprintf("run · iter %d/%d · $%.2f", s.Iter, s.MaxIter, s.CostUSD)
+	if s.Tokens > 0 {
+		body += " · " + formatTokens(s.Tokens) + " toks"
+	}
+	if s.LatencyMs > 0 {
+		body += " · " + formatLatency(s.LatencyMs)
+	}
+	if s.Autonomy != "" {
+		body += " · " + s.Autonomy
+	}
+	return body
+}
+
+// formatTokens compacts a token count for the strip cell:
+//
+//	   42 → "42"
+//	  942 → "942"
+//	 4231 → "4.2k"
+//	42301 → "42.3k"
+func formatTokens(n int64) string {
+	if n < 1000 {
+		return fmt.Sprintf("%d", n)
+	}
+	return fmt.Sprintf("%.1fk", float64(n)/1000)
+}
+
+// formatLatency renders the most recent provider RTT as a compact
+// string. Sub-second uses ms; anything 1s+ collapses to "Xs" with one
+// decimal so the strip stays narrow when the model is slow.
+func formatLatency(ms int64) string {
+	if ms < 1000 {
+		return fmt.Sprintf("%dms", ms)
+	}
+	return fmt.Sprintf("%.1fs", float64(ms)/1000)
 }
 
 func formatDoneStrip(s SessionState, ascii bool) string {

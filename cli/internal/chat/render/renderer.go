@@ -40,6 +40,16 @@ type SessionState struct {
 	Autonomy     string
 	ChecksPassed int
 	ChecksTotal  int
+
+	// Tokens accumulates total tokens consumed across the run, summed
+	// from EventMetrics.Tokens on each event that carries one. Shown
+	// in the strip as "X.Yk toks" alongside CostUSD when non-zero.
+	Tokens int64
+	// LatencyMs is the most recent provider-call latency reported via
+	// EventMetrics.LatencyMs. Snapshot — overwritten by every metric-
+	// carrying event so the strip reflects the latest iteration. Zero
+	// when the daemon hasn't emitted a metric event yet.
+	LatencyMs int64
 }
 
 type DiffHunk struct {

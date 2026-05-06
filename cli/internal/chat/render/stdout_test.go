@@ -64,6 +64,31 @@ func TestStdout_StatusStrip_Run(t *testing.T) {
 	require.Equal(t, "[run · iter 23/100 · $0.61 · ASK_DESTRUCTIVE]\n", buf.String())
 }
 
+func TestStdout_StatusStrip_Run_WithTokensAndLatency(t *testing.T) {
+	r, buf := newStdoutForTest(t)
+	r.StatusStrip(SessionState{
+		Phase: PhaseRun, Iter: 4, MaxIter: 50,
+		CostUSD:   0.18,
+		Tokens:    4231,
+		LatencyMs: 1240,
+		Autonomy:  "FULL_AUTO",
+	})
+	// Tokens compact to "4.2k", latency 1240ms collapses to "1.2s".
+	// Order must be: iter · cost · toks · latency · autonomy.
+	require.Equal(t, "[run · iter 4/50 · $0.18 · 4.2k toks · 1.2s · FULL_AUTO]\n", buf.String())
+}
+
+func TestStdout_StatusStrip_Run_NoTokensOmitsCell(t *testing.T) {
+	r, buf := newStdoutForTest(t)
+	// Run with no token/latency reports yet — strip should NOT show
+	// "0 toks · 0ms" placeholders, fall back to original 4-cell layout.
+	r.StatusStrip(SessionState{
+		Phase: PhaseRun, Iter: 1, MaxIter: 100,
+		CostUSD: 0.00, Autonomy: "ASK_DESTRUCTIVE",
+	})
+	require.Equal(t, "[run · iter 1/100 · $0.00 · ASK_DESTRUCTIVE]\n", buf.String())
+}
+
 func TestStdout_StatusStrip_Stuck(t *testing.T) {
 	r, buf := newStdoutForTest(t)
 	r.StatusStrip(SessionState{Phase: PhaseStuck, Iter: 45, MaxIter: 100})

@@ -459,6 +459,14 @@ func mapRunEventToTracker(sessionID string, ev *gilv1.Event) TrackerInput {
 		return TrackerInput{}
 	}
 	in := TrackerInput{SessionID: sessionID}
+	// Pull EventMetrics.Tokens / LatencyMs once, off the kind switch,
+	// so any future event type that carries metrics flows through to
+	// the SessionState totals without an explicit case below. Tokens
+	// accumulate (sum at the tracker), LatencyMs snapshots.
+	if mt := ev.GetMetrics(); mt != nil {
+		in.Tokens = mt.GetTokens()
+		in.LatencyMs = mt.GetLatencyMs()
+	}
 	switch ev.GetType() {
 	case "run.started":
 		in.Kind = "run.started"
