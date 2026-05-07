@@ -8,6 +8,7 @@ use (
 	./runtime
 	./sdk
 	./server
+	./tests/dogfood/prompt_smoke
 	./tests/dogfood/qwen_smoke
 	./tui
 )

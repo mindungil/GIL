@@ -79,11 +79,20 @@ func (r *chatToolRegistry) lookup(name string) (chatTool, bool) {
 func (s *SessionService) buildChatToolRegistry(runSvc *RunService) *chatToolRegistry {
 	return &chatToolRegistry{
 		tools: []chatTool{
+			// Read-only meta tools (V1 baseline).
 			&toolShowDiff{rs: runSvc},
 			&toolShowSpec{sess: s, base: s.sessionsBase},
 			&toolShowStatus{sess: s},
 			&toolListSessions{repo: s.repo},
 			&toolRequestCompact{rs: runSvc},
+			// Write/exec tools — gives the agent actual coding ability.
+			// Each is scoped to the session's working_dir and capped on
+			// output / runtime; see agent_tools_write.go for the limits.
+			&toolReadFile{repo: s.repo},
+			&toolWriteFile{repo: s.repo},
+			&toolRunBash{repo: s.repo},
+			&toolGrep{repo: s.repo},
+			&toolGlob{repo: s.repo},
 		},
 	}
 }
