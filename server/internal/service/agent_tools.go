@@ -65,6 +65,29 @@ func (r *chatToolRegistry) lookup(name string) (chatTool, bool) {
 	return nil, false
 }
 
+// filterByName narrows the registry to tools whose name appears in
+// allow. Empty allow returns the registry unchanged (full toolset).
+// Unknown names in allow are silently dropped — we don't fail the
+// turn just because an agent profile referenced a tool that's no
+// longer registered. The Agent struct's Tools list is the contract;
+// this is the enforcement point.
+func (r *chatToolRegistry) filterByName(allow []string) *chatToolRegistry {
+	if len(allow) == 0 {
+		return r
+	}
+	allowSet := make(map[string]struct{}, len(allow))
+	for _, n := range allow {
+		allowSet[n] = struct{}{}
+	}
+	out := make([]chatTool, 0, len(r.tools))
+	for _, t := range r.tools {
+		if _, ok := allowSet[t.name()]; ok {
+			out = append(out, t)
+		}
+	}
+	return &chatToolRegistry{tools: out}
+}
+
 // buildChatToolRegistry assembles the V1 tool registry for a Prompt
 // call. The agent has access to:
 //   - show_diff: read the unified diff vs the latest checkpoint
@@ -93,6 +116,10 @@ func (s *SessionService) buildChatToolRegistry(runSvc *RunService) *chatToolRegi
 			&toolRunBash{repo: s.repo},
 			&toolGrep{repo: s.repo},
 			&toolGlob{repo: s.repo},
+			// High-value extras (M4) — see agent_tools_extra.go.
+			&toolEditFile{repo: s.repo},
+			&toolTodoWrite{},
+			&toolWebFetch{},
 		},
 	}
 }

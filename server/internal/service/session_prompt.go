@@ -106,10 +106,17 @@ Tools — workspace state (read-only):
 
 Tools — code I/O (scoped to the session working dir):
 - read_file: read a file's contents.
-- write_file: overwrite/create a file (atomic).
+- write_file: overwrite/create a file (atomic). Use for new files or
+  full rewrites.
+- edit_file: replace an exact text snippet in a file. Prefer this over
+  write_file for small edits to large files — it's cheaper on tokens.
 - run_bash: run a shell command (default 30s, max 60s).
 - grep: regex search across the tree (uses ripgrep when present).
 - glob: list files matching a pattern (** supported for recursion).
+- todowrite: persist a session todo list (statuses pending /
+  in_progress / completed). Use when a task has 3+ steps.
+- webfetch: GET an http(s) URL, capped at 256 KB / 15s. Use for docs,
+  issue links, public web content.
 
 Workflow guidance:
 - For a coding task: explore (glob/grep/read_file), confirm
@@ -205,17 +212,23 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 		Content: userText,
 	})
 
-	// 4. Build the tool registry for this turn. The agent loop calls
-	//    one of these tools when the user asks about workspace state.
-	registry := s.buildChatToolRegistry(s.runService())
+	// 4. Resolve the agent profile (system prompt + tool whitelist).
+	//    PromptRequest.agent picks; empty → "default".
+	agent, agentErr := resolveAgent(req.GetAgent())
+	if agentErr != nil {
+		return status.Errorf(codes.InvalidArgument, "%v", agentErr)
+	}
+	// 5. Build the tool registry for this turn, filtered by the
+	//    agent's tool whitelist (empty whitelist = full registry).
+	registry := s.buildChatToolRegistry(s.runService()).filterByName(agent.Tools)
 	toolDefs := registry.defs()
 
-	// 5. Multi-turn agent loop. Each iteration calls the LLM; if it
+	// 6. Multi-turn agent loop. Each iteration calls the LLM; if it
 	//    emits tool_calls, we dispatch them, append the results, and
 	//    re-call. The loop terminates when the LLM returns no tool
 	//    calls (StopReason="end_turn") or we hit the iteration cap.
 	const maxAgentTurns = 8
-	systemPrompt := fmt.Sprintf(defaultChatSystemPrompt, provName, modelID, sessionID)
+	systemPrompt := fmt.Sprintf(agent.SystemPrompt, provName, modelID, sessionID)
 	var totalTokensIn, totalTokensOut int64
 	var totalLatency time.Duration
 

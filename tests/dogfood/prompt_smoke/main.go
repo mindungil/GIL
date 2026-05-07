@@ -44,7 +44,8 @@ func main() {
 	defer cancel()
 
 	sid := os.Getenv("GIL_SESSION")
-	stream, err := cli.Prompt(ctx, sdk.PromptOptions{SessionID: sid, Text: text})
+	agent := os.Getenv("GIL_AGENT")
+	stream, err := cli.Prompt(ctx, sdk.PromptOptions{SessionID: sid, Text: text, Agent: agent})
 	if err != nil {
 		die("prompt:", err)
 	}
