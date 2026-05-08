@@ -218,6 +218,14 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 	if agentErr != nil {
 		return status.Errorf(codes.InvalidArgument, "%v", agentErr)
 	}
+
+	// Reset the turn-scoped diff tracker so show_diff only ever returns
+	// what *this* invocation of the agent did, not history. Wired tools
+	// (write_file, edit_file, apply_patch, run_bash) populate it as
+	// they fire.
+	if s.diffTracker != nil {
+		s.diffTracker.reset(sessionID)
+	}
 	// 5. Build the tool registry for this turn, filtered by the
 	//    agent's tool whitelist (empty whitelist = full registry).
 	registry := s.buildChatToolRegistry(s.runService()).filterByName(agent.Tools)

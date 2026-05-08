@@ -103,7 +103,7 @@ func (s *SessionService) buildChatToolRegistry(runSvc *RunService) *chatToolRegi
 	return &chatToolRegistry{
 		tools: []chatTool{
 			// Read-only meta tools (V1 baseline).
-			&toolShowDiff{rs: runSvc},
+			&toolShowDiff{rs: runSvc, tracker: s.diffTracker},
 			&toolShowSpec{sess: s, base: s.sessionsBase},
 			&toolShowStatus{sess: s},
 			&toolListSessions{repo: s.repo},
@@ -111,13 +111,19 @@ func (s *SessionService) buildChatToolRegistry(runSvc *RunService) *chatToolRegi
 			// Write/exec tools — gives the agent actual coding ability.
 			// Each is scoped to the session's working_dir and capped on
 			// output / runtime; see agent_tools_write.go for the limits.
+			//
+			// The write/edit tools share s.diffTracker so show_diff can
+			// drain the turn's deltas without re-reading the FS.
+			// run_bash flips the tracker's polluted flag — its output
+			// isn't parsed back, but show_diff appends a caveat so the
+			// agent knows the tracker may be incomplete.
 			&toolReadFile{repo: s.repo},
-			&toolWriteFile{repo: s.repo},
-			&toolRunBash{repo: s.repo},
+			&toolWriteFile{repo: s.repo, tracker: s.diffTracker},
+			&toolRunBash{repo: s.repo, tracker: s.diffTracker},
 			&toolGrep{repo: s.repo},
 			&toolGlob{repo: s.repo},
 			// High-value extras (M4) — see agent_tools_extra.go.
-			&toolEditFile{repo: s.repo},
+			&toolEditFile{repo: s.repo, tracker: s.diffTracker},
 			&toolTodoWrite{},
 			&toolWebFetch{},
 		},
@@ -140,15 +146,17 @@ func (s *SessionService) runService() *RunService {
 // --- show_diff -------------------------------------------------------
 
 type toolShowDiff struct {
-	rs *RunService
+	rs      *RunService
+	tracker *turnDiffTracker
 }
 
 func (t *toolShowDiff) name() string { return "show_diff" }
 
 func (t *toolShowDiff) description() string {
-	return "Show the unified diff between the latest checkpoint and the current workspace. " +
-		"Use when the user asks to see what's changed, the diff, or recent edits. " +
-		"Empty output means no checkpoints yet."
+	return "Show what files have changed during this turn. " +
+		"For chat sessions this is the in-memory turn-scoped diff (write_file/edit_file/apply_patch). " +
+		"For run sessions it falls back to the unified diff vs the latest shadow-git checkpoint. " +
+		"Empty output means nothing has changed yet."
 }
 
 func (t *toolShowDiff) schema() json.RawMessage {
@@ -156,8 +164,22 @@ func (t *toolShowDiff) schema() json.RawMessage {
 }
 
 func (t *toolShowDiff) run(ctx context.Context, sessionID string, _ json.RawMessage) (provider.ToolResult, error) {
+	// Prefer the turn-scoped tracker — it shows exactly what THIS chat
+	// turn's edits have done, with no I/O on the read side. Falls back
+	// to the shadow-git diff (for run sessions) when the tracker is
+	// empty AND not polluted by run_bash, so we don't return a bare
+	// "no changes" when there genuinely was a checkpoint diff.
+	if t.tracker != nil {
+		files, polluted := t.tracker.snapshot(sessionID)
+		if len(files) > 0 || polluted {
+			body, fileCount, added, removed := renderTrackerSummary(files, polluted)
+			summary := fmt.Sprintf("%d files changed, +%d/-%d (turn-scoped)\n",
+				fileCount, added, removed)
+			return provider.ToolResult{Content: summary + body}, nil
+		}
+	}
 	if t.rs == nil {
-		return provider.ToolResult{Content: "diff unavailable: daemon has no run service wired", IsError: true}, nil
+		return provider.ToolResult{Content: "no changes this turn"}, nil
 	}
 	resp, err := t.rs.Diff(ctx, &gilv1.DiffRequest{SessionId: sessionID})
 	if err != nil {
@@ -166,7 +188,7 @@ func (t *toolShowDiff) run(ctx context.Context, sessionID string, _ json.RawMess
 	if resp.GetUnifiedDiff() == "" {
 		note := resp.GetNote()
 		if note == "" {
-			note = "no changes since last checkpoint"
+			note = "no changes this turn"
 		}
 		return provider.ToolResult{Content: note}, nil
 	}
@@ -174,7 +196,7 @@ func (t *toolShowDiff) run(ctx context.Context, sessionID string, _ json.RawMess
 	if resp.GetTruncated() {
 		body += fmt.Sprintf("\n... (%d bytes truncated)", resp.GetTruncatedBytes())
 	}
-	summary := fmt.Sprintf("%d files changed, +%d/-%d lines\n",
+	summary := fmt.Sprintf("%d files changed, +%d/-%d lines (since last checkpoint)\n",
 		resp.GetFilesChanged(), resp.GetLinesAdded(), resp.GetLinesRemoved())
 	return provider.ToolResult{Content: summary + body}, nil
 }

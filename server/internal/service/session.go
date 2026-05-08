@@ -57,6 +57,12 @@ type SessionService struct {
 	// constructed in unit tests that never call Prompt.
 	chatHistMu sync.Mutex
 	chatHist   *chatHistory
+
+	// diffTracker captures per-turn file deltas for show_diff. Populated
+	// by the write tools (write_file, edit_file, apply_patch) and the
+	// run_bash tool's "polluted" flag. Reset at the start of every
+	// Prompt RPC. Always non-nil — constructor wires it.
+	diffTracker *turnDiffTracker
 }
 
 // NewSessionService returns a new SessionService backed by the provided Repo.
@@ -68,7 +74,11 @@ type SessionService struct {
 // constructor signature avoids breaking the unit tests in
 // session_test.go that construct SessionService with no filesystem.
 func NewSessionService(repo *session.Repo, progress ProgressGetter) *SessionService {
-	return &SessionService{repo: repo, progress: progress}
+	return &SessionService{
+		repo:        repo,
+		progress:    progress,
+		diffTracker: newTurnDiffTracker(),
+	}
 }
 
 // WithSessionsBase returns s mutated to use base as the on-disk root

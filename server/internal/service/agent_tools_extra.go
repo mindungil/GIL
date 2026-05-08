@@ -41,7 +41,8 @@ const (
 // --- edit_file -------------------------------------------------------
 
 type toolEditFile struct {
-	repo *session.Repo
+	repo    *session.Repo
+	tracker *turnDiffTracker
 }
 
 func (t *toolEditFile) name() string { return "edit_file" }
@@ -107,6 +108,9 @@ func (t *toolEditFile) run(ctx context.Context, sessionID string, argsJSON json.
 			IsError: true,
 		}, nil
 	}
+	if t.tracker != nil {
+		t.tracker.recordPreWrite(sessionID, args.Path, abs)
+	}
 	updated := strings.Replace(src, args.OldText, args.NewText, 1)
 	tmp := abs + ".giledit.tmp"
 	if err := os.WriteFile(tmp, []byte(updated), 0o644); err != nil {
@@ -115,6 +119,9 @@ func (t *toolEditFile) run(ctx context.Context, sessionID string, argsJSON json.
 	if err := os.Rename(tmp, abs); err != nil {
 		_ = os.Remove(tmp)
 		return provider.ToolResult{Content: "rename: " + err.Error(), IsError: true}, nil
+	}
+	if t.tracker != nil {
+		t.tracker.recordPostWrite(sessionID, args.Path, updated, true)
 	}
 	return provider.ToolResult{
 		Content: fmt.Sprintf("edited %s (-%d/+%d bytes)", args.Path, len(args.OldText), len(args.NewText)),

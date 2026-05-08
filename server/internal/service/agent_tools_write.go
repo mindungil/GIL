@@ -148,7 +148,8 @@ func (t *toolReadFile) run(ctx context.Context, sessionID string, argsJSON json.
 // --- write_file ------------------------------------------------------
 
 type toolWriteFile struct {
-	repo *session.Repo
+	repo    *session.Repo
+	tracker *turnDiffTracker
 }
 
 func (t *toolWriteFile) name() string { return "write_file" }
@@ -196,6 +197,9 @@ func (t *toolWriteFile) run(ctx context.Context, sessionID string, argsJSON json
 	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
 		return provider.ToolResult{Content: "mkdir: " + err.Error(), IsError: true}, nil
 	}
+	if t.tracker != nil {
+		t.tracker.recordPreWrite(sessionID, args.Path, abs)
+	}
 	tmp := abs + ".gilwrite.tmp"
 	if err := os.WriteFile(tmp, []byte(args.Content), 0o644); err != nil {
 		return provider.ToolResult{Content: "write: " + err.Error(), IsError: true}, nil
@@ -203,6 +207,9 @@ func (t *toolWriteFile) run(ctx context.Context, sessionID string, argsJSON json
 	if err := os.Rename(tmp, abs); err != nil {
 		_ = os.Remove(tmp)
 		return provider.ToolResult{Content: "rename: " + err.Error(), IsError: true}, nil
+	}
+	if t.tracker != nil {
+		t.tracker.recordPostWrite(sessionID, args.Path, args.Content, true)
 	}
 	return provider.ToolResult{
 		Content: fmt.Sprintf("wrote %s (%d bytes)", args.Path, len(args.Content)),
@@ -212,7 +219,8 @@ func (t *toolWriteFile) run(ctx context.Context, sessionID string, argsJSON json
 // --- run_bash --------------------------------------------------------
 
 type toolRunBash struct {
-	repo *session.Repo
+	repo    *session.Repo
+	tracker *turnDiffTracker
 }
 
 func (t *toolRunBash) name() string { return "run_bash" }
@@ -261,6 +269,13 @@ func (t *toolRunBash) run(ctx context.Context, sessionID string, argsJSON json.R
 	defer cancel()
 	cmd := exec.CommandContext(cctx, "bash", "-c", args.Cmd)
 	cmd.Dir = wd
+	// Mark the diff tracker as polluted before running the command —
+	// even if it fails, it may have started writing to the FS. show_diff
+	// uses this flag to surface a "fs may have changed outside the
+	// tracker" caveat to the agent.
+	if t.tracker != nil {
+		t.tracker.markExternal(sessionID)
+	}
 	out, err := cmd.CombinedOutput()
 	body := string(out)
 	if len(out) > maxBashOutput {
