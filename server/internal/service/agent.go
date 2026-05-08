@@ -47,7 +47,7 @@ var builtinAgents = map[string]*Agent{
 		Name:         "plan",
 		Description:  "Planner. Investigates and produces an actionable plan without modifying the workspace.",
 		SystemPrompt: planChatSystemPrompt,
-		Tools:        []string{"read_file", "grep", "glob", "todowrite", "show_diff", "show_spec", "show_status", "list_sessions"},
+		Tools:        []string{"read_file", "grep", "glob", "todowrite", "plan_steps", "show_diff", "show_spec", "show_status", "list_sessions"},
 	},
 }
 

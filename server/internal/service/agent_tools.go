@@ -128,6 +128,13 @@ func (s *SessionService) buildChatToolRegistry(runSvc *RunService) *chatToolRegi
 			&toolWebFetch{},
 			// Multi-hunk atomic patch (M5.2) — see apply_patch.go.
 			&toolApplyPatch{repo: s.repo, tracker: s.diffTracker},
+			// Verify-loop discipline (M5.3) — see agent_tools_plan_verify.go.
+			// plan_steps declares the work + its acceptance commands;
+			// verify runs those commands and transitions step state.
+			// The system enforces "no verified status without a verify
+			// pass" — discipline as a state machine, not a prompt.
+			&toolPlanSteps{},
+			&toolVerify{repo: s.repo, tracker: s.diffTracker},
 		},
 	}
 }
