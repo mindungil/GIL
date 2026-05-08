@@ -110,6 +110,12 @@ Tools — code I/O (scoped to the session working dir):
   full rewrites.
 - edit_file: replace an exact text snippet in a file. Prefer this over
   write_file for small edits to large files — it's cheaper on tokens.
+- apply_patch: apply a multi-file, multi-hunk patch atomically. Format:
+  '*** Begin Patch' / '*** End Patch' envelope with '*** Add File: <p>',
+  '*** Delete File: <p>', or '*** Update File: <p>' (followed by '@@'
+  hunks of space/-/+ lines). All hunks must match exactly once or NO
+  file is touched. Prefer over edit_file when you have multiple edits
+  in the same call — saves round-trips and keeps changes coherent.
 - run_bash: run a shell command (default 30s, max 60s).
 - grep: regex search across the tree (uses ripgrep when present).
 - glob: list files matching a pattern (** supported for recursion).

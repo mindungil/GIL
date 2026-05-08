@@ -126,6 +126,8 @@ func (s *SessionService) buildChatToolRegistry(runSvc *RunService) *chatToolRegi
 			&toolEditFile{repo: s.repo, tracker: s.diffTracker},
 			&toolTodoWrite{},
 			&toolWebFetch{},
+			// Multi-hunk atomic patch (M5.2) — see apply_patch.go.
+			&toolApplyPatch{repo: s.repo, tracker: s.diffTracker},
 		},
 	}
 }
