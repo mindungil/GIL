@@ -86,25 +86,35 @@ new readers know which entries to act on.
   DOGFOOD-confirmed; need fresh dogfood to verify under M5/M6
   architecture.
 
-### Alive — §2.6 reformulate (slash → agent-tool)
+### Fixed — §2.6 verb-tool wave (slash → agent-tool)
 
-The slash-named items below violate the "agent decides verbs via tool
-calls, no client-side dispatch" rule. Convert to agent-callable tools;
-the agent surfaces the verb when natural-language input warrants it. G1
-(freeze_spec / start_run / apply_diff) is the first instance of this
-pattern in production.
+The slash-named items below were the "agent decides verbs via tool
+calls, no client-side dispatch" gap. As of this branch they're all
+agent-callable tools registered in `agent_tools_verbs.go`; the agent
+surfaces them when natural-language input warrants it. The chat REPL
+slash dispatcher (`cli/internal/chat/repl/slash.go`) is deleted — the
+chat surface is 100% natural language, no escape hatch.
 
-- **#1** `/add /drop /ls` → `add_to_workingset` / `drop_from_workingset` / `list_workingset`
-- **#13** `/interrupt` → `stop_run` tool (also: stop emitting fake CLI hint)
-- **#15** shell-exec → already a tool (`run_bash`); just stop promising a slash
-- **#17** `/compact` → already a tool (`request_compact`); surface it via agent
-- **#20** `/undo /checkpoints` → `list_checkpoints` / `restore_checkpoint`
-- **#22** `/instructions` → `show_instructions` tool
-- **#25** `/save /export` → `export_session` tool
-- **#26** `/clear /reset` → `reset_session` tool
-- **#29** `/sessions` filter → `list_sessions` already a tool; surface filter args
-- **#42 #43 #44** — explicit §2.6 audit items; fold into surface cleanup
-  (G4 verb-mode headless-only)
+- **#1** `/add /drop /ls` → **fixed**: `add_to_workingset` /
+  `drop_from_workingset` / `list_workingset` in
+  `agent_tools_verbs.go`. Per-session in-memory; daemon-lifetime.
+- **#13** `/interrupt` → **fixed**: `stop_run` tool + `RunService.RequestStop`
+  + per-session `runCancels` map keyed on detached run launch.
+- **#15** shell-exec → already a tool (`run_bash`); slash promise removed.
+- **#17** `/compact` → already a tool (`request_compact`); registered.
+- **#20** `/undo /checkpoints` → **fixed**: `list_checkpoints` /
+  `restore_checkpoint` (the latter delegates to `RunService.Restore`).
+- **#22** `/instructions` → **fixed**: `show_instructions` surfaces the
+  registered tool families + chat surface contract.
+- **#25** `/save /export` → **fixed**: `export_session` returns the
+  turn-by-turn transcript from `chatHistory`.
+- **#26** `/clear /reset` → **fixed**: `reset_session` calls
+  `chatHistory().reset(sessionID)`.
+- **#29** `/sessions` filter → `list_sessions` already a tool; filter args
+  remain a follow-up (low severity — list is short by default).
+- **#42 #43 #44** — explicit §2.6 audit items; the dispatcher removal +
+  verb-tool wave above closes them at the surface level. Long-tail
+  follow-ups (typed action pipeline #4 + #8) tracked separately.
 
 ### Alive — cross-cutting (Group C unchanged)
 
