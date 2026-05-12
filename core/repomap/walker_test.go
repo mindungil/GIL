@@ -12,7 +12,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/jedutools/gil/core/repomap"
+	"github.com/mindungil/gil/core/repomap"
 )
 
 func TestWalkProject_AggregatesSymbols(t *testing.T) {

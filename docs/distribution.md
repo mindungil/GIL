@@ -5,7 +5,7 @@ gil supports three install paths. Pick whichever matches your environment.
 ## 1. curl-installer (recommended for first-time users)
 
 ```
-curl -fsSL https://raw.githubusercontent.com/jedutools/gil/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/mindungil/GIL/main/scripts/install.sh | bash
 ```
 
 Detects host OS/arch, downloads the latest release tarball from GitHub
@@ -27,32 +27,32 @@ Environment overrides:
 
 | Variable           | Default                  | Purpose                       |
 |--------------------|--------------------------|-------------------------------|
-| `GIL_INSTALL_REPO` | `jedutools/gil`          | GitHub `owner/repo` to fetch  |
+| `GIL_INSTALL_REPO` | `mindungil/GIL`          | GitHub `owner/repo` to fetch  |
 | `GIL_BIN_DIR`      | `/usr/local/bin`         | Install destination directory |
 | `GIL_VERSION`      | `latest`                 | Version tag (e.g. `v0.1.0`)   |
 
 ## 2. Homebrew tap (macOS / Linux)
 
 ```
-brew tap jedutools/tap
+brew tap mindungil/tap
 brew install gil
 ```
 
 Pros: standard macOS install path, automatic updates via `brew
 upgrade`. The tap and formula are produced by GoReleaser on each
-tagged release and pushed to `jedutools/homebrew-tap`.
+tagged release and pushed to `mindungil/homebrew-tap`.
 
-Cons: requires Homebrew. The tap repo (`jedutools/homebrew-tap`) is a
+Cons: requires Homebrew. The tap repo (`mindungil/homebrew-tap`) is a
 placeholder until the first release tag actually publishes the
 formula — see `.goreleaser.yaml`'s `brews:` block.
 
 ## 3. go install (developers only)
 
 ```
-go install github.com/jedutools/gil/cli/cmd/gil@latest
-go install github.com/jedutools/gil/server/cmd/gild@latest
-go install github.com/jedutools/gil/tui/cmd/giltui@latest
-go install github.com/jedutools/gil/mcp/cmd/gilmcp@latest
+go install github.com/mindungil/gil/cli/cmd/gil@latest
+go install github.com/mindungil/gil/server/cmd/gild@latest
+go install github.com/mindungil/gil/tui/cmd/giltui@latest
+go install github.com/mindungil/gil/mcp/cmd/gilmcp@latest
 ```
 
 Pros: latest commit, no waiting for release.

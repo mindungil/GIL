@@ -1,0 +1,62 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gil-swebench"
+version = "0.1.0"
+description = "SWE-bench harness adapter for gil (autonomous coding harness)."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+  { name = "gil contributors" },
+]
+keywords = ["swe-bench", "benchmark", "gil", "coding-agent", "evaluation"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+  "grpcio>=1.59",
+  "grpcio-tools>=1.59",
+  "protobuf>=4.25",
+  "pydantic>=2.0",
+]
+
+[project.optional-dependencies]
+# HuggingFace dataset loader for the official SWE-bench-Lite / Verified splits.
+# IMPORTANT: this is *opt-in* so installing gil-swebench never reaches the
+# network for the dataset. Local fixtures cover the smoke path.
+datasets = [
+  "datasets>=2.14",
+]
+dev = [
+  "pytest>=7.4",
+  "pytest-asyncio>=0.23",
+]
+
+[project.scripts]
+gil-swebench = "gil_swebench.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/mindungil/GIL"
+Repository = "https://github.com/mindungil/GIL"
+
+# Flat layout: this directory IS the gil_swebench package. Map it explicitly
+# so setuptools doesn't try to "discover" packages from CWD.
+[tool.setuptools]
+package-dir = { gil_swebench = ".", "gil_swebench.proto" = "proto" }
+packages = ["gil_swebench", "gil_swebench.proto"]
+
+[tool.setuptools.package-data]
+gil_swebench = ["py.typed", "fixtures/*.json", "fixtures/*.jsonl"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

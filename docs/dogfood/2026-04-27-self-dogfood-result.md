@@ -1,0 +1,265 @@
+# Self-dogfood result — gil-on-gil with qwen3.6-27b
+
+> 첫 진짜 self-dogfood. gil이 gil 자기 코드를 자율로 수정. 결과: **성공** (with caveats).
+
+## Setup
+
+- **Workspace**: `git archive HEAD` 스냅샷을 격리 디렉토리에 펼쳐서 사용 (dev tree 무손상)
+- **GIL_HOME**: tmpdir, fresh credstore + sessions
+- **Provider**: vllm (qwen3.6-27b on 사용자 제공 OpenAI-호환 endpoint)
+- **Autonomy**: ASK_DESTRUCTIVE_ONLY
+- **Spec freeze**: `tests/e2e/helpers/setfrozen.go` 으로 직접 frozen (interview 우회 — qwen이 Q&A saturation에 약함을 가정)
+
+## Task
+
+> "Cap gil no-arg session listing at 10 rows with overflow hint"
+
+자기 자신의 UX 부족(50+ 세션이 한 화면에 뜨는 문제)을 자기가 고치는 task.
+
+## Run 1 — budget 너무 빡빡
+
+| | |
+|---|---|
+| Iterations | 10 |
+| Tokens | 169,334 (budget=150,000 — exceeded) |
+| Status | budget_exhausted |
+| Wall time | ~70s |
+| Code changed | 4 lines (summaryEnv struct에 TotalSessions 필드만 추가) |
+| Verifier | 실행 안 됨 (budget 먼저 hit) |
+
+**원인**: 150k token budget이 qwen + gil의 큰 system prompt(~17k tokens/turn) 에 부족. 10 turn = 169k.
+
+## Run 2 — budget 충분 (400k)
+
+| | |
+|---|---|
+| Iterations | 19 |
+| Tokens | 404,407 (budget=400,000 — exceeded) |
+| Status | budget_exhausted |
+| Wall time | ~140s |
+| Code changed | summary.go +29/-8, summary_test.go +44/-0 |
+| **Verifier (manual rerun)** | **✓ build OK + tests OK** |
+
+verifier check가 budget exhausted 직전에 실행 못 됐지만, 코드 자체는 manual rerun 시 모두 green.
+
+## qwen이 한 일 (turn-by-turn 요약)
+
+### Tool 사용 분포 (17 tool_call 총합)
+
+| 도구 | 횟수 | 용도 |
+|---|---|---|
+| read_file | 7 | root.go, session.go, session_test.go (절대 + 상대 경로 두 번), summary.go, status.go, status_render.go, summary_test.go |
+| bash | 4 | ls, find, grep × 2 |
+| **plan** | **2** | **set 한 번 (4 items 등록), update 한 번 (1 item completed)** |
+| edit | 1 | summary.go 정확한 구간 수정 |
+| ... | ... | (나머지 budget hit 전까지 추가 edit + test 작성에 사용) |
+
+### Plan 도구 자발적 사용 (Phase 18.A 검증)
+
+qwen이 task 시작 직후 Phase 18 에서 추가한 plan 도구를 **시키지 않아도** 사용:
+
+```json
+{
+  "operation": "set",
+  "items": [
+    {"text": "Add TotalSessions field to summaryEnv"},
+    {"text": "Modify renderSummary to emit overflow hint"},
+    {"text": "Update caller to set TotalSessions"},
+    {"text": "Add tests for overflow + no-overflow cases"}
+  ]
+}
+```
+
+이후 1번 update_item으로 첫 항목 completed 표시. 시스템 프롬프트의 plan 요약 prepend가 "you have a plan, follow it" 신호 역할을 한 것으로 추정.
+
+### 최종 코드 변경 (Run 2)
+
+`cli/internal/cmd/summary.go`:
+```go
++	total := len(rows)
++	const maxRows = 10
++	if len(rows) > maxRows {
++		rows = rows[:maxRows]
++	}
+
+	renderSummary(out, summaryEnv{
+		...
+		Sessions:      rows,
++		TotalSessions: total,
+	})
+```
+
+```go
++	if e.TotalSessions > len(e.Sessions) {
++		extra := e.TotalSessions - len(e.Sessions)
++		fmt.Fprintf(out, "   %s\n", p.Dim(fmt.Sprintf("›  + %d more", extra)))
++	}
+```
+
+`cli/internal/cmd/summary_test.go`: 새 테스트 2개 (overflow / no-overflow), 기존 패턴 (`t.Setenv("NO_COLOR", "1")`, `summaryRow` 생성, `renderSummary` 직접 호출, `require.Contains` 검증) 정확히 모방.
+
+## 평가
+
+### 잘 한 것 ✓
+
+1. **Plan 도구 자발적 사용** — 시키지 않아도 task 시작 시 4-step plan 작성. Phase 18.A의 핵심 가설 (system prompt prepend가 plan tool 사용을 유도) 검증.
+2. **정확한 위치 식별** — repomap 없이 grep + read_file 조합으로 `runSummary`/`renderSummary` 정확히 찾아냄.
+3. **Aesthetic 준수** — 코드 안에서 `›` 글리프 + `p.Dim()` 호출 패턴 발견 후 자기 변경에도 동일 적용. terminal-aesthetic.md 참조 안 했음에도 일관성 유지.
+4. **테스트 작성** — 기존 테스트 스타일 (positive + negative 페어, t.Setenv, require.Contains) 정확히 따라함.
+5. **Edit 도구 4-tier 매칭 첫 시도 통과** — Aider lift 정확도 검증.
+
+### 부족한 것 ✗
+
+1. **Token 비효율** — 17k tokens/turn 평균은 너무 높음. 시스템 프롬프트 + 18 도구 schema + AGENTS.md + memory bank prepend 합산.
+2. **Stuck 직전까지 미도달** — 예산 부족으로 verifier 실행 직전에 종료. 진짜 며칠짜리 작업에서 stuck 회복 메커니즘 검증 못함.
+3. **반복 read_file** — 절대 vs 상대 경로 차이로 같은 파일 두 번 읽음. 효율 손실.
+4. **caller propagation 일부 누락** — `gil status` (visual mode)는 동일한 truncation 안 들어감 — spec이 "gil no-arg"만 요구해서 정확하지만 사람이 봤다면 "둘 다 해야 한다"고 판단.
+
+### 발견된 gil 자체 버그
+
+- **Verifier가 budget exhausted 시 실행 안 됨** — verify는 종료 직전에 한 번이라도 시도해야 함. budget을 verify check 전에 reserve 하는 게 맞음.
+
+이건 Phase 19 또는 hot-fix candidate.
+
+## 결론
+
+**핵심 가설 검증**: ✓ gil의 자율 실행 인프라가 진짜 LLM (qwen3.6-27b) 으로 작동. plan + edit + read + bash 도구 자발적 사용. mission control aesthetic 자연스럽게 모방. 수정된 코드가 build + tests pass.
+
+**조정 필요**:
+1. System prompt 토큰 다이어트 (현재 17k/turn → 목표 8k/turn)
+2. Verifier reserve token 메커니즘
+3. Repomap 강제 prepend로 read_file 반복 줄이기
+
+**다음 dogfood 후보**: 더 큰 task (예: gil 자체 README의 "외부 자원 필요한 잔여 항목" 중 하나 처리), claude-haiku 같은 Anthropic 모델로 시도, 며칠짜리 시뮬레이션.
+
+## Reproduce
+
+```bash
+DOG_HOME=$(mktemp -d) && export GIL_HOME=$DOG_HOME
+WORK=$(mktemp -d) && git -C /home/ubuntu/gil archive HEAD | tar -x -C $WORK
+cd $WORK && git init -q && \
+  git -c user.email=mindungil@gil -c user.name=mindungil commit -q --allow-empty -m baseline
+gil auth login vllm --api-key '<key>' --base-url '<endpoint>'
+ID=$(gil new --working-dir $WORK | awk '{print $NF}')
+mkdir -p $GIL_HOME/data/sessions/$ID
+# write spec.yaml as in this report
+go run /home/ubuntu/gil/tests/e2e/helpers/setfrozen.go $GIL_HOME/data/sessions.db $ID
+gil run $ID --provider vllm --model qwen3.6-27b
+```
+
+## Follow-up — Phase 19 Track B (system prompt 다이어트)
+
+원래 문제: 17k tokens/turn 평균 = system prompt + 18 tool schema + AGENTS.md + memory bank + history.
+이 중 system prompt 부분만 떼서 측정 + 50% 컷 목표.
+
+### 측정 도구
+
+`go run ./runner/measure_diet/` (core 모듈에서) — old vs new prompt 토큰 비교.
+
+`GIL_DEBUG_SYSTEM_PROMPT=1 gil run ...` — 실 런타임에서 첫 턴 stderr에 breakdown 한 번 출력.
+
+### 측정 결과 (Before / After)
+
+13 tools, 2 verifier checks, ~1500-char AGENTS.md, 작은 memory bank 기준:
+
+| 시나리오 | system prompt tokens | tool schemas (별도 채널) |
+|---|---:|---:|
+| **OLD (Phase 18)** | ~1,394 | ~1,851 |
+| **NEW iter 2+ (lazy memory off)** | 693 | ~1,851 |
+| **NEW iter 1 (lazy memory)** | 541 | ~1,851 |
+| **NEW + `minimal:true` + `no_memory:true`** | 131 | ~1,851 |
+
+OLD per-call 합계 ~3.2k → NEW per-call 합계 ~2.5k (iter 2+) / ~2.4k (iter 1).
+**System prompt only: 50% 절감 (1394 → 693).**
+극한 다이어트 (`minimal+no_memory`): **91% 절감 (1394 → 131)** — 작은 모델 / 빡빡한 예산용.
+
+### 어디서 토큰을 잘랐나
+
+1. **`Available tools:` 블록 제거** — 13 tools × ~50 tokens/each (이름 + Description) = ~650 tokens 절감. 어차피 Anthropic native tool use 포맷에서는 tool definition을 input_schema로 따로 보내므로 system prompt에 또 박는 건 중복.
+2. **Strategy 4-step 가이드 컷** — "1. Use tools to inspect... 4. If any check fails..." (~120 tokens) 제거. 이미 agent loop의 동작 자체가 그 가이드대로라 모델이 따로 읽지 않아도 됨.
+3. **AGENTS.md 헤더 컴팩트** — "The following content was discovered from..." 한 단락 → "Durable conventions discovered from AGENTS.md / CLAUDE.md / .cursor/rules. Treat as user-supplied persona signals." 한 줄.
+4. **Verification fallback 컴팩트** — "(no checks defined — any non-tool response will be considered done)" → "(no checks — any non-tool response is treated as done)".
+5. **Lazy memory bank** — 1번 iter에선 bank 안 prepend. 첫 턴엔 bank가 비어있다시피 하기 때문.
+
+### 의미가 사라진 부분 (없음)
+
+Tool description 자체는 input_schema에 그대로 남아있음 — provider가 바꿔치는 게 아니라 system prompt 안의 *중복본*만 잘랐음. Edit 도구의 "SEARCH/REPLACE blocks" 같은 사용법 설명은 schema description에 그대로 살아있음. lsp / subagent 같이 호출법이 미묘한 도구도 schema enum + property description으로 충분히 가이드됨 — 50% 컷 후 dogfood에서 모델이 도구 호출 제대로 했는지는 다음 dogfood (Track B 적용 후)에서 재확인.
+
+### Per-spec knob
+
+작은 모델용 극한 다이어트 옵션:
+
+```yaml
+run:
+  systemPrompt:
+    minimal: true     # AGENTS.md / CLAUDE.md 블록 통째로 스킵
+    noMemory: true    # memory bank 절대 안 prepend (memory_load은 여전히 호출 가능)
+```
+
+서버측 wiring 없이 spec.yaml에서 바로 켤 수 있음 — proto에 RunOptions / SystemPromptOptions 추가됨 (`spec.proto`).
+
+### 테스트
+
+- `core/runner/system_prompt_test.go` — breakdown logging, lazy memory, options merge, 800-token ceiling 가드.
+- 기존 `TestAgentLoop_MemoryBankAppearsAfterInstructions` 업데이트 — iter 1엔 bank 없음, iter 2+엔 instructions → bank 순서 보존.
+- `make test` green.
+
+## Follow-up — Phase 19 Track A (verifier reserve token + always-verify-on-exit)
+
+원래 dogfood 발견 버그: budget 소진이 마지막 LLM 턴 도중 발생 →
+verify 단계 도달 전에 loop이 종료 → 사용자는 "코드가 실제로 작동하는지"
+신호를 받지 못함 (Run 2의 manual rerun으로만 확인 가능).
+
+### 고친 부분
+
+1. **`Budget.reserve_tokens` 신설** (proto field 7).
+   - 기본값: `min(8000, max_total_tokens / 10)` — 큰 예산엔 8k 고정,
+     작은 예산엔 10% 비례. 작은 sub-loop / 테스트 예산에서도 deterministic.
+   - 효과: loop의 "stop now" guard가 `max - reserve` 에서 발동.
+     `max_tokens=400_000` 이면 `effective=392_000` 에서 멈춤; 남은 8k는
+     final verify 실행 + 클로징 "I'm done" 턴을 위해 보존.
+
+2. **Loop exit path 통합 — 무조건 final verify 실행.**
+   기존: `done` (end_turn + verify pass) 만 inline verify 실행.
+   `budget_exhausted`/`max_iterations`/`stuck` 은 verify 없이 즉시 종료.
+   변경: 모든 exit 경로가 post-loop verify 한 번을 거치고,
+   `Result.VerifyAll`을 항상 채워 반환. 사용자는 budget 소진 상황에서도
+   "지금 워크스페이스가 green인가" 즉답 가능.
+
+3. **새 status 값 두 개.**
+   - `budget_exhausted_verify_passed` — budget hit, but post-loop verify
+     came back green (qwen이 dogfood Run 2 에서 실제로 닿은 케이스).
+     호출자는 이걸 `done`처럼 취급해도 됨.
+   - `budget_exhausted_verify_failed` — budget hit AND verify failed.
+     호출자는 verify 실패 detail을 사용자에게 보여줘야 하는 케이스.
+   기존 `budget_exhausted` 는 verifier check가 아예 없을 때만 발동
+   (legacy fallback — 옛 fixture/대시보드와의 prefix-match 호환 유지).
+
+### 새 상태 별 샘플 (test fixture 출력)
+
+| 시나리오 (cap=100, reserve=8) | Status | Iterations | Tokens | VerifyAll |
+|---|---|---:|---:|---|
+| iter1=50 → end_turn → verify pass | `done` | 2 | 54 | `[ok=true]` |
+| iter1=95 → reserve guard, verify pass | `budget_exhausted_verify_passed` | 1 | 95 | `[ok=true]` |
+| iter1=95 → reserve guard, verify fail | `budget_exhausted_verify_failed` | 1 | 95 | `[x=false]` |
+| no token cap, max_iter=2, verify fail | `max_iterations` | 2 | 400 | `[x=false]` |
+
+### 테스트
+
+- `core/runner/runner_budget_test.go` —
+  - `TestAgentLoop_BudgetReserve_VerifyPasses_StatusDone` (case 1)
+  - `TestAgentLoop_BudgetExhausted_VerifyFails_NewStatus` (case 2)
+  - `TestAgentLoop_BudgetExhausted_VerifyPasses_NewStatus` (case 3)
+  - `TestAgentLoop_NoBudget_NoReserveBehavior` (case 4 — backwards compat)
+  - `TestAgentLoop_BudgetReserve_DefaultScaling` — 기본 8k vs `max/10` 정책.
+- 기존 budget 테스트 업데이트 — 작은 캡 (100 tokens) 시나리오는
+  `ReserveTokens: 1` 명시해서 default 8k가 dominate 못하게 pin.
+- `make build` + `make test` + `make e2e-all` 모두 green.
+
+### Backwards compat 확인
+
+- `MaxTotalTokens` 미설정: reserve 무관, 기존 `max_iterations` exit 그대로.
+- `MaxTotalTokens` 설정 + `ReserveTokens` 미설정: 자동 `min(8000, max/10)` 적용.
+- 기존 `BudgetReason` 필드 (`"tokens"` | `"cost"`)는 그대로 — 새 status들도
+  같은 `BudgetReason` prefix를 채움. 옛 dashboard가 prefix-match 한다면
+  그대로 작동.

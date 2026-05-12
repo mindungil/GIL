@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/jedutools/gil/core/edit"
+	"github.com/mindungil/gil/core/edit"
 )
 
 // Edit is the agent-callable tool that applies SEARCH/REPLACE blocks parsed
@@ -32,7 +32,7 @@ const editSchema = `{
 func (e *Edit) Name() string { return "edit" }
 
 func (e *Edit) Description() string {
-	return "Apply one or more SEARCH/REPLACE blocks to files in the workspace. Use this for surgical edits — much safer than write_file which overwrites the whole file. Format: '<path>\\n<<<<<<< SEARCH\\n<old code>\\n=======\\n<new code>\\n>>>>>>> REPLACE\\n'. Multiple blocks for the same or different files are allowed; consecutive blocks for the same file may omit the path."
+	return "Apply one or more SEARCH/REPLACE blocks to files in the workspace. Use this for surgical edits — much safer than write_file which overwrites the whole file. Format: '<path>\\n<<<<<<< SEARCH\\n<old code>\\n=======\\n<new code>\\n>>>>>>> REPLACE\\n'. The filename goes on its own line BEFORE the SEARCH marker; for codex compatibility a 'path: <filename>' prefix is also accepted (the 'path:' part is stripped). Multiple blocks for the same or different files are allowed; consecutive blocks for the same file may omit the path."
 }
 
 func (e *Edit) Schema() json.RawMessage { return json.RawMessage(editSchema) }
@@ -76,7 +76,15 @@ func (e *Edit) Run(ctx context.Context, argsJSON json.RawMessage) (Result, error
 		if rerr != nil {
 			anyErr = true
 			nFailed++
-			fmt.Fprintf(&summary, "[block %d] %s: read failed: %v\n", i+1, b.File, rerr)
+			// Self-correcting hint: if the parsed filename still looks like
+			// a stray label/prefix (contains ": " or starts with "path:")
+			// we likely picked up garbage that should never have been a
+			// filename — tell the agent how to fix the format.
+			hint := ""
+			if strings.Contains(b.File, ": ") || strings.HasPrefix(strings.ToLower(b.File), "path:") {
+				hint = " — the parsed filename is '" + b.File + "' which looks like a label, not a path. Write the filename on its own line BEFORE '<<<<<<< SEARCH', e.g.:\n  cli/internal/cmd/status_render.go\n  <<<<<<< SEARCH\n  ..."
+			}
+			fmt.Fprintf(&summary, "[block %d] %s: read failed: %v%s\n", i+1, b.File, rerr, hint)
 			continue
 		}
 		updated, mt, merr := eng.Replace(string(original), b.Search, b.Replace)

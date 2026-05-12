@@ -1,17 +1,17 @@
-module github.com/jedutools/gil/mcp
+module github.com/mindungil/gil/mcp
 
 go 1.25.0
 
 require (
-	github.com/jedutools/gil/core v0.0.0
-	github.com/jedutools/gil/sdk v0.0.0
+	github.com/mindungil/gil/core v0.0.0
+	github.com/mindungil/gil/sdk v0.0.0
 	github.com/stretchr/testify v1.11.1
 )
 
 require (
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.22.0 // indirect
-	github.com/jedutools/gil/proto v0.0.0 // indirect
+	github.com/mindungil/gil/proto v0.0.0 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	golang.org/x/net v0.50.0 // indirect
 	golang.org/x/sys v0.43.0 // indirect
@@ -24,7 +24,7 @@ require (
 )
 
 replace (
-	github.com/jedutools/gil/core => ../core
-	github.com/jedutools/gil/proto => ../proto
-	github.com/jedutools/gil/sdk => ../sdk
+	github.com/mindungil/gil/core => ../core
+	github.com/mindungil/gil/proto => ../proto
+	github.com/mindungil/gil/sdk => ../sdk
 )

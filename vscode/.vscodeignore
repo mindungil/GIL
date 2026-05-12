@@ -1,5 +1,5 @@
 # vsce package excludes everything matching these patterns from the .vsix.
-# We ship: dist/ (bundled JS + copied webview.html), proto/gil/v1/*.proto,
+# We ship: dist/ (bundled JS, copied webview.html, copied proto/gil/v1/*.proto),
 # README, package.json, LICENSE.
 
 # Source — bundled into dist/
@@ -12,6 +12,9 @@ esbuild.mjs
 tsconfig.json
 node_modules/**
 .vscode-test/**
+
+# Operator-only docs (not for end users installing the extension)
+PACKAGING.md
 
 # Dev / test artifacts
 **/*.test.js

@@ -22,6 +22,8 @@ const (
 	SessionService_Create_FullMethodName = "/gil.v1.SessionService/Create"
 	SessionService_Get_FullMethodName    = "/gil.v1.SessionService/Get"
 	SessionService_List_FullMethodName   = "/gil.v1.SessionService/List"
+	SessionService_Delete_FullMethodName = "/gil.v1.SessionService/Delete"
+	SessionService_Prompt_FullMethodName = "/gil.v1.SessionService/Prompt"
 )
 
 // SessionServiceClient is the client API for SessionService service.
@@ -31,6 +33,21 @@ type SessionServiceClient interface {
 	Create(ctx context.Context, in *CreateRequest, opts ...grpc.CallOption) (*Session, error)
 	Get(ctx context.Context, in *GetRequest, opts ...grpc.CallOption) (*Session, error)
 	List(ctx context.Context, in *ListRequest, opts ...grpc.CallOption) (*ListResponse, error)
+	// Delete removes a session row and (when on-disk) its per-session
+	// workspace directory under SessionsDir/<id>. Refuses to delete
+	// RUNNING sessions (Aborted / FailedPrecondition) — the caller must
+	// stop the run first. NotFound is returned when the id does not
+	// exist; idempotent removes (delete twice) deliberately surface as
+	// NotFound rather than silently succeeding so the CLI can render an
+	// accurate count when batch-deleting.
+	Delete(ctx context.Context, in *DeleteRequest, opts ...grpc.CallOption) (*DeleteResponse, error)
+	// Prompt is the single chat-surface entry point per
+	// docs/design/chat-architecture.md. The user types natural language;
+	// the server runs an agent loop (system-prompted LLM + tool registry)
+	// and streams Parts back. Callers (cli chat REPL / TUI) have no
+	// dispatch logic — every verb (diff, merge, freeze, run, ...) flows
+	// through this RPC as agent tool calls.
+	Prompt(ctx context.Context, in *PromptRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[Part], error)
 }
 
 type sessionServiceClient struct {
@@ -71,6 +88,35 @@ func (c *sessionServiceClient) List(ctx context.Context, in *ListRequest, opts .
 	return out, nil
 }
 
+func (c *sessionServiceClient) Delete(ctx context.Context, in *DeleteRequest, opts ...grpc.CallOption) (*DeleteResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DeleteResponse)
+	err := c.cc.Invoke(ctx, SessionService_Delete_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sessionServiceClient) Prompt(ctx context.Context, in *PromptRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[Part], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &SessionService_ServiceDesc.Streams[0], SessionService_Prompt_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[PromptRequest, Part]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type SessionService_PromptClient = grpc.ServerStreamingClient[Part]
+
 // SessionServiceServer is the server API for SessionService service.
 // All implementations should embed UnimplementedSessionServiceServer
 // for forward compatibility.
@@ -78,6 +124,21 @@ type SessionServiceServer interface {
 	Create(context.Context, *CreateRequest) (*Session, error)
 	Get(context.Context, *GetRequest) (*Session, error)
 	List(context.Context, *ListRequest) (*ListResponse, error)
+	// Delete removes a session row and (when on-disk) its per-session
+	// workspace directory under SessionsDir/<id>. Refuses to delete
+	// RUNNING sessions (Aborted / FailedPrecondition) — the caller must
+	// stop the run first. NotFound is returned when the id does not
+	// exist; idempotent removes (delete twice) deliberately surface as
+	// NotFound rather than silently succeeding so the CLI can render an
+	// accurate count when batch-deleting.
+	Delete(context.Context, *DeleteRequest) (*DeleteResponse, error)
+	// Prompt is the single chat-surface entry point per
+	// docs/design/chat-architecture.md. The user types natural language;
+	// the server runs an agent loop (system-prompted LLM + tool registry)
+	// and streams Parts back. Callers (cli chat REPL / TUI) have no
+	// dispatch logic — every verb (diff, merge, freeze, run, ...) flows
+	// through this RPC as agent tool calls.
+	Prompt(*PromptRequest, grpc.ServerStreamingServer[Part]) error
 }
 
 // UnimplementedSessionServiceServer should be embedded to have
@@ -95,6 +156,12 @@ func (UnimplementedSessionServiceServer) Get(context.Context, *GetRequest) (*Ses
 }
 func (UnimplementedSessionServiceServer) List(context.Context, *ListRequest) (*ListResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method List not implemented")
+}
+func (UnimplementedSessionServiceServer) Delete(context.Context, *DeleteRequest) (*DeleteResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Delete not implemented")
+}
+func (UnimplementedSessionServiceServer) Prompt(*PromptRequest, grpc.ServerStreamingServer[Part]) error {
+	return status.Error(codes.Unimplemented, "method Prompt not implemented")
 }
 func (UnimplementedSessionServiceServer) testEmbeddedByValue() {}
 
@@ -170,6 +237,35 @@ func _SessionService_List_Handler(srv interface{}, ctx context.Context, dec func
 	return interceptor(ctx, in, info, handler)
 }
 
+func _SessionService_Delete_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SessionServiceServer).Delete(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SessionService_Delete_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SessionServiceServer).Delete(ctx, req.(*DeleteRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SessionService_Prompt_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(PromptRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(SessionServiceServer).Prompt(m, &grpc.GenericServerStream[PromptRequest, Part]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type SessionService_PromptServer = grpc.ServerStreamingServer[Part]
+
 // SessionService_ServiceDesc is the grpc.ServiceDesc for SessionService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -189,7 +285,17 @@ var SessionService_ServiceDesc = grpc.ServiceDesc{
 			MethodName: "List",
 			Handler:    _SessionService_List_Handler,
 		},
+		{
+			MethodName: "Delete",
+			Handler:    _SessionService_Delete_Handler,
+		},
 	},
-	Streams:  []grpc.StreamDesc{},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "Prompt",
+			Handler:       _SessionService_Prompt_Handler,
+			ServerStreams: true,
+		},
+	},
 	Metadata: "gil/v1/session.proto",
 }

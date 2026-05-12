@@ -4,8 +4,9 @@ package gil.v1;
 
 import "google/protobuf/timestamp.proto";
 import "google/api/annotations.proto";
+import "gil/v1/spec.proto";
 
-option go_package = "github.com/jedutools/gil/proto/gen/gil/v1;gilv1";
+option go_package = "github.com/mindungil/gil/proto/gen/gil/v1;gilv1";
 
 message Session {
   string id = 1;
@@ -21,6 +22,19 @@ message Session {
   // from in-process run progress; not persisted across restarts.
   int32 current_iteration = 10;
   int64 current_tokens = 11;
+  // Budget caps copied from the frozen spec so client surfaces (TUI /
+  // gil status / gil watch) can render token + cost meters without
+  // each fetching the full FrozenSpec. Zero values mean "no cap on
+  // this dimension" — clients must render the bare value in that
+  // case so legacy specs render unchanged. Populated only when the
+  // session has a frozen spec (CREATED sessions report 0/0).
+  int64 budget_max_tokens = 12;
+  double budget_max_cost_usd = 13;
+  // Sticky flag set by the server when a budget_exceeded event was
+  // observed for this session's most recent run. Lets the visual
+  // surfaces keep the alert glyph after the run has stopped.
+  bool budget_exceeded = 14;
+  string budget_reason = 15; // "tokens" | "cost" | "" — set with budget_exceeded
 }
 
 enum SessionStatus {
@@ -51,6 +65,30 @@ service SessionService {
       get: "/v1/sessions"
     };
   }
+  // Delete removes a session row and (when on-disk) its per-session
+  // workspace directory under SessionsDir/<id>. Refuses to delete
+  // RUNNING sessions (Aborted / FailedPrecondition) — the caller must
+  // stop the run first. NotFound is returned when the id does not
+  // exist; idempotent removes (delete twice) deliberately surface as
+  // NotFound rather than silently succeeding so the CLI can render an
+  // accurate count when batch-deleting.
+  rpc Delete(DeleteRequest) returns (DeleteResponse) {
+    option (google.api.http) = {
+      delete: "/v1/sessions/{id}"
+    };
+  }
+  // Prompt is the single chat-surface entry point per
+  // docs/design/chat-architecture.md. The user types natural language;
+  // the server runs an agent loop (system-prompted LLM + tool registry)
+  // and streams Parts back. Callers (cli chat REPL / TUI) have no
+  // dispatch logic — every verb (diff, merge, freeze, run, ...) flows
+  // through this RPC as agent tool calls.
+  rpc Prompt(PromptRequest) returns (stream Part) {
+    option (google.api.http) = {
+      post: "/v1/sessions/{session_id}/prompt"
+      body: "*"
+    };
+  }
 }
 
 message CreateRequest {
@@ -69,4 +107,111 @@ message ListRequest {
 
 message ListResponse {
   repeated Session sessions = 1;
+}
+
+message DeleteRequest {
+  string id = 1;
+}
+
+message DeleteResponse {
+  // freed_bytes is the size of the per-session directory that was
+  // unlinked (best effort — symlinks/sparse files may be undercounted).
+  // Zero when the session had no on-disk artefacts.
+  int64 freed_bytes = 1;
+}
+
+// PromptRequest is the chat-surface payload. session_id may be empty
+// to ask the daemon to allocate a session inline; in that case the
+// first streamed Part carries a session_created body so the caller
+// can pin the new id without a separate Create round-trip.
+message PromptRequest {
+  string session_id = 1;
+  // parts is the user message body. V1 supports a single text part;
+  // future multi-part (image / file / @-mention) extensions slot in
+  // here without an RPC rev.
+  repeated PromptPart parts = 2;
+  // agent picks which agent prompt + tool subset runs the loop.
+  // Empty falls through to the daemon's default agent. Recognised
+  // values: "default" (V1 only).
+  string agent = 3;
+  // model overrides workspace.Resolve when set. Empty fields fall
+  // through to the daemon's layered config (global + project +
+  // factory default).
+  ModelChoice model = 4;
+}
+
+// PromptPart is a single piece of the user message. V1 ships only the
+// text variant; the oneof shape leaves room for image / file / mention
+// types without breaking the wire contract.
+message PromptPart {
+  oneof body {
+    string text = 1;
+  }
+}
+
+// (ModelChoice is reused from spec.proto — no redefinition here.)
+
+// Part is a single streamed event from the agent loop. The oneof
+// distinguishes assistant text deltas, tool invocations, tool
+// results, the just-allocated session id (when PromptRequest had no
+// session_id), per-event metrics, and the turn-end sentinel.
+message Part {
+  oneof body {
+    TextDelta text = 1;
+    ToolCallPart tool_call = 2;
+    ToolResultPart tool_result = 3;
+    SessionAllocatedPart session_allocated = 4;
+    PromptMetrics metrics = 5;
+    DonePart done = 6;
+  }
+}
+
+// TextDelta is one streamed assistant text chunk. The chat surface
+// coalesces consecutive deltas onto the same transcript line.
+message TextDelta {
+  string content = 1;
+}
+
+// ToolCallPart announces that the agent decided to invoke a tool.
+// The chat surface renders this as a tool-call line (e.g. ⚒ name input)
+// so the user sees what the agent is doing.
+message ToolCallPart {
+  string id = 1;       // unique within the turn; pairs with ToolResultPart.call_id
+  string name = 2;     // canonical tool name from the server registry
+  string input_json = 3; // tool input as JSON; chat surface may pretty-print
+}
+
+// ToolResultPart carries the tool's output back. is_error=true marks
+// a soft failure (the agent decides whether to retry); transport /
+// authorization errors come through Part.body=Error or stream-level
+// gRPC status instead.
+message ToolResultPart {
+  string call_id = 1;
+  string content = 2;
+  bool is_error = 3;
+}
+
+// SessionAllocatedPart arrives as the FIRST Part on the stream when
+// PromptRequest.session_id was empty. The chat client pins the new
+// id and proceeds.
+message SessionAllocatedPart {
+  string session_id = 1;
+}
+
+// PromptMetrics is a per-turn snapshot the chat surface reads to
+// update its status pill (tokens / cost / latency).
+message PromptMetrics {
+  int64 tokens_in = 1;
+  int64 tokens_out = 2;
+  double cost_usd = 3;
+  int64 latency_ms = 4;
+}
+
+// DonePart is the final Part on every Prompt stream. stop_reason is
+// "end_turn" / "tool_use_exhausted" / "max_tokens" / "error" /
+// "user_cancelled" so callers can render an appropriate end-of-turn
+// affordance.
+message DonePart {
+  string stop_reason = 1;
+  string error_message = 2; // populated when stop_reason == "error"
 }

@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/jedutools/gil/core/memory"
+	"github.com/mindungil/gil/core/memory"
 )
 
 // MemoryUpdate is the agent-callable tool that writes to the memory bank.

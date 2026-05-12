@@ -14,8 +14,8 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
-	"github.com/jedutools/gil/core/cliutil"
-	"github.com/jedutools/gil/core/credstore"
+	"github.com/mindungil/gil/core/cliutil"
+	"github.com/mindungil/gil/core/credstore"
 )
 
 // authProviderJSON is the per-provider shape emitted by `gil auth list
@@ -27,6 +27,7 @@ type authProviderJSON struct {
 	Type      string    `json:"type"`
 	MaskedKey string    `json:"masked_key"`
 	BaseURL   string    `json:"base_url,omitempty"`
+	Model     string    `json:"model,omitempty"`
 	Updated   time.Time `json:"updated"`
 }
 
@@ -64,6 +65,8 @@ ambient env var.`,
 	c.AddCommand(authListCmd())
 	c.AddCommand(authLogoutCmd())
 	c.AddCommand(authStatusCmd())
+	c.AddCommand(authEditCmd())
+	c.AddCommand(authTestCmd())
 	return c
 }
 
@@ -109,89 +112,48 @@ func addAuthFileFlag(c *cobra.Command) {
 
 // authLoginCmd implements `gil auth login [<provider>]`.
 //
-// Decision tree:
-//  1. If <provider> is missing, prompt with a numbered picker over
-//     credstore.KnownProviders().
-//  2. If --api-key is provided, use it directly. Otherwise read with
-//     term.ReadPassword so the key never echoes to the terminal.
-//  3. For vllm specifically, prompt for --base-url too, since vllm has no
-//     canonical endpoint.
-//  4. Validate the prefix non-fatally — wrong prefix is a warning, not a
-//     blocker, because some users self-host gateways that proxy under a
-//     different prefix.
+// PHASE 25 REDESIGN: replaced the bare one-line "Enter API key" prompt
+// with a multi-step interactive wizard (provider picker → key → model →
+// optional connection test). The non-interactive contract — calling
+// with --api-key + positional provider — is preserved bug-for-bug so
+// scripted installs still work; only the interactive UX changed.
+//
+// See auth_wizard.go for the wizard implementation. Reference lifts:
+//   - opencode's providers.ts — multi-step provider login flow
+//   - cline/cli's ModelPicker.tsx — curated model list per provider
+//   - aider/onboarding.py — try-key-then-test contract
+//   - goose/configure — confirm-each-step layout
 func authLoginCmd() *cobra.Command {
-	var apiKey, baseURL string
+	var apiKey, baseURL, model string
+	var noTest bool
 	c := &cobra.Command{
 		Use:   "login [provider]",
 		Short: "Log in to a provider (writes credentials to auth.json)",
 		Long: `Add or update a credential for a provider.
 
-If <provider> is omitted, you will be prompted to pick one. If --api-key is
-omitted, you will be prompted with terminal echo disabled.
+When run without arguments, gil drops you into a wizard that walks you
+through picking a provider, entering its API key, and choosing a default
+model. Each step is confirmed before moving on; the wizard ends with an
+optional "test connection" round-trip.
+
+Existing non-interactive flags continue to work: pass --api-key (and
+--base-url for vllm) to skip every prompt and write the credential
+directly.
 
 Examples:
-  gil auth login                                    # interactive picker
-  gil auth login anthropic                          # prompt for key
-  gil auth login anthropic --api-key sk-ant-...     # non-interactive
-  gil auth login vllm --base-url http://host:8000 --api-key local`,
+  gil auth login                                          # full wizard
+  gil auth login anthropic                                # skip provider picker
+  gil auth login anthropic --api-key sk-ant-... --model claude-haiku-4-5
+  gil auth login vllm --base-url http://host:8000/v1 --api-key local --model qwen3-32b`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx := cmd.Context()
-			if ctx == nil {
-				ctx = context.Background()
-			}
-
-			provider, err := pickProvider(cmd, args)
-			if err != nil {
-				return err
-			}
-
-			key := apiKey
-			if key == "" {
-				key, err = readPassword(cmd, fmt.Sprintf("Enter API key for %s: ", provider))
-				if err != nil {
-					return cliutil.Wrap(err, "could not read API key", "try again, or pass --api-key")
-				}
-			}
-			key = strings.TrimSpace(key)
-			if key == "" {
-				return cliutil.New("API key is empty", `pass --api-key, or type a non-empty value when prompted`)
-			}
-
-			if warn := validateKeyPrefix(provider, key); warn != "" {
-				fmt.Fprintln(cmd.ErrOrStderr(), "warning:", warn)
-			}
-
-			cred := credstore.Credential{Type: credstore.CredAPI, APIKey: key}
-			if provider == credstore.VLLM {
-				if baseURL == "" {
-					baseURL, err = readLine(cmd, "BaseURL for vllm (e.g. http://localhost:8000/v1): ")
-					if err != nil {
-						return cliutil.Wrap(err, "could not read base URL", "")
-					}
-				}
-				baseURL = strings.TrimSpace(baseURL)
-				if baseURL == "" {
-					return cliutil.New("vllm requires --base-url", `pass --base-url http://host:port/v1 (or type one when prompted)`)
-				}
-				cred.BaseURL = baseURL
-			} else if baseURL != "" {
-				// Allow custom base URL on any provider (e.g. proxies),
-				// just don't require it.
-				cred.BaseURL = baseURL
-			}
-
-			store := newStoreFor(cmd)
-			if err := store.Set(ctx, provider, cred); err != nil {
-				return cliutil.Wrap(err, "could not save credential", "check that "+authStorePath(cmd)+" is writable")
-			}
-
-			fmt.Fprintf(cmd.OutOrStdout(), "Saved credential for %s (%s).\n", provider, cred.MaskedKey())
-			return nil
+			return runLoginWizard(cmd, args, apiKey, baseURL, model, noTest)
 		},
 	}
 	c.Flags().StringVar(&apiKey, "api-key", "", "API key (skips interactive prompt)")
 	c.Flags().StringVar(&baseURL, "base-url", "", "base URL (vllm/custom endpoints)")
+	c.Flags().StringVar(&model, "model", "", "default model id for this provider (skips model picker)")
+	c.Flags().BoolVar(&noTest, "no-test", false, "skip the post-login connection test")
 	addAuthFileFlag(c)
 	return c
 }
@@ -213,7 +175,7 @@ func authListCmd() *cobra.Command {
 			store := newStoreFor(cmd)
 			names, err := store.List(ctx)
 			if err != nil {
-				return cliutil.Wrap(err, "could not read credentials", "")
+				return cliutil.Wrap(err, "could not read credentials", "run `gil doctor` to inspect filesystem permissions on the auth file")
 			}
 			out := cmd.OutOrStdout()
 			if outputJSON() {
@@ -225,7 +187,7 @@ func authListCmd() *cobra.Command {
 				return nil
 			}
 			tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-			fmt.Fprintln(tw, "PROVIDER\tTYPE\tKEY\tBASE_URL\tUPDATED")
+			fmt.Fprintln(tw, "PROVIDER\tTYPE\tKEY\tMODEL\tBASE_URL\tUPDATED")
 			for _, n := range names {
 				cred, err := store.Get(ctx, n)
 				if err != nil || cred == nil {
@@ -235,8 +197,12 @@ func authListCmd() *cobra.Command {
 				if baseURL == "" {
 					baseURL = "-"
 				}
-				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
-					n, cred.Type, cred.MaskedKey(), baseURL, formatTime(cred.Updated))
+				model := cred.Model
+				if model == "" {
+					model = "-"
+				}
+				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
+					n, cred.Type, cred.MaskedKey(), model, baseURL, formatTime(cred.Updated))
 			}
 			if err := tw.Flush(); err != nil {
 				return err
@@ -271,6 +237,7 @@ func writeAuthListJSON(ctx context.Context, w io.Writer, store interface {
 			Type:      string(cred.Type),
 			MaskedKey: cred.MaskedKey(),
 			BaseURL:   cred.BaseURL,
+			Model:     cred.Model,
 			Updated:   cred.Updated,
 		})
 	}
@@ -301,10 +268,10 @@ func authLogoutCmd() *cobra.Command {
 			store := newStoreFor(cmd)
 			existed, err := store.Get(ctx, provider)
 			if err != nil {
-				return cliutil.Wrap(err, "could not read credentials", "")
+				return cliutil.Wrap(err, "could not read credentials", "run `gil doctor` to inspect filesystem permissions on the auth file")
 			}
 			if err := store.Remove(ctx, provider); err != nil {
-				return cliutil.Wrap(err, "could not remove credential", "")
+				return cliutil.Wrap(err, "could not remove credential", "check that the auth file is writable; run `gil auth list` to confirm what's configured")
 			}
 			out := cmd.OutOrStdout()
 			if existed == nil {
@@ -336,7 +303,7 @@ func authStatusCmd() *cobra.Command {
 			store := newStoreFor(cmd)
 			names, err := store.List(ctx)
 			if err != nil {
-				return cliutil.Wrap(err, "could not read credentials", "")
+				return cliutil.Wrap(err, "could not read credentials", "run `gil doctor` to inspect filesystem permissions on the auth file")
 			}
 			out := cmd.OutOrStdout()
 			fmt.Fprintf(out, "auth file: %s\n\n", authStorePath(cmd))
@@ -350,7 +317,11 @@ func authStatusCmd() *cobra.Command {
 					if err != nil || cred == nil {
 						continue
 					}
-					fmt.Fprintf(out, "  %-12s %s %s\n", n, cred.Type, cred.MaskedKey())
+					modelTag := ""
+					if cred.Model != "" {
+						modelTag = "  model=" + cred.Model
+					}
+					fmt.Fprintf(out, "  %-12s %s %s%s\n", n, cred.Type, cred.MaskedKey(), modelTag)
 				}
 			}
 
@@ -492,4 +463,148 @@ func formatTime(t time.Time) string {
 		return "-"
 	}
 	return t.Local().Format("2006-01-02 15:04:05")
+}
+
+// authEditCmd implements `gil auth edit <provider>`.
+//
+// Edit re-runs the wizard for an existing entry, pre-populating the
+// resolved credential's BaseURL and Model so the user can keep what's
+// already there by pressing enter at each step. The API key is always
+// re-prompted (not echoed); pressing enter on the key prompt keeps the
+// existing key intact, otherwise the new value replaces it.
+//
+// Reference lift: opencode's providers logout/login round-trip is the
+// closest equivalent — they require remove + re-add. We give a single
+// command for the common "I just want to change my model" case so users
+// don't have to remember their full key to update an unrelated field.
+func authEditCmd() *cobra.Command {
+	var apiKey, baseURL, model string
+	var noTest bool
+	c := &cobra.Command{
+		Use:   "edit <provider>",
+		Short: "Edit an existing credential's key/base-url/model",
+		Long: `Re-prompt for the API key, base URL, and default model on an
+existing credential entry, keeping any value the user does not change.
+
+This is the right command when you want to switch models on an existing
+provider (no need to re-paste your API key) or to retarget a vllm
+endpoint at a new URL.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			if ctx == nil {
+				ctx = context.Background()
+			}
+			provider := credstore.ProviderName(strings.TrimSpace(args[0]))
+			if provider == "" {
+				return cliutil.New("provider name is empty", "usage: gil auth edit <provider>")
+			}
+			store := newStoreFor(cmd)
+			existing, err := store.Get(ctx, provider)
+			if err != nil {
+				return cliutil.Wrap(err, "could not read credential", "run `gil auth list` to confirm what's configured")
+			}
+			if existing == nil {
+				return cliutil.New(fmt.Sprintf("no credential for %s", provider),
+					"register one first: gil auth login "+string(provider))
+			}
+
+			// Pre-fill from the existing credential. The wizard treats
+			// these as user-supplied (so prompts are skipped); flags
+			// the user passed on the command line still win.
+			if apiKey == "" {
+				// Don't pre-fill the key — force re-prompt OR honour
+				// the special "skip" sentinel below. We pass the
+				// existing key under a hidden mechanism: a flag on the
+				// command's Annotations that the wizard reads.
+			}
+			if baseURL == "" {
+				baseURL = existing.BaseURL
+			}
+			if model == "" {
+				model = existing.Model
+			}
+
+			// Run the wizard with the positional arg so it skips step 1.
+			argsForWizard := []string{string(provider)}
+			// Special handling for the API key: when the user didn't
+			// pass --api-key, we want the wizard to prompt with the
+			// option of pressing enter to keep the existing key. We
+			// pass the existing key via cobra Annotations as a
+			// workaround so the wizard has access without changing its
+			// signature. (The Annotations map is a stable cobra
+			// mechanism and not part of the user-facing surface.)
+			if cmd.Annotations == nil {
+				cmd.Annotations = map[string]string{}
+			}
+			cmd.Annotations["existing_api_key"] = existing.APIKey
+
+			return runLoginWizard(cmd, argsForWizard, apiKey, baseURL, model, noTest)
+		},
+	}
+	c.Flags().StringVar(&apiKey, "api-key", "", "new API key (skips key prompt)")
+	c.Flags().StringVar(&baseURL, "base-url", "", "new base URL (overrides stored value)")
+	c.Flags().StringVar(&model, "model", "", "new default model id")
+	c.Flags().BoolVar(&noTest, "no-test", false, "skip the post-edit connection test")
+	addAuthFileFlag(c)
+	return c
+}
+
+// authTestCmd implements `gil auth test <provider>`.
+//
+// Sends a tiny "say ok" completion against the stored credential so the
+// user can verify the key still works without re-entering anything.
+// Output mirrors the wizard's step-4 line.
+func authTestCmd() *cobra.Command {
+	c := &cobra.Command{
+		Use:   "test <provider>",
+		Short: "Test the stored credential by sending a tiny completion",
+		Long: `Send a one-token "say ok" completion against the credential
+stored for <provider>. This is the same smoke test the login wizard
+offers at the end of registration; running it again is the cheapest way
+to verify a key still works (e.g., after a provider rotated keys or
+a self-hosted vllm endpoint moved).`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			if ctx == nil {
+				ctx = context.Background()
+			}
+			provider := credstore.ProviderName(strings.TrimSpace(args[0]))
+			store := newStoreFor(cmd)
+			cred, err := store.Get(ctx, provider)
+			if err != nil {
+				return cliutil.Wrap(err, "could not read credential", "run `gil auth list` to confirm what's configured")
+			}
+			if cred == nil {
+				return cliutil.New(fmt.Sprintf("no credential for %s", provider),
+					"register one first: gil auth login "+string(provider))
+			}
+			out := cmd.OutOrStdout()
+			fmt.Fprintf(out, "Testing %s (%s)…\n", provider, cred.MaskedKey())
+
+			testCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			defer cancel()
+			res, terr := credstore.TestProvider(testCtx, provider, *cred)
+			if terr != nil {
+				// Use the same humanised translation as the wizard so
+				// the user sees a consistent error vocabulary across
+				// surfaces.
+				return humaniseTestError(terr)
+			}
+			tokens := ""
+			if res.InputTokens > 0 || res.OutputTokens > 0 {
+				tokens = fmt.Sprintf(" (in:%d out:%d)", res.InputTokens, res.OutputTokens)
+			}
+			reply := res.ReplyText
+			if reply == "" {
+				reply = "(no text)"
+			}
+			fmt.Fprintf(out, "OK  reply=%q  model=%s  latency=%dms%s\n",
+				reply, res.Model, res.Latency.Milliseconds(), tokens)
+			return nil
+		},
+	}
+	addAuthFileFlag(c)
+	return c
 }

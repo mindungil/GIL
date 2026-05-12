@@ -102,8 +102,21 @@ type Session struct {
 	// from in-process run progress; not persisted across restarts.
 	CurrentIteration int32 `protobuf:"varint,10,opt,name=current_iteration,json=currentIteration,proto3" json:"current_iteration,omitempty"`
 	CurrentTokens    int64 `protobuf:"varint,11,opt,name=current_tokens,json=currentTokens,proto3" json:"current_tokens,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	// Budget caps copied from the frozen spec so client surfaces (TUI /
+	// gil status / gil watch) can render token + cost meters without
+	// each fetching the full FrozenSpec. Zero values mean "no cap on
+	// this dimension" — clients must render the bare value in that
+	// case so legacy specs render unchanged. Populated only when the
+	// session has a frozen spec (CREATED sessions report 0/0).
+	BudgetMaxTokens  int64   `protobuf:"varint,12,opt,name=budget_max_tokens,json=budgetMaxTokens,proto3" json:"budget_max_tokens,omitempty"`
+	BudgetMaxCostUsd float64 `protobuf:"fixed64,13,opt,name=budget_max_cost_usd,json=budgetMaxCostUsd,proto3" json:"budget_max_cost_usd,omitempty"`
+	// Sticky flag set by the server when a budget_exceeded event was
+	// observed for this session's most recent run. Lets the visual
+	// surfaces keep the alert glyph after the run has stopped.
+	BudgetExceeded bool   `protobuf:"varint,14,opt,name=budget_exceeded,json=budgetExceeded,proto3" json:"budget_exceeded,omitempty"`
+	BudgetReason   string `protobuf:"bytes,15,opt,name=budget_reason,json=budgetReason,proto3" json:"budget_reason,omitempty"` // "tokens" | "cost" | "" — set with budget_exceeded
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *Session) Reset() {
@@ -211,6 +224,34 @@ func (x *Session) GetCurrentTokens() int64 {
 		return x.CurrentTokens
 	}
 	return 0
+}
+
+func (x *Session) GetBudgetMaxTokens() int64 {
+	if x != nil {
+		return x.BudgetMaxTokens
+	}
+	return 0
+}
+
+func (x *Session) GetBudgetMaxCostUsd() float64 {
+	if x != nil {
+		return x.BudgetMaxCostUsd
+	}
+	return 0
+}
+
+func (x *Session) GetBudgetExceeded() bool {
+	if x != nil {
+		return x.BudgetExceeded
+	}
+	return false
+}
+
+func (x *Session) GetBudgetReason() string {
+	if x != nil {
+		return x.BudgetReason
+	}
+	return ""
 }
 
 type CreateRequest struct {
@@ -405,11 +446,748 @@ func (x *ListResponse) GetSessions() []*Session {
 	return nil
 }
 
+type DeleteRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeleteRequest) Reset() {
+	*x = DeleteRequest{}
+	mi := &file_gil_v1_session_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeleteRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeleteRequest) ProtoMessage() {}
+
+func (x *DeleteRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_gil_v1_session_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeleteRequest.ProtoReflect.Descriptor instead.
+func (*DeleteRequest) Descriptor() ([]byte, []int) {
+	return file_gil_v1_session_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *DeleteRequest) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+type DeleteResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// freed_bytes is the size of the per-session directory that was
+	// unlinked (best effort — symlinks/sparse files may be undercounted).
+	// Zero when the session had no on-disk artefacts.
+	FreedBytes    int64 `protobuf:"varint,1,opt,name=freed_bytes,json=freedBytes,proto3" json:"freed_bytes,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeleteResponse) Reset() {
+	*x = DeleteResponse{}
+	mi := &file_gil_v1_session_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeleteResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeleteResponse) ProtoMessage() {}
+
+func (x *DeleteResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_gil_v1_session_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeleteResponse.ProtoReflect.Descriptor instead.
+func (*DeleteResponse) Descriptor() ([]byte, []int) {
+	return file_gil_v1_session_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *DeleteResponse) GetFreedBytes() int64 {
+	if x != nil {
+		return x.FreedBytes
+	}
+	return 0
+}
+
+// PromptRequest is the chat-surface payload. session_id may be empty
+// to ask the daemon to allocate a session inline; in that case the
+// first streamed Part carries a session_created body so the caller
+// can pin the new id without a separate Create round-trip.
+type PromptRequest struct {
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	SessionId string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	// parts is the user message body. V1 supports a single text part;
+	// future multi-part (image / file / @-mention) extensions slot in
+	// here without an RPC rev.
+	Parts []*PromptPart `protobuf:"bytes,2,rep,name=parts,proto3" json:"parts,omitempty"`
+	// agent picks which agent prompt + tool subset runs the loop.
+	// Empty falls through to the daemon's default agent. Recognised
+	// values: "default" (V1 only).
+	Agent string `protobuf:"bytes,3,opt,name=agent,proto3" json:"agent,omitempty"`
+	// model overrides workspace.Resolve when set. Empty fields fall
+	// through to the daemon's layered config (global + project +
+	// factory default).
+	Model         *ModelChoice `protobuf:"bytes,4,opt,name=model,proto3" json:"model,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PromptRequest) Reset() {
+	*x = PromptRequest{}
+	mi := &file_gil_v1_session_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PromptRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PromptRequest) ProtoMessage() {}
+
+func (x *PromptRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_gil_v1_session_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PromptRequest.ProtoReflect.Descriptor instead.
+func (*PromptRequest) Descriptor() ([]byte, []int) {
+	return file_gil_v1_session_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *PromptRequest) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
+func (x *PromptRequest) GetParts() []*PromptPart {
+	if x != nil {
+		return x.Parts
+	}
+	return nil
+}
+
+func (x *PromptRequest) GetAgent() string {
+	if x != nil {
+		return x.Agent
+	}
+	return ""
+}
+
+func (x *PromptRequest) GetModel() *ModelChoice {
+	if x != nil {
+		return x.Model
+	}
+	return nil
+}
+
+// PromptPart is a single piece of the user message. V1 ships only the
+// text variant; the oneof shape leaves room for image / file / mention
+// types without breaking the wire contract.
+type PromptPart struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Types that are valid to be assigned to Body:
+	//
+	//	*PromptPart_Text
+	Body          isPromptPart_Body `protobuf_oneof:"body"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PromptPart) Reset() {
+	*x = PromptPart{}
+	mi := &file_gil_v1_session_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PromptPart) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PromptPart) ProtoMessage() {}
+
+func (x *PromptPart) ProtoReflect() protoreflect.Message {
+	mi := &file_gil_v1_session_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PromptPart.ProtoReflect.Descriptor instead.
+func (*PromptPart) Descriptor() ([]byte, []int) {
+	return file_gil_v1_session_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *PromptPart) GetBody() isPromptPart_Body {
+	if x != nil {
+		return x.Body
+	}
+	return nil
+}
+
+func (x *PromptPart) GetText() string {
+	if x != nil {
+		if x, ok := x.Body.(*PromptPart_Text); ok {
+			return x.Text
+		}
+	}
+	return ""
+}
+
+type isPromptPart_Body interface {
+	isPromptPart_Body()
+}
+
+type PromptPart_Text struct {
+	Text string `protobuf:"bytes,1,opt,name=text,proto3,oneof"`
+}
+
+func (*PromptPart_Text) isPromptPart_Body() {}
+
+// Part is a single streamed event from the agent loop. The oneof
+// distinguishes assistant text deltas, tool invocations, tool
+// results, the just-allocated session id (when PromptRequest had no
+// session_id), per-event metrics, and the turn-end sentinel.
+type Part struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Types that are valid to be assigned to Body:
+	//
+	//	*Part_Text
+	//	*Part_ToolCall
+	//	*Part_ToolResult
+	//	*Part_SessionAllocated
+	//	*Part_Metrics
+	//	*Part_Done
+	Body          isPart_Body `protobuf_oneof:"body"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Part) Reset() {
+	*x = Part{}
+	mi := &file_gil_v1_session_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Part) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Part) ProtoMessage() {}
+
+func (x *Part) ProtoReflect() protoreflect.Message {
+	mi := &file_gil_v1_session_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Part.ProtoReflect.Descriptor instead.
+func (*Part) Descriptor() ([]byte, []int) {
+	return file_gil_v1_session_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *Part) GetBody() isPart_Body {
+	if x != nil {
+		return x.Body
+	}
+	return nil
+}
+
+func (x *Part) GetText() *TextDelta {
+	if x != nil {
+		if x, ok := x.Body.(*Part_Text); ok {
+			return x.Text
+		}
+	}
+	return nil
+}
+
+func (x *Part) GetToolCall() *ToolCallPart {
+	if x != nil {
+		if x, ok := x.Body.(*Part_ToolCall); ok {
+			return x.ToolCall
+		}
+	}
+	return nil
+}
+
+func (x *Part) GetToolResult() *ToolResultPart {
+	if x != nil {
+		if x, ok := x.Body.(*Part_ToolResult); ok {
+			return x.ToolResult
+		}
+	}
+	return nil
+}
+
+func (x *Part) GetSessionAllocated() *SessionAllocatedPart {
+	if x != nil {
+		if x, ok := x.Body.(*Part_SessionAllocated); ok {
+			return x.SessionAllocated
+		}
+	}
+	return nil
+}
+
+func (x *Part) GetMetrics() *PromptMetrics {
+	if x != nil {
+		if x, ok := x.Body.(*Part_Metrics); ok {
+			return x.Metrics
+		}
+	}
+	return nil
+}
+
+func (x *Part) GetDone() *DonePart {
+	if x != nil {
+		if x, ok := x.Body.(*Part_Done); ok {
+			return x.Done
+		}
+	}
+	return nil
+}
+
+type isPart_Body interface {
+	isPart_Body()
+}
+
+type Part_Text struct {
+	Text *TextDelta `protobuf:"bytes,1,opt,name=text,proto3,oneof"`
+}
+
+type Part_ToolCall struct {
+	ToolCall *ToolCallPart `protobuf:"bytes,2,opt,name=tool_call,json=toolCall,proto3,oneof"`
+}
+
+type Part_ToolResult struct {
+	ToolResult *ToolResultPart `protobuf:"bytes,3,opt,name=tool_result,json=toolResult,proto3,oneof"`
+}
+
+type Part_SessionAllocated struct {
+	SessionAllocated *SessionAllocatedPart `protobuf:"bytes,4,opt,name=session_allocated,json=sessionAllocated,proto3,oneof"`
+}
+
+type Part_Metrics struct {
+	Metrics *PromptMetrics `protobuf:"bytes,5,opt,name=metrics,proto3,oneof"`
+}
+
+type Part_Done struct {
+	Done *DonePart `protobuf:"bytes,6,opt,name=done,proto3,oneof"`
+}
+
+func (*Part_Text) isPart_Body() {}
+
+func (*Part_ToolCall) isPart_Body() {}
+
+func (*Part_ToolResult) isPart_Body() {}
+
+func (*Part_SessionAllocated) isPart_Body() {}
+
+func (*Part_Metrics) isPart_Body() {}
+
+func (*Part_Done) isPart_Body() {}
+
+// TextDelta is one streamed assistant text chunk. The chat surface
+// coalesces consecutive deltas onto the same transcript line.
+type TextDelta struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Content       string                 `protobuf:"bytes,1,opt,name=content,proto3" json:"content,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *TextDelta) Reset() {
+	*x = TextDelta{}
+	mi := &file_gil_v1_session_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TextDelta) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TextDelta) ProtoMessage() {}
+
+func (x *TextDelta) ProtoReflect() protoreflect.Message {
+	mi := &file_gil_v1_session_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TextDelta.ProtoReflect.Descriptor instead.
+func (*TextDelta) Descriptor() ([]byte, []int) {
+	return file_gil_v1_session_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *TextDelta) GetContent() string {
+	if x != nil {
+		return x.Content
+	}
+	return ""
+}
+
+// ToolCallPart announces that the agent decided to invoke a tool.
+// The chat surface renders this as a tool-call line (e.g. ⚒ name input)
+// so the user sees what the agent is doing.
+type ToolCallPart struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`                                // unique within the turn; pairs with ToolResultPart.call_id
+	Name          string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`                            // canonical tool name from the server registry
+	InputJson     string                 `protobuf:"bytes,3,opt,name=input_json,json=inputJson,proto3" json:"input_json,omitempty"` // tool input as JSON; chat surface may pretty-print
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ToolCallPart) Reset() {
+	*x = ToolCallPart{}
+	mi := &file_gil_v1_session_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ToolCallPart) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ToolCallPart) ProtoMessage() {}
+
+func (x *ToolCallPart) ProtoReflect() protoreflect.Message {
+	mi := &file_gil_v1_session_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ToolCallPart.ProtoReflect.Descriptor instead.
+func (*ToolCallPart) Descriptor() ([]byte, []int) {
+	return file_gil_v1_session_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *ToolCallPart) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *ToolCallPart) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *ToolCallPart) GetInputJson() string {
+	if x != nil {
+		return x.InputJson
+	}
+	return ""
+}
+
+// ToolResultPart carries the tool's output back. is_error=true marks
+// a soft failure (the agent decides whether to retry); transport /
+// authorization errors come through Part.body=Error or stream-level
+// gRPC status instead.
+type ToolResultPart struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	CallId        string                 `protobuf:"bytes,1,opt,name=call_id,json=callId,proto3" json:"call_id,omitempty"`
+	Content       string                 `protobuf:"bytes,2,opt,name=content,proto3" json:"content,omitempty"`
+	IsError       bool                   `protobuf:"varint,3,opt,name=is_error,json=isError,proto3" json:"is_error,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ToolResultPart) Reset() {
+	*x = ToolResultPart{}
+	mi := &file_gil_v1_session_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ToolResultPart) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ToolResultPart) ProtoMessage() {}
+
+func (x *ToolResultPart) ProtoReflect() protoreflect.Message {
+	mi := &file_gil_v1_session_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ToolResultPart.ProtoReflect.Descriptor instead.
+func (*ToolResultPart) Descriptor() ([]byte, []int) {
+	return file_gil_v1_session_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *ToolResultPart) GetCallId() string {
+	if x != nil {
+		return x.CallId
+	}
+	return ""
+}
+
+func (x *ToolResultPart) GetContent() string {
+	if x != nil {
+		return x.Content
+	}
+	return ""
+}
+
+func (x *ToolResultPart) GetIsError() bool {
+	if x != nil {
+		return x.IsError
+	}
+	return false
+}
+
+// SessionAllocatedPart arrives as the FIRST Part on the stream when
+// PromptRequest.session_id was empty. The chat client pins the new
+// id and proceeds.
+type SessionAllocatedPart struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SessionId     string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SessionAllocatedPart) Reset() {
+	*x = SessionAllocatedPart{}
+	mi := &file_gil_v1_session_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SessionAllocatedPart) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SessionAllocatedPart) ProtoMessage() {}
+
+func (x *SessionAllocatedPart) ProtoReflect() protoreflect.Message {
+	mi := &file_gil_v1_session_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SessionAllocatedPart.ProtoReflect.Descriptor instead.
+func (*SessionAllocatedPart) Descriptor() ([]byte, []int) {
+	return file_gil_v1_session_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *SessionAllocatedPart) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
+// PromptMetrics is a per-turn snapshot the chat surface reads to
+// update its status pill (tokens / cost / latency).
+type PromptMetrics struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	TokensIn      int64                  `protobuf:"varint,1,opt,name=tokens_in,json=tokensIn,proto3" json:"tokens_in,omitempty"`
+	TokensOut     int64                  `protobuf:"varint,2,opt,name=tokens_out,json=tokensOut,proto3" json:"tokens_out,omitempty"`
+	CostUsd       float64                `protobuf:"fixed64,3,opt,name=cost_usd,json=costUsd,proto3" json:"cost_usd,omitempty"`
+	LatencyMs     int64                  `protobuf:"varint,4,opt,name=latency_ms,json=latencyMs,proto3" json:"latency_ms,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PromptMetrics) Reset() {
+	*x = PromptMetrics{}
+	mi := &file_gil_v1_session_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PromptMetrics) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PromptMetrics) ProtoMessage() {}
+
+func (x *PromptMetrics) ProtoReflect() protoreflect.Message {
+	mi := &file_gil_v1_session_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PromptMetrics.ProtoReflect.Descriptor instead.
+func (*PromptMetrics) Descriptor() ([]byte, []int) {
+	return file_gil_v1_session_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *PromptMetrics) GetTokensIn() int64 {
+	if x != nil {
+		return x.TokensIn
+	}
+	return 0
+}
+
+func (x *PromptMetrics) GetTokensOut() int64 {
+	if x != nil {
+		return x.TokensOut
+	}
+	return 0
+}
+
+func (x *PromptMetrics) GetCostUsd() float64 {
+	if x != nil {
+		return x.CostUsd
+	}
+	return 0
+}
+
+func (x *PromptMetrics) GetLatencyMs() int64 {
+	if x != nil {
+		return x.LatencyMs
+	}
+	return 0
+}
+
+// DonePart is the final Part on every Prompt stream. stop_reason is
+// "end_turn" / "tool_use_exhausted" / "max_tokens" / "error" /
+// "user_cancelled" so callers can render an appropriate end-of-turn
+// affordance.
+type DonePart struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	StopReason    string                 `protobuf:"bytes,1,opt,name=stop_reason,json=stopReason,proto3" json:"stop_reason,omitempty"`
+	ErrorMessage  string                 `protobuf:"bytes,2,opt,name=error_message,json=errorMessage,proto3" json:"error_message,omitempty"` // populated when stop_reason == "error"
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DonePart) Reset() {
+	*x = DonePart{}
+	mi := &file_gil_v1_session_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DonePart) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DonePart) ProtoMessage() {}
+
+func (x *DonePart) ProtoReflect() protoreflect.Message {
+	mi := &file_gil_v1_session_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DonePart.ProtoReflect.Descriptor instead.
+func (*DonePart) Descriptor() ([]byte, []int) {
+	return file_gil_v1_session_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *DonePart) GetStopReason() string {
+	if x != nil {
+		return x.StopReason
+	}
+	return ""
+}
+
+func (x *DonePart) GetErrorMessage() string {
+	if x != nil {
+		return x.ErrorMessage
+	}
+	return ""
+}
+
 var File_gil_v1_session_proto protoreflect.FileDescriptor
 
 const file_gil_v1_session_proto_rawDesc = "" +
 	"\n" +
-	"\x14gil/v1/session.proto\x12\x06gil.v1\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x1cgoogle/api/annotations.proto\"\xb2\x03\n" +
+	"\x14gil/v1/session.proto\x12\x06gil.v1\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x1cgoogle/api/annotations.proto\x1a\x11gil/v1/spec.proto\"\xdb\x04\n" +
 	"\aSession\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12-\n" +
 	"\x06status\x18\x02 \x01(\x0e2\x15.gil.v1.SessionStatusR\x06status\x129\n" +
@@ -425,7 +1203,11 @@ const file_gil_v1_session_proto_rawDesc = "" +
 	"\x0etotal_cost_usd\x18\t \x01(\x01R\ftotalCostUsd\x12+\n" +
 	"\x11current_iteration\x18\n" +
 	" \x01(\x05R\x10currentIteration\x12%\n" +
-	"\x0ecurrent_tokens\x18\v \x01(\x03R\rcurrentTokens\"M\n" +
+	"\x0ecurrent_tokens\x18\v \x01(\x03R\rcurrentTokens\x12*\n" +
+	"\x11budget_max_tokens\x18\f \x01(\x03R\x0fbudgetMaxTokens\x12-\n" +
+	"\x13budget_max_cost_usd\x18\r \x01(\x01R\x10budgetMaxCostUsd\x12'\n" +
+	"\x0fbudget_exceeded\x18\x0e \x01(\bR\x0ebudgetExceeded\x12#\n" +
+	"\rbudget_reason\x18\x0f \x01(\tR\fbudgetReason\"M\n" +
 	"\rCreateRequest\x12\x1f\n" +
 	"\vworking_dir\x18\x01 \x01(\tR\n" +
 	"workingDir\x12\x1b\n" +
@@ -437,7 +1219,56 @@ const file_gil_v1_session_proto_rawDesc = "" +
 	"\x05limit\x18\x01 \x01(\x05R\x05limit\x12#\n" +
 	"\rstatus_filter\x18\x02 \x01(\tR\fstatusFilter\";\n" +
 	"\fListResponse\x12+\n" +
-	"\bsessions\x18\x01 \x03(\v2\x0f.gil.v1.SessionR\bsessions*\x8f\x01\n" +
+	"\bsessions\x18\x01 \x03(\v2\x0f.gil.v1.SessionR\bsessions\"\x1f\n" +
+	"\rDeleteRequest\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\"1\n" +
+	"\x0eDeleteResponse\x12\x1f\n" +
+	"\vfreed_bytes\x18\x01 \x01(\x03R\n" +
+	"freedBytes\"\x99\x01\n" +
+	"\rPromptRequest\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x01 \x01(\tR\tsessionId\x12(\n" +
+	"\x05parts\x18\x02 \x03(\v2\x12.gil.v1.PromptPartR\x05parts\x12\x14\n" +
+	"\x05agent\x18\x03 \x01(\tR\x05agent\x12)\n" +
+	"\x05model\x18\x04 \x01(\v2\x13.gil.v1.ModelChoiceR\x05model\"*\n" +
+	"\n" +
+	"PromptPart\x12\x14\n" +
+	"\x04text\x18\x01 \x01(\tH\x00R\x04textB\x06\n" +
+	"\x04body\"\xcf\x02\n" +
+	"\x04Part\x12'\n" +
+	"\x04text\x18\x01 \x01(\v2\x11.gil.v1.TextDeltaH\x00R\x04text\x123\n" +
+	"\ttool_call\x18\x02 \x01(\v2\x14.gil.v1.ToolCallPartH\x00R\btoolCall\x129\n" +
+	"\vtool_result\x18\x03 \x01(\v2\x16.gil.v1.ToolResultPartH\x00R\n" +
+	"toolResult\x12K\n" +
+	"\x11session_allocated\x18\x04 \x01(\v2\x1c.gil.v1.SessionAllocatedPartH\x00R\x10sessionAllocated\x121\n" +
+	"\ametrics\x18\x05 \x01(\v2\x15.gil.v1.PromptMetricsH\x00R\ametrics\x12&\n" +
+	"\x04done\x18\x06 \x01(\v2\x10.gil.v1.DonePartH\x00R\x04doneB\x06\n" +
+	"\x04body\"%\n" +
+	"\tTextDelta\x12\x18\n" +
+	"\acontent\x18\x01 \x01(\tR\acontent\"Q\n" +
+	"\fToolCallPart\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
+	"\x04name\x18\x02 \x01(\tR\x04name\x12\x1d\n" +
+	"\n" +
+	"input_json\x18\x03 \x01(\tR\tinputJson\"^\n" +
+	"\x0eToolResultPart\x12\x17\n" +
+	"\acall_id\x18\x01 \x01(\tR\x06callId\x12\x18\n" +
+	"\acontent\x18\x02 \x01(\tR\acontent\x12\x19\n" +
+	"\bis_error\x18\x03 \x01(\bR\aisError\"5\n" +
+	"\x14SessionAllocatedPart\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x01 \x01(\tR\tsessionId\"\x85\x01\n" +
+	"\rPromptMetrics\x12\x1b\n" +
+	"\ttokens_in\x18\x01 \x01(\x03R\btokensIn\x12\x1d\n" +
+	"\n" +
+	"tokens_out\x18\x02 \x01(\x03R\ttokensOut\x12\x19\n" +
+	"\bcost_usd\x18\x03 \x01(\x01R\acostUsd\x12\x1d\n" +
+	"\n" +
+	"latency_ms\x18\x04 \x01(\x03R\tlatencyMs\"P\n" +
+	"\bDonePart\x12\x1f\n" +
+	"\vstop_reason\x18\x01 \x01(\tR\n" +
+	"stopReason\x12#\n" +
+	"\rerror_message\x18\x02 \x01(\tR\ferrorMessage*\x8f\x01\n" +
 	"\rSessionStatus\x12\x1e\n" +
 	"\x1aSESSION_STATUS_UNSPECIFIED\x10\x00\x12\v\n" +
 	"\aCREATED\x10\x01\x12\x10\n" +
@@ -447,11 +1278,13 @@ const file_gil_v1_session_proto_rawDesc = "" +
 	"\aRUNNING\x10\x04\x12\x0f\n" +
 	"\vAUTO_PAUSED\x10\x05\x12\b\n" +
 	"\x04DONE\x10\x06\x12\v\n" +
-	"\aSTOPPED\x10\a2\xeb\x01\n" +
+	"\aSTOPPED\x10\a2\x9d\x03\n" +
 	"\x0eSessionService\x12I\n" +
 	"\x06Create\x12\x15.gil.v1.CreateRequest\x1a\x0f.gil.v1.Session\"\x17\x82\xd3\xe4\x93\x02\x11:\x01*\"\f/v1/sessions\x12E\n" +
 	"\x03Get\x12\x12.gil.v1.GetRequest\x1a\x0f.gil.v1.Session\"\x19\x82\xd3\xe4\x93\x02\x13\x12\x11/v1/sessions/{id}\x12G\n" +
-	"\x04List\x12\x13.gil.v1.ListRequest\x1a\x14.gil.v1.ListResponse\"\x14\x82\xd3\xe4\x93\x02\x0e\x12\f/v1/sessionsB1Z/github.com/jedutools/gil/proto/gen/gil/v1;gilv1b\x06proto3"
+	"\x04List\x12\x13.gil.v1.ListRequest\x1a\x14.gil.v1.ListResponse\"\x14\x82\xd3\xe4\x93\x02\x0e\x12\f/v1/sessions\x12R\n" +
+	"\x06Delete\x12\x15.gil.v1.DeleteRequest\x1a\x16.gil.v1.DeleteResponse\"\x19\x82\xd3\xe4\x93\x02\x13*\x11/v1/sessions/{id}\x12\\\n" +
+	"\x06Prompt\x12\x15.gil.v1.PromptRequest\x1a\f.gil.v1.Part\"+\x82\xd3\xe4\x93\x02%:\x01*\" /v1/sessions/{session_id}/prompt0\x01B1Z/github.com/mindungil/gil/proto/gen/gil/v1;gilv1b\x06proto3"
 
 var (
 	file_gil_v1_session_proto_rawDescOnce sync.Once
@@ -466,7 +1299,7 @@ func file_gil_v1_session_proto_rawDescGZIP() []byte {
 }
 
 var file_gil_v1_session_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_gil_v1_session_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
+var file_gil_v1_session_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
 var file_gil_v1_session_proto_goTypes = []any{
 	(SessionStatus)(0),            // 0: gil.v1.SessionStatus
 	(*Session)(nil),               // 1: gil.v1.Session
@@ -474,24 +1307,48 @@ var file_gil_v1_session_proto_goTypes = []any{
 	(*GetRequest)(nil),            // 3: gil.v1.GetRequest
 	(*ListRequest)(nil),           // 4: gil.v1.ListRequest
 	(*ListResponse)(nil),          // 5: gil.v1.ListResponse
-	(*timestamppb.Timestamp)(nil), // 6: google.protobuf.Timestamp
+	(*DeleteRequest)(nil),         // 6: gil.v1.DeleteRequest
+	(*DeleteResponse)(nil),        // 7: gil.v1.DeleteResponse
+	(*PromptRequest)(nil),         // 8: gil.v1.PromptRequest
+	(*PromptPart)(nil),            // 9: gil.v1.PromptPart
+	(*Part)(nil),                  // 10: gil.v1.Part
+	(*TextDelta)(nil),             // 11: gil.v1.TextDelta
+	(*ToolCallPart)(nil),          // 12: gil.v1.ToolCallPart
+	(*ToolResultPart)(nil),        // 13: gil.v1.ToolResultPart
+	(*SessionAllocatedPart)(nil),  // 14: gil.v1.SessionAllocatedPart
+	(*PromptMetrics)(nil),         // 15: gil.v1.PromptMetrics
+	(*DonePart)(nil),              // 16: gil.v1.DonePart
+	(*timestamppb.Timestamp)(nil), // 17: google.protobuf.Timestamp
+	(*ModelChoice)(nil),           // 18: gil.v1.ModelChoice
 }
 var file_gil_v1_session_proto_depIdxs = []int32{
-	0, // 0: gil.v1.Session.status:type_name -> gil.v1.SessionStatus
-	6, // 1: gil.v1.Session.created_at:type_name -> google.protobuf.Timestamp
-	6, // 2: gil.v1.Session.updated_at:type_name -> google.protobuf.Timestamp
-	1, // 3: gil.v1.ListResponse.sessions:type_name -> gil.v1.Session
-	2, // 4: gil.v1.SessionService.Create:input_type -> gil.v1.CreateRequest
-	3, // 5: gil.v1.SessionService.Get:input_type -> gil.v1.GetRequest
-	4, // 6: gil.v1.SessionService.List:input_type -> gil.v1.ListRequest
-	1, // 7: gil.v1.SessionService.Create:output_type -> gil.v1.Session
-	1, // 8: gil.v1.SessionService.Get:output_type -> gil.v1.Session
-	5, // 9: gil.v1.SessionService.List:output_type -> gil.v1.ListResponse
-	7, // [7:10] is the sub-list for method output_type
-	4, // [4:7] is the sub-list for method input_type
-	4, // [4:4] is the sub-list for extension type_name
-	4, // [4:4] is the sub-list for extension extendee
-	0, // [0:4] is the sub-list for field type_name
+	0,  // 0: gil.v1.Session.status:type_name -> gil.v1.SessionStatus
+	17, // 1: gil.v1.Session.created_at:type_name -> google.protobuf.Timestamp
+	17, // 2: gil.v1.Session.updated_at:type_name -> google.protobuf.Timestamp
+	1,  // 3: gil.v1.ListResponse.sessions:type_name -> gil.v1.Session
+	9,  // 4: gil.v1.PromptRequest.parts:type_name -> gil.v1.PromptPart
+	18, // 5: gil.v1.PromptRequest.model:type_name -> gil.v1.ModelChoice
+	11, // 6: gil.v1.Part.text:type_name -> gil.v1.TextDelta
+	12, // 7: gil.v1.Part.tool_call:type_name -> gil.v1.ToolCallPart
+	13, // 8: gil.v1.Part.tool_result:type_name -> gil.v1.ToolResultPart
+	14, // 9: gil.v1.Part.session_allocated:type_name -> gil.v1.SessionAllocatedPart
+	15, // 10: gil.v1.Part.metrics:type_name -> gil.v1.PromptMetrics
+	16, // 11: gil.v1.Part.done:type_name -> gil.v1.DonePart
+	2,  // 12: gil.v1.SessionService.Create:input_type -> gil.v1.CreateRequest
+	3,  // 13: gil.v1.SessionService.Get:input_type -> gil.v1.GetRequest
+	4,  // 14: gil.v1.SessionService.List:input_type -> gil.v1.ListRequest
+	6,  // 15: gil.v1.SessionService.Delete:input_type -> gil.v1.DeleteRequest
+	8,  // 16: gil.v1.SessionService.Prompt:input_type -> gil.v1.PromptRequest
+	1,  // 17: gil.v1.SessionService.Create:output_type -> gil.v1.Session
+	1,  // 18: gil.v1.SessionService.Get:output_type -> gil.v1.Session
+	5,  // 19: gil.v1.SessionService.List:output_type -> gil.v1.ListResponse
+	7,  // 20: gil.v1.SessionService.Delete:output_type -> gil.v1.DeleteResponse
+	10, // 21: gil.v1.SessionService.Prompt:output_type -> gil.v1.Part
+	17, // [17:22] is the sub-list for method output_type
+	12, // [12:17] is the sub-list for method input_type
+	12, // [12:12] is the sub-list for extension type_name
+	12, // [12:12] is the sub-list for extension extendee
+	0,  // [0:12] is the sub-list for field type_name
 }
 
 func init() { file_gil_v1_session_proto_init() }
@@ -499,13 +1356,25 @@ func file_gil_v1_session_proto_init() {
 	if File_gil_v1_session_proto != nil {
 		return
 	}
+	file_gil_v1_spec_proto_init()
+	file_gil_v1_session_proto_msgTypes[8].OneofWrappers = []any{
+		(*PromptPart_Text)(nil),
+	}
+	file_gil_v1_session_proto_msgTypes[9].OneofWrappers = []any{
+		(*Part_Text)(nil),
+		(*Part_ToolCall)(nil),
+		(*Part_ToolResult)(nil),
+		(*Part_SessionAllocated)(nil),
+		(*Part_Metrics)(nil),
+		(*Part_Done)(nil),
+	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_gil_v1_session_proto_rawDesc), len(file_gil_v1_session_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   5,
+			NumMessages:   16,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

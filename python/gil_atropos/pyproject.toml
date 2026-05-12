@@ -50,8 +50,8 @@ dev = [
 gil-atropos-eval = "gil_atropos.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/jedutools/gil"
-Repository = "https://github.com/jedutools/gil"
+Homepage = "https://github.com/mindungil/GIL"
+Repository = "https://github.com/mindungil/GIL"
 
 # Flat layout: this directory IS the gil_atropos package. Map it explicitly
 # so setuptools doesn't try to "discover" packages from CWD (which would

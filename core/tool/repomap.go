@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jedutools/gil/core/repomap"
+	"github.com/mindungil/gil/core/repomap"
 )
 
 // Repomap is the agent-callable tool that returns a markdown overview of the

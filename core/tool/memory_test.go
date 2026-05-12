@@ -8,7 +8,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/jedutools/gil/core/memory"
+	"github.com/mindungil/gil/core/memory"
 )
 
 func setupBank(t *testing.T) *memory.Bank {

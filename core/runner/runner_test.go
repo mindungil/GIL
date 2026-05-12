@@ -12,17 +12,17 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jedutools/gil/core/checkpoint"
-	"github.com/jedutools/gil/core/compact"
-	"github.com/jedutools/gil/core/event"
-	"github.com/jedutools/gil/core/instructions"
-	"github.com/jedutools/gil/core/memory"
-	"github.com/jedutools/gil/core/permission"
-	"github.com/jedutools/gil/core/provider"
-	"github.com/jedutools/gil/core/stuck"
-	"github.com/jedutools/gil/core/tool"
-	"github.com/jedutools/gil/core/verify"
-	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
+	"github.com/mindungil/gil/core/checkpoint"
+	"github.com/mindungil/gil/core/compact"
+	"github.com/mindungil/gil/core/event"
+	"github.com/mindungil/gil/core/instructions"
+	"github.com/mindungil/gil/core/memory"
+	"github.com/mindungil/gil/core/permission"
+	"github.com/mindungil/gil/core/provider"
+	"github.com/mindungil/gil/core/stuck"
+	"github.com/mindungil/gil/core/tool"
+	"github.com/mindungil/gil/core/verify"
+	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
 	"github.com/stretchr/testify/require"
 )
 
@@ -1050,6 +1050,102 @@ func TestAgentLoop_MilestoneGate_SkippedWhenBankNil(t *testing.T) {
 	}
 }
 
+// milestoneFailingProvider returns the first turn normally, then errors on the
+// milestone follow-up call (simulates a real network blip mid-milestone or a
+// scripted scenario whose turns are exhausted just as the gate fires).
+type milestoneFailingProvider struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (m *milestoneFailingProvider) Name() string { return "milestone-failing" }
+func (m *milestoneFailingProvider) Complete(_ context.Context, _ provider.Request) (provider.Response, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.calls++
+	if m.calls == 1 {
+		// First call: agent declares done with no tool calls so the verifier
+		// passes and we drop into the milestone gate.
+		return provider.Response{
+			Text:         "done",
+			StopReason:   "end_turn",
+			InputTokens:  10,
+			OutputTokens: 4,
+		}, nil
+	}
+	// Second call (the milestone follow-up): always error.
+	return provider.Response{}, fmt.Errorf("provider unavailable: simulated network blip")
+}
+
+// TestAgentLoop_MilestoneGate_ProviderErrorFallsBack ensures that when the
+// milestone summarizer's provider call errors, the run still completes
+// successfully and we emit a NOTE-kind `memory_milestone_skipped` event
+// (NOT a `*_error` event). This protects the run loop from being poisoned
+// by best-effort summarization failures.
+func TestAgentLoop_MilestoneGate_ProviderErrorFallsBack(t *testing.T) {
+	workspace := t.TempDir()
+	bank := memory.New(filepath.Join(workspace, "memory"))
+	require.NoError(t, bank.Init())
+
+	prov := &milestoneFailingProvider{}
+	spec := &gilv1.FrozenSpec{
+		Goal:         &gilv1.Goal{OneLiner: "test"},
+		Verification: &gilv1.Verification{},
+	}
+	ver := verify.NewRunner(workspace)
+
+	loop := &AgentLoop{
+		Spec:     spec,
+		Provider: prov,
+		Model:    "m",
+		Tools:    []tool.Tool{&tool.MemoryUpdate{Bank: bank}, &tool.MemoryLoad{Bank: bank}},
+		Verifier: ver,
+		Memory:   bank,
+		Events:   event.NewStream(),
+	}
+	sub := loop.Events.Subscribe(256)
+	var collected []event.Event
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for e := range sub.Events() {
+			collected = append(collected, e)
+		}
+	}()
+
+	res, err := loop.Run(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "done", res.Status)
+	sub.Close()
+	<-done
+
+	// Expect: memory_milestone_start fired, then memory_milestone_skipped
+	// (with reason=provider_unavailable), and run_done after. No
+	// memory_milestone_error or any other *_error event should appear.
+	var startSeen, skippedSeen, doneSeen int
+	for _, e := range collected {
+		switch e.Type {
+		case "memory_milestone_start":
+			startSeen++
+		case "memory_milestone_skipped":
+			skippedSeen++
+			var d map[string]any
+			require.NoError(t, json.Unmarshal(e.Data, &d))
+			require.Equal(t, "provider_unavailable", d["reason"])
+			require.Contains(t, d["detail"], "simulated network blip")
+		case "run_done":
+			doneSeen++
+		}
+		require.False(t, strings.HasSuffix(e.Type, "_error"),
+			"no *_error event expected, got %q", e.Type)
+		require.NotEqual(t, "memory_milestone_error", e.Type,
+			"old memory_milestone_error name should not be emitted anymore")
+	}
+	require.Equal(t, 1, startSeen, "memory_milestone_start should fire once")
+	require.Equal(t, 1, skippedSeen, "memory_milestone_skipped should fire once")
+	require.Equal(t, 1, doneSeen, "run_done should fire once")
+}
+
 // recordingProvider records every provider.Request so tests can inspect the
 // system prompt that was passed to each Complete call. It always returns the
 // same tool call (triggering stuck pattern detection).
@@ -2019,6 +2115,10 @@ func TestAgentLoop_InstructionSourcesOverrideSkipsDiscovery(t *testing.T) {
 }
 
 func TestAgentLoop_MemoryBankAppearsAfterInstructions(t *testing.T) {
+	// Phase 19 Track B: memory bank is now LAZY — skipped on iter 1 to
+	// keep the first-call prompt slim, included on iter 2+. This test
+	// asserts the order rule (instructions BEFORE bank) on the second
+	// iteration's system prompt, where both are present.
 	ws := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(ws, "AGENTS.md"),
 		[]byte("INSTR_MARKER\n"), 0o644))
@@ -2028,11 +2128,16 @@ func TestAgentLoop_MemoryBankAppearsAfterInstructions(t *testing.T) {
 	require.NoError(t, bank.Init())
 	require.NoError(t, bank.Write(memory.FileProgress, "BANK_MARKER\n"))
 
-	prov := &systemRecordingProvider{endAfter: 1}
+	prov := &systemRecordingProvider{endAfter: 2}
 	spec := &gilv1.FrozenSpec{
-		Goal:         &gilv1.Goal{OneLiner: "t"},
-		Verification: &gilv1.Verification{},
-		Budget:       &gilv1.Budget{MaxIterations: 2},
+		Goal: &gilv1.Goal{OneLiner: "t"},
+		Verification: &gilv1.Verification{
+			// Inject one always-failing check so the loop runs a
+			// second iteration before the verifier passes; without
+			// this it'd end on the first end_turn.
+			Checks: []*gilv1.Check{{Name: "x", Kind: gilv1.CheckKind_SHELL, Command: "false", ExpectedExitCode: 0}},
+		},
+		Budget: &gilv1.Budget{MaxIterations: 3},
 	}
 	loop := &AgentLoop{
 		Spec:      spec,
@@ -2042,16 +2147,413 @@ func TestAgentLoop_MemoryBankAppearsAfterInstructions(t *testing.T) {
 		Memory:    bank,
 		Workspace: ws,
 	}
-	_, err := loop.Run(context.Background())
-	require.NoError(t, err)
+	_, _ = loop.Run(context.Background())
 
 	prov.mu.Lock()
+	require.GreaterOrEqual(t, len(prov.systems), 2, "expected at least two iterations recorded")
 	first := prov.systems[0]
+	second := prov.systems[1]
 	prov.mu.Unlock()
 
-	instrIdx := strings.Index(first, "INSTR_MARKER")
-	bankIdx := strings.Index(first, "BANK_MARKER")
-	require.Greater(t, instrIdx, 0, "expected AGENTS.md content in system prompt")
-	require.Greater(t, bankIdx, 0, "expected memory bank content in system prompt")
-	require.Less(t, instrIdx, bankIdx, "instructions must precede memory bank in the system prompt")
+	// Iter 1: instructions present, bank absent (lazy).
+	require.Contains(t, first, "INSTR_MARKER", "iter 1 should include AGENTS.md")
+	require.NotContains(t, first, "BANK_MARKER", "iter 1 should NOT include memory bank (lazy)")
+
+	// Iter 2: both present, instructions precede bank.
+	instrIdx := strings.Index(second, "INSTR_MARKER")
+	bankIdx := strings.Index(second, "BANK_MARKER")
+	require.Greater(t, instrIdx, 0, "iter 2 expected AGENTS.md content in system prompt")
+	require.Greater(t, bankIdx, 0, "iter 2 expected memory bank content in system prompt")
+	require.Less(t, instrIdx, bankIdx, "instructions must precede memory bank")
+}
+
+// TestAgentLoop_NoProgress_FiresOnVariedFutileWork reproduces self-dogfood
+// Run 8: an agent that varies its actions every iteration but cannot make
+// progress on an impossible verification check. Each scripted turn ends
+// with end_turn so the verifier runs and emits verify_run/verify_result —
+// giving the NoProgress detector the per-iter signal it needs to compare
+// across iterations. The verifier never improves (single check that always
+// fails), and no successful file edits land, so NoProgress should fire and
+// the loop aborts via stuck_unrecovered before exhausting MaxIterations.
+func TestAgentLoop_NoProgress_FiresOnVariedFutileWork(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	dir := t.TempDir()
+
+	// Build a sequence of varied turns: each one ends with end_turn (no
+	// tool calls) so the verifier runs every iteration. The verifier
+	// always fails (passing=0), and no edit ever lands, so the agent's
+	// state never improves. Mix in some failed bash calls + reads so the
+	// existing repetition detectors stay quiet.
+	turns := []provider.MockTurn{}
+	for i := 0; i < 8; i++ {
+		// Iter Ai: a tool-use turn (varied), then iter Ai+1: an end_turn
+		// turn that lets the verifier fire.
+		turns = append(turns, provider.MockTurn{
+			Text: "trying approach " + fmt.Sprintf("%d", i),
+			ToolCalls: []provider.ToolCall{{
+				ID:    fmt.Sprintf("c%d", i),
+				Name:  "bash",
+				Input: json.RawMessage(fmt.Sprintf(`{"command":"echo attempt%d"}`, i)),
+			}},
+			StopReason: "tool_use",
+		})
+		turns = append(turns, provider.MockTurn{
+			Text:       "I think I'm done.",
+			StopReason: "end_turn",
+		})
+	}
+
+	mock := provider.NewMockToolProvider(turns)
+
+	spec := &gilv1.FrozenSpec{
+		Goal: &gilv1.Goal{OneLiner: "impossible task"},
+		Verification: &gilv1.Verification{
+			Checks: []*gilv1.Check{{
+				Name:             "never_passes",
+				Kind:             gilv1.CheckKind_SHELL,
+				Command:          "false",
+				ExpectedExitCode: 0,
+			}},
+		},
+		Budget: &gilv1.Budget{MaxIterations: 16},
+	}
+
+	tools := []tool.Tool{&tool.Bash{WorkingDir: dir}}
+
+	stream := event.NewStream()
+	sub := stream.Subscribe(512)
+	defer sub.Close()
+
+	loop := &AgentLoop{
+		Spec:           spec,
+		Provider:       mock,
+		Model:          "m",
+		Tools:          tools,
+		Verifier:       verify.NewRunner(dir),
+		Events:         stream,
+		StuckDetector:  &stuck.Detector{Window: 500},
+		StuckThreshold: 3,
+		// No StuckStrategy → every detection counts as unrecovered, so we
+		// abort fast when NoProgress hits the threshold.
+	}
+
+	var mu sync.Mutex
+	var collected []event.Event
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case e, ok := <-sub.Events():
+				if !ok {
+					return
+				}
+				mu.Lock()
+				collected = append(collected, e)
+				mu.Unlock()
+				if e.Type == "stuck_unrecovered" || e.Type == "run_done" || e.Type == "run_max_iterations" {
+					return
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	res, err := loop.Run(ctx)
+	require.NoError(t, err)
+	// Loop should abort via stuck (NoProgress), not via max_iterations.
+	require.Equal(t, "stuck", res.Status,
+		"expected stuck abort from NoProgress, got status=%s after %d iters", res.Status, res.Iterations)
+	require.Less(t, res.Iterations, 16, "expected early abort, got %d iters", res.Iterations)
+
+	select {
+	case <-done:
+	case <-time.After(1 * time.Second):
+	}
+
+	mu.Lock()
+	evs := collected
+	mu.Unlock()
+
+	// At least one stuck_detected with pattern=NoProgress must appear.
+	var noProgressDetections int
+	for _, e := range evs {
+		if e.Type != "stuck_detected" {
+			continue
+		}
+		var d map[string]any
+		require.NoError(t, json.Unmarshal(e.Data, &d))
+		if d["pattern"] == "NoProgress" {
+			noProgressDetections++
+		}
+	}
+	require.Greater(t, noProgressDetections, 0,
+		"expected at least one stuck_detected with pattern=NoProgress, events: %v", evs)
+}
+
+// TestSplitBashChain — Phase 22.A bash-chain permission bypass fix.
+// Verifies the chain-decomposer extracts each sub-command's verb so that
+// e.g. "cp x y && mv y z" is gated on BOTH cp and mv (not just cp).
+func TestSplitBashChain(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want []string
+	}{
+		{"empty", "", []string(nil)},
+		{"single", "ls -la", []string{"ls -la"}},
+		{"and", "cp a b && mv c d", []string{"cp a b", "mv c d"}},
+		{"or", "go build || echo failed", []string{"go build", "echo failed"}},
+		{"semicolon", "echo a; echo b", []string{"echo a", "echo b"}},
+		{"pipe", "ls | grep go", []string{"ls", "grep go"}},
+		{"mixed", "cd x && grep -r foo . | head", []string{"cd x", "grep -r foo .", "head"}},
+		{"quoted-and", "echo 'a && b'", []string{"echo 'a && b'"}},
+		{"quoted-pipe", `printf "%s|%s\n" a b`, []string{`printf "%s|%s\n" a b`}},
+		{"escape", `echo \&\& not-a-chain`, []string{`echo \&\& not-a-chain`}},
+		{"empty-segment", "echo a && && echo b", []string{"echo a", "echo b"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := splitBashChain(tc.in)
+			if len(got) != len(tc.want) {
+				t.Fatalf("len mismatch: got %v want %v", got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Errorf("part[%d]: got %q want %q", i, got[i], tc.want[i])
+				}
+			}
+		})
+	}
+}
+
+// capturedReqProvider records the last provider.Request it received on Complete.
+// Used by the P27 T4 cache-marker tests below.
+type capturedReqProvider struct {
+	name   string
+	req    provider.Request
+	called bool
+}
+
+func (c *capturedReqProvider) Name() string { return c.name }
+func (c *capturedReqProvider) Complete(_ context.Context, req provider.Request) (provider.Response, error) {
+	c.req = req
+	c.called = true
+	// Return end_turn so the loop terminates after one iteration.
+	return provider.Response{
+		Text:         "done",
+		StopReason:   "end_turn",
+		InputTokens:  10,
+		OutputTokens: 4,
+	}, nil
+}
+
+// minimalSpec returns a FrozenSpec that allows the loop to run for at most one
+// iteration without requiring any verification (nil Verification → vacuous pass).
+func minimalSpec() *gilv1.FrozenSpec {
+	return &gilv1.FrozenSpec{
+		Goal:   &gilv1.Goal{OneLiner: "test goal"},
+		Budget: &gilv1.Budget{MaxIterations: 1},
+	}
+}
+
+// TestRunner_AnthropicRequest_HasCacheMarkers verifies that, when the provider
+// name is "anthropic", the runner applies MarkCacheBreakpoints so the outgoing
+// messages carry CacheControl=true on the last (up to 3) messages.
+func TestRunner_AnthropicRequest_HasCacheMarkers(t *testing.T) {
+	captured := &capturedReqProvider{name: "anthropic"}
+	loop := NewAgentLoop(minimalSpec(), captured, "claude-sonnet-4-6", nil, verify.NewRunner(t.TempDir()))
+	_, err := loop.Run(context.Background())
+	require.NoError(t, err)
+	require.True(t, captured.called, "provider must have been called")
+
+	msgs := captured.req.Messages
+	require.NotEmpty(t, msgs, "request must contain at least one message")
+
+	// With MarkCacheBreakpoints applied, the last min(3, n) messages must
+	// have CacheControl=true. Verify at least one of them is marked.
+	n := len(msgs)
+	start := n - 3
+	if start < 0 {
+		start = 0
+	}
+	var marked int
+	for i := start; i < n; i++ {
+		if msgs[i].CacheControl {
+			marked++
+		}
+	}
+	require.GreaterOrEqual(t, marked, 1, "at least one of the last-3 messages must have CacheControl=true after MarkCacheBreakpoints")
+}
+
+// TestRunner_OpenAIRequest_NoCacheMarkers verifies that, when the provider name
+// is NOT "anthropic", the runner does NOT apply cache markers — all messages
+// must have CacheControl=false.
+func TestRunner_OpenAIRequest_NoCacheMarkers(t *testing.T) {
+	captured := &capturedReqProvider{name: "openai"}
+	loop := NewAgentLoop(minimalSpec(), captured, "gpt-4o", nil, verify.NewRunner(t.TempDir()))
+	_, err := loop.Run(context.Background())
+	require.NoError(t, err)
+	require.True(t, captured.called, "provider must have been called")
+
+	for i, m := range captured.req.Messages {
+		require.False(t, m.CacheControl, "message[%d] must NOT have CacheControl=true for non-Anthropic provider", i)
+	}
+}
+
+// TestRunner_PerRoleContextWindow_SmallEditorTriggersEarly verifies that when
+// the next-turn role is "editor" and Models["editor"] = "ollama:llama3:8b"
+// (8192 token window), the compaction trigger fires before reaching the
+// default 200k threshold. Messages totalling ~8000 tokens exceed 95% of 8192
+// (= 7782) but are far below 95% of 200k (= 190k).
+func TestRunner_PerRoleContextWindow_SmallEditorTriggersEarly(t *testing.T) {
+	// Build a response that contains only exec tools so classifyTurn routes
+	// turn 2 (iterIdx=1) to RoleEditor, which maps to "ollama:llama3:8b".
+	// With "loop-mock" provider (default 4.0 chars/token), bigText of 4000
+	// chars = ~1000 tokens. We run 10 such turns → ~10000 tokens total,
+	// well above the 7782 threshold for ollama:llama3:8b (8192*0.95).
+	bigText := strings.Repeat("e", 4000) // ~1000 tokens at 4 chars/token
+	var seq []provider.MockTurn
+	for i := 0; i < 10; i++ {
+		seq = append(seq, provider.MockTurn{
+			Text:       bigText,
+			StopReason: "tool_use",
+			ToolCalls: []provider.ToolCall{{
+				ID: fmt.Sprintf("c%d", i), Name: "bash", Input: json.RawMessage(`{"command":"echo hi"}`),
+			}},
+		})
+	}
+	seq = append(seq, provider.MockTurn{Text: "done", StopReason: "end_turn"})
+	prov := provider.NewMockToolProvider(seq)
+
+	summaryProv := provider.NewMock([]string{"## summary"})
+	compactor := &compact.Compactor{Provider: summaryProv, Model: "m", HeadKeep: 1, TailKeep: 2, MinMiddle: 2}
+
+	spec := &gilv1.FrozenSpec{Budget: &gilv1.Budget{MaxIterations: 12}, Verification: &gilv1.Verification{}}
+	ver := verify.NewRunner(t.TempDir())
+
+	loop := &AgentLoop{
+		Spec:      spec,
+		Provider:  prov,
+		Model:     "claude-sonnet-4-6", // default/main model
+		Models:    map[string]string{"editor": "ollama:llama3:8b"},
+		Tools:     []tool.Tool{&noopTool{}},
+		Verifier:  ver,
+		Compactor: compactor,
+		// MaxContextTokens intentionally 0 so we rely entirely on provider.ContextTokens.
+		Events: event.NewStream(),
+	}
+	sub := loop.Events.Subscribe(256)
+	var collected []event.Event
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for e := range sub.Events() {
+			collected = append(collected, e)
+		}
+	}()
+
+	_, err := loop.Run(context.Background())
+	require.NoError(t, err)
+	sub.Close()
+	<-done
+
+	var compactCount int
+	for _, e := range collected {
+		if e.Type == "compact_start" {
+			compactCount++
+		}
+	}
+	require.Greater(t, compactCount, 0,
+		"expected compaction to trigger: ollama:llama3:8b has 8192-token window, "+
+			"messages exceed 95%% threshold of 7782 tokens")
+}
+
+// TestRunner_PerRoleContextWindow_LargeMainTolerates verifies that when
+// Models["main"] = "claude-opus-4-7" (1M token window), messages totalling
+// only ~8000 tokens do NOT trigger compaction (far below 95% of 1M = 950k).
+func TestRunner_PerRoleContextWindow_LargeMainTolerates(t *testing.T) {
+	// Same bigText/seq as above but role stays "main" because turns have
+	// mixed text+tools (not exclusively exec tools). We use a non-exec tool
+	// name to keep classifyTurn on RoleMain every iteration.
+	bigText := strings.Repeat("m", 4000) // ~1000 tokens at 4 chars/token
+	var seq []provider.MockTurn
+	for i := 0; i < 10; i++ {
+		seq = append(seq, provider.MockTurn{
+			Text:       bigText,
+			StopReason: "tool_use",
+			ToolCalls: []provider.ToolCall{{
+				// "plan" tool forces RolePlanner; any non-exec tool keeps RoleMain.
+				// We use "noop" (not in execToolNames) to stay on RoleMain.
+				ID: fmt.Sprintf("c%d", i), Name: "noop", Input: json.RawMessage(`{}`),
+			}},
+		})
+	}
+	seq = append(seq, provider.MockTurn{Text: "done", StopReason: "end_turn"})
+	prov := provider.NewMockToolProvider(seq)
+
+	summaryProv := provider.NewMock([]string{"## summary"})
+	compactor := &compact.Compactor{Provider: summaryProv, Model: "m", HeadKeep: 1, TailKeep: 2, MinMiddle: 2}
+
+	spec := &gilv1.FrozenSpec{Budget: &gilv1.Budget{MaxIterations: 12}, Verification: &gilv1.Verification{}}
+	ver := verify.NewRunner(t.TempDir())
+
+	loop := &AgentLoop{
+		Spec:      spec,
+		Provider:  prov,
+		Model:     "claude-opus-4-7", // main model: 1M token window
+		Models:    map[string]string{"main": "claude-opus-4-7"},
+		Tools:     []tool.Tool{&noopTool{}},
+		Verifier:  ver,
+		Compactor: compactor,
+		// MaxContextTokens intentionally 0 so we rely entirely on provider.ContextTokens.
+		Events: event.NewStream(),
+	}
+	sub := loop.Events.Subscribe(256)
+	var collected []event.Event
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for e := range sub.Events() {
+			collected = append(collected, e)
+		}
+	}()
+
+	_, err := loop.Run(context.Background())
+	require.NoError(t, err)
+	sub.Close()
+	<-done
+
+	for _, e := range collected {
+		require.NotEqual(t, "compact_start", e.Type,
+			"claude-opus-4-7 has 1M token window; ~8000 tokens should not trigger compaction")
+	}
+}
+
+// TestRunner_EstimateUsesUnwrappedProviderName verifies that the token
+// estimator is called with the un-wrapped provider name so that the
+// Anthropic-specific 3.5 chars/token density is honoured even when
+// RunService wraps the provider in NewRetry (making Provider.Name()
+// return "anthropic+retry").
+//
+// Critical assertion: 100 chars / 3.5 = 28.57 → 29 tokens (Anthropic)
+// vs 100 chars / 4.0 = 25 tokens (default / broken path).
+func TestRunner_EstimateUsesUnwrappedProviderName(t *testing.T) {
+	msgs := []provider.Message{
+		{Role: provider.RoleUser, Content: strings.Repeat("a", 100)},
+	}
+
+	// "anthropic" — the un-wrapped factory key — must yield the Anthropic
+	// 3.5 chars/token density.
+	got := estimateMessagesTokens("anthropic", msgs)
+	require.Equal(t, int64(29), got,
+		"'anthropic' must use 3.5 chars/token density (got %d, broken path gives 25)", got)
+
+	// Sanity-check: the wrapped name falls back to the default 4.0 density.
+	gotWrapped := estimateMessagesTokens("anthropic+retry", msgs)
+	require.Equal(t, int64(25), gotWrapped,
+		"'anthropic+retry' should fall back to 4.0 density (got %d)", gotWrapped)
 }

@@ -7,7 +7,65 @@ once it reaches v1.0.
 
 ## [Unreleased]
 
-(Nothing yet — landing for the v0.1.0-alpha tag.)
+(empty)
+
+## [0.2.0] — 2026-05-12
+
+Continuous coding harness — chat is now the single surface and the
+agent decides every verb via tool calls. v0.1.0-alpha's interview /
+slash split is gone.
+
+### Added
+
+- Chat-architecture migration (M1–M5). `SessionService.Prompt` is the
+  one entry point for natural-language input; the daemon's agent loop
+  decides whether to converse, edit, run, or delegate. M5 introduces
+  verify-loop discipline as a state machine (`plan_steps` + `verify`,
+  status transitions are system-enforced).
+- TUI agent visualization (M6.1 + M6.2 + Option A V1). Per-session
+  event stream now carries both chat-mode and run-mode tool_call /
+  tool_result events; giltui renders them as an Agent Tree in the
+  mission-control layout.
+- Subagent delegation (G5). `spawn_agent` / `wait_agent` /
+  `agent_status` tools with per-root concurrency cap (8), depth cap
+  (1), spec slicing, and ask-routing through the root session.
+- MCP wiring complete. Spec-pinned servers launch on first reference,
+  surface their tools to both chat and run modes via one shared
+  subprocess cache.
+- §2.6 verb-tool wave — 9 natural-language verb tools register what
+  was previously slash-dispatched: `add_to_workingset` /
+  `drop_from_workingset` / `list_workingset` / `stop_run` /
+  `list_checkpoints` / `restore_checkpoint` / `show_instructions` /
+  `export_session` / `reset_session`.
+- Session-lifecycle agent-tools (G1): `freeze_spec` / `start_run` /
+  `apply_diff`. Restores the FrozenSpec producer the M3 interview
+  deletion removed.
+- Plan persistence (G3): `plan_steps` writes through SQLite (schema
+  v2). Schema v3 adds session parent-link columns for subagent
+  trees.
+
+### Changed
+
+- `RunService.Tail` lazy-allocates per-session event streams and
+  serves chat-mode + run-mode from one timeline. `NotFound` now
+  strictly means "session doesn't exist."
+- Chat surface is 100% natural language. The CLI REPL slash
+  dispatcher (`cli/internal/chat/repl/slash.go`) is removed.
+
+### Removed
+
+- `InterviewService` and `core/interview/` (M3). Sensing / slot fill /
+  adversary reframed as agent system prompts + tools.
+- Pre-M3 verb subcommands (`gil interview`, etc.) — replaced by
+  natural-language entry through `gil chat`.
+
+### Known limitations
+
+- WorkingSet (`add_to_workingset` / `list_workingset`) is in-memory
+  per daemon lifetime; persistence across restart is post-v0.2.
+- Chat-surface multi-pane redesign (M6 Option B/C) is gated on a
+  user decision and not in v0.2.
+- Reasoning-split + typed action pipeline (#4 + #8) deferred.
 
 ## [0.1.0-alpha] — 2026-04-27
 
@@ -116,5 +174,5 @@ in-session UX, distribution paths.
 - Pre-1.0: API and on-disk schemas may change between releases.
   Migrations will be best-effort.
 
-[Unreleased]: https://github.com/jedutools/gil/compare/v0.1.0-alpha...HEAD
-[0.1.0-alpha]: https://github.com/jedutools/gil/releases/tag/v0.1.0-alpha
+[Unreleased]: https://github.com/mindungil/GIL/compare/v0.1.0-alpha...HEAD
+[0.1.0-alpha]: https://github.com/mindungil/GIL/releases/tag/v0.1.0-alpha

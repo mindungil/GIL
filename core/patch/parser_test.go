@@ -218,6 +218,90 @@ func TestParse_UpdateFile_EmptyChunkError(t *testing.T) {
 	require.True(t, strings.Contains(pe.Message, "empty") || strings.Contains(pe.Message, "x.go"))
 }
 
+// TestParse_MissingBegin_DirectiveErrorMessage verifies the
+// self-correcting error message format: agent reads the failure and
+// knows EXACTLY which header line is missing and what the canonical
+// section layout looks like. Phase 20.A motivation: dogfood Run 3
+// showed qwen3.6-27b couldn't recover from the old "first line of the
+// patch must be '*** Begin Patch'" error.
+func TestParse_MissingBegin_DirectiveErrorMessage(t *testing.T) {
+	in := "*** Update File: x.go\n@@\n-a\n+A\n*** End Patch"
+	_, err := Parse(in)
+	require.Error(t, err)
+	var pe *ParseError
+	require.ErrorAs(t, err, &pe)
+	require.Equal(t, ErrInvalidPatch, pe.Kind)
+	// Names the missing header.
+	require.Contains(t, pe.Message, "*** Begin Patch")
+	// Lists the valid section headers so the agent knows what comes
+	// next.
+	require.Contains(t, pe.Message, "*** Update File:")
+	require.Contains(t, pe.Message, "*** Add File:")
+	require.Contains(t, pe.Message, "*** Delete File:")
+	require.Contains(t, pe.Message, "*** End Patch")
+}
+
+// TestParse_MissingEnd_DirectiveErrorMessage verifies the self-
+// correcting message for a missing "*** End Patch" terminator.
+func TestParse_MissingEnd_DirectiveErrorMessage(t *testing.T) {
+	in := "*** Begin Patch\n*** Add File: x\n+y"
+	_, err := Parse(in)
+	require.Error(t, err)
+	var pe *ParseError
+	require.ErrorAs(t, err, &pe)
+	require.Contains(t, pe.Message, "*** End Patch")
+	require.Contains(t, pe.Message, "final line")
+}
+
+// TestParse_InvalidHunkHeader_DirectiveErrorMessage verifies the agent-
+// directive error when the section header doesn't match any known
+// kind (e.g., the agent invented "*** Make Sandwich:").
+func TestParse_InvalidHunkHeader_DirectiveErrorMessage(t *testing.T) {
+	in := "*** Begin Patch\n*** Make Sandwich: bread\n*** End Patch"
+	_, err := Parse(in)
+	require.Error(t, err)
+	var pe *ParseError
+	require.ErrorAs(t, err, &pe)
+	require.Equal(t, ErrInvalidHunk, pe.Kind)
+	require.Contains(t, pe.Message, "*** Add File:")
+	require.Contains(t, pe.Message, "*** Delete File:")
+	require.Contains(t, pe.Message, "*** Update File:")
+}
+
+// TestParse_BadBodyLine_DirectiveErrorMessage verifies the directive
+// when a body line doesn't start with ' '/+/- (Codex grammar).
+// This was the root cause of one of the qwen apply_patch failures in
+// Run 3 ("invalid hunk at line 28, unexpected line in update hunk").
+func TestParse_BadBodyLine_DirectiveErrorMessage(t *testing.T) {
+	in := "*** Begin Patch\n*** Update File: x.go\n@@\nthis line has no prefix\n*** End Patch"
+	_, err := Parse(in)
+	require.Error(t, err)
+	var pe *ParseError
+	require.ErrorAs(t, err, &pe)
+	require.Equal(t, ErrInvalidHunk, pe.Kind)
+	require.Contains(t, pe.Message, "' ' (one space")
+	require.Contains(t, pe.Message, "'+'")
+	require.Contains(t, pe.Message, "'-'")
+	// The "@@ ..." vs body-line distinction is what tripped qwen — the
+	// directive calls it out by name.
+	require.Contains(t, pe.Message, "section header")
+}
+
+// TestParse_EmptyUpdateHunk_DirectiveErrorMessage verifies the
+// directive when an Update File hunk has no body chunks at all.
+func TestParse_EmptyUpdateHunk_DirectiveErrorMessage(t *testing.T) {
+	in := "*** Begin Patch\n*** Update File: x.go\n*** Delete File: y.go\n*** End Patch"
+	_, err := Parse(in)
+	require.Error(t, err)
+	var pe *ParseError
+	require.ErrorAs(t, err, &pe)
+	require.Contains(t, pe.Message, "@@")
+	// Mentions adding at least one chunk and shows the canonical body
+	// line shapes the agent should write.
+	require.Contains(t, pe.Message, "<line to remove>")
+	require.Contains(t, pe.Message, "<line to add>")
+}
+
 func TestParse_UpdateFile_EOFMarker_ThenNextHunk(t *testing.T) {
 	// EOF marker terminates current chunk; next *** line starts a new hunk.
 	in := `*** Begin Patch

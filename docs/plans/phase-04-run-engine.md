@@ -312,7 +312,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
-	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
+	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
 )
 
 func TestRunner_AllPass(t *testing.T) {
@@ -384,7 +384,7 @@ import (
 	"os/exec"
 	"time"
 
-	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
+	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
 )
 
 // Result is the outcome of a single check.
@@ -675,10 +675,10 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/jedutools/gil/core/provider"
-	"github.com/jedutools/gil/core/tool"
-	"github.com/jedutools/gil/core/verify"
-	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
+	"github.com/mindungil/gil/core/provider"
+	"github.com/mindungil/gil/core/tool"
+	"github.com/mindungil/gil/core/verify"
+	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
 )
 
 // Result is the final outcome of an AgentLoop run.
@@ -857,7 +857,7 @@ git commit -m "feat(core): AgentLoop with native tool use + provider Tools/ToolC
 syntax = "proto3";
 package gil.v1;
 import "gil/v1/event.proto";
-option go_package = "github.com/jedutools/gil/proto/gen/gil/v1;gilv1";
+option go_package = "github.com/mindungil/gil/proto/gen/gil/v1;gilv1";
 
 service RunService {
   rpc Start(StartRunRequest) returns (StartRunResponse);

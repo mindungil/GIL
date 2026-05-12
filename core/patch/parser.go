@@ -29,17 +29,44 @@ func Parse(input string) (*Patch, error) {
 
 func checkBoundaries(lines []string) error {
 	if len(lines) < 2 {
-		return &ParseError{Kind: ErrInvalidPatch, Message: "patch is too short"}
+		return &ParseError{
+			Kind: ErrInvalidPatch,
+			Message: "patch is too short. apply_patch needs at minimum:\n" +
+				"  *** Begin Patch\n" +
+				"  *** Update File: <path>  (or '*** Add File: <path>' / '*** Delete File: <path>')\n" +
+				"  ...\n" +
+				"  *** End Patch",
+		}
 	}
 	first := strings.TrimSpace(lines[0])
 	last := strings.TrimSpace(lines[len(lines)-1])
 	if first != BeginPatchMarker {
-		return &ParseError{Kind: ErrInvalidPatch, Message: "the first line of the patch must be '" + BeginPatchMarker + "'"}
+		return &ParseError{
+			Kind: ErrInvalidPatch,
+			Message: "apply_patch needs the exact header '" + BeginPatchMarker +
+				"' on line 1 (got: '" + truncateForMsg(first) + "'). " +
+				"Each section is then '*** Update File: <path>' / '*** Add File: <path>' / '*** Delete File: <path>', and the patch ends with '" + EndPatchMarker + "'.",
+		}
 	}
 	if last != EndPatchMarker {
-		return &ParseError{Kind: ErrInvalidPatch, Message: "the last line of the patch must be '" + EndPatchMarker + "'"}
+		return &ParseError{
+			Kind: ErrInvalidPatch,
+			Message: "apply_patch must end with '" + EndPatchMarker +
+				"' on its own line (got: '" + truncateForMsg(last) + "'). " +
+				"Add '" + EndPatchMarker + "' as the final line.",
+		}
 	}
 	return nil
+}
+
+// truncateForMsg keeps error messages readable when the offending line is a
+// long blob. Returns up to 80 chars; longer strings get an ellipsis.
+func truncateForMsg(s string) string {
+	const max = 80
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "..."
 }
 
 // parseBody walks body lines (after Begin/End trimming) and accumulates hunks.
@@ -63,7 +90,15 @@ func parseBody(body []string) (*Patch, error) {
 		i += n
 	}
 	if len(p.Hunks) == 0 {
-		return nil, &ParseError{Kind: ErrInvalidPatch, Message: "patch contains no hunks"}
+		return nil, &ParseError{
+			Kind: ErrInvalidPatch,
+			Message: "patch contains no hunks. Add at least one section between '*** Begin Patch' and '*** End Patch':\n" +
+				"  *** Update File: <path>\n" +
+				"  @@ <optional description>\n" +
+				"   <context line>\n" +
+				"  -<line to remove>\n" +
+				"  +<line to add>",
+		}
 	}
 	return p, nil
 }
@@ -126,7 +161,12 @@ func parseOneHunk(lines []string, lineNumber int) (Hunk, int, error) {
 			return Hunk{}, 0, &ParseError{
 				Kind:       ErrInvalidHunk,
 				LineNumber: lineNumber,
-				Message:    "update file hunk for path '" + path + "' is empty",
+				Message: "update file hunk for path '" + path + "' is empty. " +
+					"After '" + UpdateFileMarker + path + "' add at least one chunk:\n" +
+					"  @@ <optional description>\n" +
+					"   <context line, prefix is one space>\n" +
+					"  -<line to remove>\n" +
+					"  +<line to add>",
 			}
 		}
 		return Hunk{
@@ -140,10 +180,11 @@ func parseOneHunk(lines []string, lineNumber int) (Hunk, int, error) {
 	return Hunk{}, 0, &ParseError{
 		Kind:       ErrInvalidHunk,
 		LineNumber: lineNumber,
-		Message: "'" + first + "' is not a valid hunk header. Valid headers: '" +
-			AddFileMarker + "{path}', '" +
-			DeleteFileMarker + "{path}', '" +
-			UpdateFileMarker + "{path}'",
+		Message: "'" + truncateForMsg(first) + "' is not a valid hunk header. " +
+			"Each section must start with one of:\n" +
+			"  '" + AddFileMarker + "<path>'    — followed by '+' lines for the new file's content\n" +
+			"  '" + DeleteFileMarker + "<path>' — no body needed\n" +
+			"  '" + UpdateFileMarker + "<path>' — followed by '@@ <optional description>' then ' '/+/- prefixed body lines",
 	}
 }
 
@@ -155,7 +196,10 @@ func parseUpdateChunk(lines []string, lineNumber int, allowMissingContext bool) 
 		return UpdateChunk{}, 0, &ParseError{
 			Kind:       ErrInvalidHunk,
 			LineNumber: lineNumber,
-			Message:    "update hunk does not contain any lines",
+			Message: "update hunk has no body lines. After '@@' (optional description) add at least one ' '/+/-prefixed line, e.g.:\n" +
+				"  @@\n" +
+				"  -<old line>\n" +
+				"  +<new line>",
 		}
 	}
 
@@ -175,7 +219,8 @@ func parseUpdateChunk(lines []string, lineNumber int, allowMissingContext bool) 
 			return UpdateChunk{}, 0, &ParseError{
 				Kind:       ErrInvalidHunk,
 				LineNumber: lineNumber,
-				Message:    "expected update hunk to start with a @@ context marker, got: '" + lines[0] + "'",
+				Message: "expected '@@' context marker to start a new chunk, got: '" + truncateForMsg(lines[0]) + "'. " +
+					"Each chunk after the first one in an Update File hunk needs '@@' (or '@@ <description>') as a section header before the body lines.",
 			}
 		}
 		// First chunk may omit the @@ — start = 0.
@@ -185,7 +230,10 @@ func parseUpdateChunk(lines []string, lineNumber int, allowMissingContext bool) 
 		return UpdateChunk{}, 0, &ParseError{
 			Kind:       ErrInvalidHunk,
 			LineNumber: lineNumber + 1,
-			Message:    "update hunk does not contain any lines",
+			Message: "update hunk has no body lines after the '@@' marker. Add at least one ' '/+/- prefixed line below:\n" +
+				"  @@\n" +
+				"  -<old line>\n" +
+				"  +<new line>",
 		}
 	}
 
@@ -197,7 +245,11 @@ func parseUpdateChunk(lines []string, lineNumber int, allowMissingContext bool) 
 				return UpdateChunk{}, 0, &ParseError{
 					Kind:       ErrInvalidHunk,
 					LineNumber: lineNumber + 1,
-					Message:    "update hunk does not contain any lines",
+					Message: "update hunk reached '" + EOFMarker + "' with no body lines. Put the ' '/+/- lines BEFORE '" + EOFMarker + "':\n" +
+						"  @@\n" +
+						"  -<old tail line>\n" +
+						"  +<new tail line>\n" +
+						"  " + EOFMarker,
 				}
 			}
 			change.IsEndOfFile = true
@@ -225,8 +277,9 @@ func parseUpdateChunk(lines []string, lineNumber int, allowMissingContext bool) 
 					return UpdateChunk{}, 0, &ParseError{
 						Kind:       ErrInvalidHunk,
 						LineNumber: lineNumber + 1,
-						Message: "unexpected line in update hunk: '" + line +
-							"'. Every line should start with ' ' (context), '+' (added), or '-' (removed)",
+						Message: "hunk format error: unexpected line '" + truncateForMsg(line) + "'. " +
+							"Each line in an Update hunk's body must start with: ' ' (one space — context, no change), '+' (line to add), or '-' (line to remove). " +
+							"The '@@ <description>' line is a section header, not part of the body — body lines come AFTER it.",
 					}
 				}
 				// Unrecognised prefix → start of the next chunk; hand off.

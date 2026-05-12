@@ -18,15 +18,15 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/test/bufconn"
 
-	"github.com/jedutools/gil/core/checkpoint"
-	"github.com/jedutools/gil/core/event"
-	"github.com/jedutools/gil/core/provider"
-	"github.com/jedutools/gil/core/session"
-	"github.com/jedutools/gil/core/specstore"
-	"github.com/jedutools/gil/core/tool"
-	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
-	"github.com/jedutools/gil/runtime/docker"
-	"github.com/jedutools/gil/runtime/local"
+	"github.com/mindungil/gil/core/checkpoint"
+	"github.com/mindungil/gil/core/event"
+	"github.com/mindungil/gil/core/provider"
+	"github.com/mindungil/gil/core/session"
+	"github.com/mindungil/gil/core/specstore"
+	"github.com/mindungil/gil/core/tool"
+	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
+	"github.com/mindungil/gil/runtime/docker"
+	"github.com/mindungil/gil/runtime/local"
 )
 
 func newRunSvc(t *testing.T, mockTurns []provider.MockTurn) (*RunService, *session.Repo, string) {
@@ -246,7 +246,12 @@ func TestRunService_Tail_StreamsEvents(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func TestRunService_Tail_NotFoundForInactive(t *testing.T) {
+func TestRunService_Tail_NotFoundForUnknownSession(t *testing.T) {
+	// After M6 Option A the per-session event stream is allocated
+	// lazily so chat-mode tool_call / tool_result events can flow
+	// through Tail even before a formal Run starts. To preserve a
+	// meaningful NotFound we now verify the session exists via repo
+	// before subscribing; a typo'd ID returns "session not found".
 	svc, _, _ := newRunSvc(t, nil)
 	lis := bufconn.Listen(1024 * 1024)
 	g := grpc.NewServer()
@@ -264,7 +269,7 @@ func TestRunService_Tail_NotFoundForInactive(t *testing.T) {
 	require.NoError(t, err)
 	_, err = tail.Recv()
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "no active run")
+	require.Contains(t, err.Error(), "not found")
 }
 
 func TestRunService_Start_Detach_ReturnsStarted(t *testing.T) {

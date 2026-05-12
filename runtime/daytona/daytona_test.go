@@ -13,7 +13,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/jedutools/gil/runtime/cloud"
+	"github.com/mindungil/gil/runtime/cloud"
 )
 
 // --- interface conformance --------------------------------------------------

@@ -2,13 +2,13 @@
 # install.sh — gil curl-pipe-able installer.
 #
 # Usage (curl pipe):
-#   curl -fsSL https://raw.githubusercontent.com/jedutools/gil/main/scripts/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/mindungil/GIL/main/scripts/install.sh | bash
 #
 # Usage (local):
 #   bash scripts/install.sh
 #
 # Environment overrides:
-#   GIL_INSTALL_REPO   GitHub owner/repo  (default: jedutools/gil)
+#   GIL_INSTALL_REPO   GitHub owner/repo  (default: mindungil/GIL)
 #   GIL_BIN_DIR        Install dir        (default: /usr/local/bin)
 #   GIL_VERSION        Tag to install     (default: latest)
 #
@@ -22,7 +22,7 @@
 
 set -euo pipefail
 
-REPO=${GIL_INSTALL_REPO:-jedutools/gil}
+REPO=${GIL_INSTALL_REPO:-mindungil/GIL}
 BIN_DIR=${GIL_BIN_DIR:-/usr/local/bin}
 VERSION=${GIL_VERSION:-latest}
 

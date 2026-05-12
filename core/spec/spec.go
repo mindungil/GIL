@@ -7,7 +7,7 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
-	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
+	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
 )
 
 // Freeze deterministically marshals the FrozenSpec, computes its SHA-256,
@@ -72,4 +72,49 @@ func AllRequiredSlotsFilled(fs *gilv1.FrozenSpec) bool {
 		return false
 	}
 	return true
+}
+
+// requiredSlotChecks is the ordered list of required slot predicates.
+// Each entry returns true when that slot is filled. The list mirrors
+// AllRequiredSlotsFilled exactly so counts stay in sync.
+var requiredSlotChecks = []func(*gilv1.FrozenSpec) bool{
+	func(fs *gilv1.FrozenSpec) bool {
+		return fs.Goal != nil && fs.Goal.OneLiner != ""
+	},
+	func(fs *gilv1.FrozenSpec) bool {
+		return fs.Goal != nil && len(fs.Goal.SuccessCriteriaNatural) >= 3
+	},
+	func(fs *gilv1.FrozenSpec) bool {
+		return fs.Constraints != nil && len(fs.Constraints.TechStack) > 0
+	},
+	func(fs *gilv1.FrozenSpec) bool {
+		return fs.Verification != nil && len(fs.Verification.Checks) > 0
+	},
+	func(fs *gilv1.FrozenSpec) bool {
+		return fs.Workspace != nil && fs.Workspace.Backend != gilv1.WorkspaceBackend_BACKEND_UNSPECIFIED
+	},
+	func(fs *gilv1.FrozenSpec) bool {
+		return fs.Models != nil && fs.Models.Main != nil &&
+			fs.Models.Main.Provider != "" && fs.Models.Main.ModelId != ""
+	},
+	func(fs *gilv1.FrozenSpec) bool {
+		return fs.Risk != nil && fs.Risk.Autonomy != gilv1.AutonomyDial_AUTONOMY_UNSPECIFIED
+	},
+}
+
+// RequiredSlotTotal returns the total number of required slot checks.
+func RequiredSlotTotal() int { return len(requiredSlotChecks) }
+
+// FilledSlotCount returns how many of the required slots currently have content.
+func FilledSlotCount(fs *gilv1.FrozenSpec) int {
+	if fs == nil {
+		return 0
+	}
+	n := 0
+	for _, check := range requiredSlotChecks {
+		if check(fs) {
+			n++
+		}
+	}
+	return n
 }

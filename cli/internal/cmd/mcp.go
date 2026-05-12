@@ -12,9 +12,9 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
-	"github.com/jedutools/gil/core/cliutil"
-	"github.com/jedutools/gil/core/mcpregistry"
-	"github.com/jedutools/gil/core/workspace"
+	"github.com/mindungil/gil/core/cliutil"
+	"github.com/mindungil/gil/core/mcpregistry"
+	"github.com/mindungil/gil/core/workspace"
 )
 
 // mcpServerJSON is the per-server shape emitted by `gil mcp list --output
@@ -104,20 +104,20 @@ func mcpListCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cwd, err := os.Getwd()
 			if err != nil {
-				return cliutil.Wrap(err, "could not resolve current directory", "")
+				return cliutil.Wrap(err, "could not resolve current directory", "cd into a readable directory and retry")
 			}
 			reg, _, err := newRegistry(cwd)
 			if err != nil {
-				return cliutil.Wrap(err, "could not resolve MCP registry", "")
+				return cliutil.Wrap(err, "could not resolve MCP registry", "run `gil doctor` to inspect filesystem permissions on the config dir")
 			}
 
 			global, err := reg.LoadScope(mcpregistry.ScopeGlobal)
 			if err != nil {
-				return cliutil.Wrap(err, "could not read global MCP registry", "")
+				return cliutil.Wrap(err, "could not read global MCP registry", "run `gil doctor` to inspect the global mcp.toml")
 			}
 			project, err := reg.LoadScope(mcpregistry.ScopeProject)
 			if err != nil {
-				return cliutil.Wrap(err, "could not read project MCP registry", "")
+				return cliutil.Wrap(err, "could not read project MCP registry", "check that .gil/mcp.toml in the workspace is readable")
 			}
 
 			out := cmd.OutOrStdout()
@@ -286,11 +286,11 @@ piped stdin returns an error so scripts fail loudly).`,
 
 			cwd, err := os.Getwd()
 			if err != nil {
-				return cliutil.Wrap(err, "could not resolve current directory", "")
+				return cliutil.Wrap(err, "could not resolve current directory", "cd into a readable directory and retry")
 			}
 			reg, root, err := newRegistry(cwd)
 			if err != nil {
-				return cliutil.Wrap(err, "could not resolve MCP registry", "")
+				return cliutil.Wrap(err, "could not resolve MCP registry", "run `gil doctor` to inspect filesystem permissions on the config dir")
 			}
 
 			// Build the Server record from flags. The dispatcher trusts
@@ -366,11 +366,11 @@ piped stdin returns an error so scripts fail loudly).`,
 						`run "gil init" first, or omit --project to write the global registry`)
 				}
 				if err := reg.AddProject(s); err != nil {
-					return cliutil.Wrap(err, "could not add MCP server to project registry", "")
+					return cliutil.Wrap(err, "could not add MCP server to project registry", "check that .gil/mcp.toml in the workspace is writable")
 				}
 			} else {
 				if err := reg.AddGlobal(s); err != nil {
-					return cliutil.Wrap(err, "could not add MCP server to global registry", "")
+					return cliutil.Wrap(err, "could not add MCP server to global registry", "check that the global mcp.toml is writable")
 				}
 			}
 
@@ -467,15 +467,15 @@ func mcpRemoveCmd() *cobra.Command {
 
 			cwd, err := os.Getwd()
 			if err != nil {
-				return cliutil.Wrap(err, "could not resolve current directory", "")
+				return cliutil.Wrap(err, "could not resolve current directory", "cd into a readable directory and retry")
 			}
 			reg, _, err := newRegistry(cwd)
 			if err != nil {
-				return cliutil.Wrap(err, "could not resolve MCP registry", "")
+				return cliutil.Wrap(err, "could not resolve MCP registry", "run `gil doctor` to inspect filesystem permissions on the config dir")
 			}
 
 			if err := reg.Remove(name, scope); err != nil {
-				return cliutil.Wrap(err, fmt.Sprintf("could not remove MCP server %q", name), "")
+				return cliutil.Wrap(err, fmt.Sprintf("could not remove MCP server %q", name), "run `gil mcp list` to see what's configured, then check the relevant mcp.toml is writable")
 			}
 			scopeLabel := scope
 			if scope == mcpregistry.ScopeAuto {

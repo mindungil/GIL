@@ -166,6 +166,71 @@ func TestParse_ParseError_HasLineAndContext(t *testing.T) {
 	require.NotEmpty(t, pe.Context)
 }
 
+// TestParse_MissingFilename_DirectiveErrorMessage verifies the
+// self-correcting error message: when a SEARCH block has no preceding
+// filename, the parser tells the agent EXACTLY how to fix the format
+// (filename on its own line BEFORE the marker, not 'path:' inside).
+//
+// Phase 20.A motivation: dogfood Run 3 showed qwen3.6-27b read the old
+// "missing filename for SEARCH block" message and immediately
+// re-emitted the same wrong format with a 'path:' label inside. The
+// new message names the fix path explicitly so the next attempt lands
+// on a working layout.
+func TestParse_MissingFilename_DirectiveErrorMessage(t *testing.T) {
+	in := "<<<<<<< SEARCH\nold\n=======\nnew\n>>>>>>> REPLACE\n"
+	_, err := Parse(in)
+	require.Error(t, err)
+	var pe *ParseError
+	require.ErrorAs(t, err, &pe)
+	// Original substring still present (back-compat for any caller
+	// matching it).
+	require.Contains(t, pe.Reason, "missing filename")
+	// Format reminder: shows the canonical block shape.
+	require.Contains(t, pe.Reason, "<<<<<<< SEARCH")
+	require.Contains(t, pe.Reason, "=======")
+	require.Contains(t, pe.Reason, ">>>>>>> REPLACE")
+	// Names the specific 'path:' anti-pattern qwen tried.
+	require.Contains(t, pe.Reason, "path:")
+	require.Contains(t, pe.Reason, "BEFORE the SEARCH marker")
+}
+
+// TestParse_PathLabelPrefix_AcceptedAsFilename verifies the codex-compat
+// leniency from Phase 20.C: a "path: <file>" line before the SEARCH
+// marker parses as the filename "<file>" (the "path:" prefix gets
+// stripped). Matches apply_patch's "*** Update File: <path>" idiom that
+// some models bleed into edit-block syntax.
+func TestParse_PathLabelPrefix_AcceptedAsFilename(t *testing.T) {
+	in := "path: cli/internal/cmd/status_render.go\n<<<<<<< SEARCH\nold\n=======\nnew\n>>>>>>> REPLACE\n"
+	blocks, err := Parse(in)
+	require.NoError(t, err)
+	require.Len(t, blocks, 1)
+	require.Equal(t, "cli/internal/cmd/status_render.go", blocks[0].File)
+}
+
+// TestParse_PathLabelPrefix_CaseInsensitive verifies the strip works
+// regardless of casing — agents output "Path:", "PATH:", "path:".
+func TestParse_PathLabelPrefix_CaseInsensitive(t *testing.T) {
+	for _, prefix := range []string{"path:", "Path:", "PATH:"} {
+		in := prefix + " main.go\n<<<<<<< SEARCH\nold\n=======\nnew\n>>>>>>> REPLACE\n"
+		blocks, err := Parse(in)
+		require.NoError(t, err, "prefix %q", prefix)
+		require.Len(t, blocks, 1, "prefix %q", prefix)
+		require.Equal(t, "main.go", blocks[0].File, "prefix %q", prefix)
+	}
+}
+
+// TestParse_PathLabelPrefix_BareLabelStillFails ensures the leniency
+// doesn't also accept a bare "path:" with no filename — that's still a
+// missing-filename error, with the directive message.
+func TestParse_PathLabelPrefix_BareLabelStillFails(t *testing.T) {
+	in := "path:\n<<<<<<< SEARCH\nold\n=======\nnew\n>>>>>>> REPLACE\n"
+	_, err := Parse(in)
+	require.Error(t, err)
+	var pe *ParseError
+	require.ErrorAs(t, err, &pe)
+	require.Contains(t, pe.Reason, "missing filename")
+}
+
 // contains is a simple helper to avoid importing "strings" in tests
 // (already available in Go builtins through package-level visibility).
 func contains(s, sub string) bool {

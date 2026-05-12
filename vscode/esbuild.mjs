@@ -44,6 +44,32 @@ const copyWebviewAssets = {
 	},
 }
 
+// Copy proto/gil/v1/*.proto into dist/proto/gil/v1/ so the packaged .vsix
+// contains the IDL files that gild_client.ts loads at activation. Without
+// this step, the extension works only from a source checkout (where it can
+// reach ../proto/gil/v1) and fails at runtime once installed from a .vsix.
+const copyProtoAssets = {
+	name: "copy-proto-assets",
+	setup(build) {
+		build.onEnd(() => {
+			const srcDir = path.join(__dirname, "..", "proto", "gil", "v1")
+			const dstDir = path.join(__dirname, "dist", "proto", "gil", "v1")
+			if (!fs.existsSync(srcDir)) {
+				console.warn(`[gil-vscode] proto source dir not found: ${srcDir}`)
+				return
+			}
+			fs.mkdirSync(dstDir, { recursive: true })
+			let copied = 0
+			for (const entry of fs.readdirSync(srcDir)) {
+				if (!entry.endsWith(".proto")) continue
+				fs.copyFileSync(path.join(srcDir, entry), path.join(dstDir, entry))
+				copied++
+			}
+			console.log(`[gil-vscode] copied ${copied} proto file(s) to dist/proto/gil/v1`)
+		})
+	},
+}
+
 const extensionConfig = {
 	entryPoints: ["src/extension.ts"],
 	outfile: "dist/extension.js",
@@ -56,7 +82,7 @@ const extensionConfig = {
 	minify: production,
 	logLevel: "silent",
 	tsconfig: path.resolve(__dirname, "tsconfig.json"),
-	plugins: [copyWebviewAssets, problemMatcherPlugin],
+	plugins: [copyWebviewAssets, copyProtoAssets, problemMatcherPlugin],
 }
 
 async function main() {

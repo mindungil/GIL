@@ -32,6 +32,15 @@ saturation까지 묻는다. 시간/자원 절약은 추구하지 않는다. 인�
 ### 2.5 살아있는 문서, 사용자 git 비오염, 영속 이벤트
 설계/진행 문서는 날짜 없이 단일 파일로 유지한다. 사용자의 진짜 git을 절대 건드리지 않는다 — 모든 변경은 shadow git에. 모든 행동/관찰은 append-only 이벤트 로그에 영속화한다.
 
+### 2.6 자연어 단일 surface, 내부 에이전트 라우팅
+사용자는 자연어만으로 모든 것을 관리한다 — 세션 선택/재개, 인터뷰 진행, freeze 결정, 실행 시작/정지, 결과 검토, 진단 조회. 슬래시 명령은 deterministic escape hatch (스크립트/접근성/디버깅용)이지, 디폴트 surface가 아니다. 사용자가 슬래시 카탈로그를 외워야 하는 순간 이 원칙이 깨진 것이다.
+
+내부 라우터(소형 LLM 패스, intent router)가 자연어 입력의 의도를 분류해 적절한 service call에 dispatch한다. 라우팅 결과(어느 핸들러로 갔는지, 어떤 인자를 추출했는지)는 system note로 짧게 표면화해 사용자가 잘못 라우팅된 것을 즉시 정정할 수 있게 한다. 분류기는 작고 빠르고 결정적이어야 하며, 인터뷰/실행 본체와 다른 모델 슬롯(`spec.models.intent`)을 가진다.
+
+surface 진입(`gil`)은 TTY/non-TTY 무관 단일 채팅 surface를 띄운다. 본질이 다른 두 모드(`gil` vs `gil --no-chat`)로 분기하지 않는다. 채팅 surface는 진입 즉시 자기-개시(self-disclose) — 활성 세션, 최근 세션 N개, 다음에 할 만한 행동을 자연어 한 줄 요약 + 타이핑 가능한 자연어 prompt cue로 제공한다.
+
+P26의 static slash table은 위 원칙을 위배한다. V1.5에서 intent router를 부활(이번엔 LLM-based)시키되, 슬래시 표는 hidden fallback으로만 유지하는 방향으로 진화한다.
+
 ---
 
 ## 3. 고수준 아키텍처

@@ -2,11 +2,12 @@ package app
 
 import (
 	"testing"
+	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/stretchr/testify/require"
 
-	"github.com/jedutools/gil/sdk"
+	"github.com/mindungil/gil/sdk"
 )
 
 // Smoke test the model logic without spinning a real gild.
@@ -62,9 +63,30 @@ func TestModel_View_EmptySessions(t *testing.T) {
 }
 
 func TestTruncate(t *testing.T) {
+	// Pin to Unicode so the canonical "…" ellipsis is exercised; ASCII
+	// mode is covered separately in glyph_test.go.
+	prev := IsAsciiMode()
+	SetAsciiMode(false)
+	defer SetAsciiMode(prev)
+
 	require.Equal(t, "abc", truncate("abc", 10))
 	require.Equal(t, "abcdefghi…", truncate("abcdefghijk", 10))
 	require.Equal(t, "abc", truncate("abcdef", 3))
+}
+
+func TestTruncate_RuneSafety(t *testing.T) {
+	prev := IsAsciiMode()
+	SetAsciiMode(false)
+	defer SetAsciiMode(prev)
+
+	// Each Korean syllable is 3 bytes / 1 rune. Byte-cut would split one
+	// mid-sequence and emit invalid UTF-8.
+	got := truncate("가나다라마바사", 5)
+	require.True(t, utf8.ValidString(got), "truncate must produce valid UTF-8: got %q", got)
+
+	// Mixed ASCII + arrow + Korean — bug seen in the affordance line.
+	got = truncate("history ↑↓ next 가나다", 12)
+	require.True(t, utf8.ValidString(got), "truncate of mixed string must stay valid UTF-8: %q", got)
 }
 
 func TestDefaultSocket_NotEmpty(t *testing.T) {

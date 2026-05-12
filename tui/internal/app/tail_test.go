@@ -7,7 +7,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
+	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
 )
 
 func TestFormatEvent_AllFields(t *testing.T) {

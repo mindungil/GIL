@@ -202,7 +202,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
-	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
+	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
 )
 
 func validSpec() *gilv1.FrozenSpec {
@@ -282,8 +282,8 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 	"gopkg.in/yaml.v3"
 
-	"github.com/jedutools/gil/core/spec"
-	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
+	"github.com/mindungil/gil/core/spec"
+	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
 )
 
 var (
@@ -751,7 +751,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
-	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
+	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
 )
 
 func TestState_Initial(t *testing.T) {
@@ -808,9 +808,9 @@ func TestState_SaturationRequiresAdversaryClean(t *testing.T) {
 package interview
 
 import (
-	"github.com/jedutools/gil/core/provider"
-	"github.com/jedutools/gil/core/spec"
-	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
+	"github.com/mindungil/gil/core/provider"
+	"github.com/mindungil/gil/core/spec"
+	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
 )
 
 // Stage represents the interview phase.
@@ -911,7 +911,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/jedutools/gil/core/provider"
+	"github.com/mindungil/gil/core/provider"
 )
 
 func TestEngine_Sensing_ExtractsDomain(t *testing.T) {
@@ -950,7 +950,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/jedutools/gil/core/provider"
+	"github.com/mindungil/gil/core/provider"
 )
 
 // Engine drives the interview using an LLM provider.
@@ -1047,7 +1047,7 @@ package gil.v1;
 
 import "gil/v1/spec.proto";
 
-option go_package = "github.com/jedutools/gil/proto/gen/gil/v1;gilv1";
+option go_package = "github.com/mindungil/gil/proto/gen/gil/v1;gilv1";
 
 service InterviewService {
   // Start launches the interview for a session. Initially the agent will speak
@@ -1202,11 +1202,11 @@ import (
     "google.golang.org/grpc/codes"
     "google.golang.org/grpc/status"
 
-    "github.com/jedutools/gil/core/interview"
-    "github.com/jedutools/gil/core/provider"
-    "github.com/jedutools/gil/core/session"
-    "github.com/jedutools/gil/core/specstore"
-    gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
+    "github.com/mindungil/gil/core/interview"
+    "github.com/mindungil/gil/core/provider"
+    "github.com/mindungil/gil/core/session"
+    "github.com/mindungil/gil/core/specstore"
+    gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
 )
 
 // InterviewService manages per-session interview state in memory and
@@ -1423,7 +1423,7 @@ import (
 
     "github.com/spf13/cobra"
 
-    "github.com/jedutools/gil/sdk"
+    "github.com/mindungil/gil/sdk"
 )
 
 func interviewCmd() *cobra.Command {

@@ -94,9 +94,13 @@ function kindName(s: unknown): string {
 
 function findProtoDir(extensionDir: string): string {
 	// Try a few candidate locations so the extension works whether it is
-	// installed via a packaged .vsix (protos copied alongside dist/) or run
-	// from a source checkout (protos under ../proto/gil/v1).
+	// installed via a packaged .vsix (protos copied into dist/proto/gil/v1
+	// by the esbuild copy-proto-assets plugin) or run from a source
+	// checkout (protos under ../proto/gil/v1 relative to the extension dir).
+	// The dist/ candidate is listed first so installed .vsix users hit it
+	// without falling back through the source-tree paths.
 	const candidates = [
+		path.join(extensionDir, "dist", "proto", "gil", "v1"),
 		path.join(extensionDir, "proto", "gil", "v1"),
 		path.join(extensionDir, "..", "proto", "gil", "v1"),
 		path.join(extensionDir, "..", "..", "proto", "gil", "v1"),

@@ -67,12 +67,17 @@ type OAuthCred struct {
 // Type discriminates between the three supported credential modes; APIKey is
 // only set when Type == CredAPI, OAuth is only set when Type == CredOAuth,
 // and BaseURL applies to providers that need an explicit endpoint (vllm or
-// well-known custom providers). Updated is set by the store on every write.
+// well-known custom providers). Model is the user's preferred default model
+// for this provider (set by the wizard via `gil auth login` — Phase 25);
+// callers fall back to a provider-specific default when Model is empty so
+// older auth.json files (which never carried a Model) still load and work.
+// Updated is set by the store on every write.
 type Credential struct {
 	Type    CredType   `json:"type"`
 	APIKey  string     `json:"api_key,omitempty"`
 	OAuth   *OAuthCred `json:"oauth,omitempty"`
 	BaseURL string     `json:"base_url,omitempty"`
+	Model   string     `json:"model,omitempty"`
 	Updated time.Time  `json:"updated"`
 }
 

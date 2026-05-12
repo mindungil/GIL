@@ -10,9 +10,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/jedutools/gil/core/cliutil"
-	"github.com/jedutools/gil/core/credstore"
-	"github.com/jedutools/gil/core/paths"
+	"github.com/mindungil/gil/core/cliutil"
+	"github.com/mindungil/gil/core/credstore"
+	"github.com/mindungil/gil/core/paths"
 )
 
 // configTOMLStub is the hand-rolled TOML written by `gil init` when no
@@ -26,7 +26,7 @@ import (
 //     under the user's config dir.
 //   - goose's `goose configure` walkthrough establishes the same defaults
 //     contract: provider, model, autonomy, sandbox/backend.
-const configTOMLStub = `# gil global config (https://github.com/jedutools/gil)
+const configTOMLStub = `# gil global config (https://github.com/mindungil/gil)
 # Override per-project via <workspace>/.gil/config.toml (Phase 12)
 
 [defaults]

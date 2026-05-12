@@ -3,8 +3,9 @@ package cmd
 import (
 	"github.com/spf13/cobra"
 
-	"github.com/jedutools/gil/core/paths"
-	"github.com/jedutools/gil/core/version"
+	"github.com/mindungil/gil/core/paths"
+	"github.com/mindungil/gil/core/version"
+	tuirun "github.com/mindungil/gil/tui/run"
 )
 
 // outputFormat is the value of the persistent `--output` flag wired in
@@ -17,6 +18,20 @@ import (
 // requires a stable address. Tests reset it to "text" via the helper
 // resetOutputFormatForTest at the bottom of root.go.
 var outputFormat = "text"
+
+// asciiMode is the persistent --ascii flag. When set the visual
+// surfaces (gil, gil watch, gil status visual mode) swap their
+// Unicode glyphs for the ASCII fallbacks defined in
+// cli/internal/cmd/uistyle/glyph.go. The default keeps the spec's
+// Unicode set per terminal-aesthetic.md §3.
+var asciiMode = false
+
+// noChat suppresses the Phase 24 chat surface so bare `gil` falls
+// through to the legacy mission-control summary even on a TTY. Useful
+// for users who prefer the verb-mode UX, and for the existing e2e
+// suite where some scripts assume the summary's text shape. The flag
+// is a kill-switch — the chat is the new default.
+var noChat = false
 
 // outputJSON reports whether the user asked for JSON via the persistent
 // --output flag. We compare case-insensitively so `--output JSON` works
@@ -36,6 +51,8 @@ func outputJSON() bool {
 // previous test does not bleed into a sibling.
 func resetOutputFormatForTest() {
 	outputFormat = "text"
+	asciiMode = false
+	noChat = false
 }
 
 // defaultLayout returns the XDG-derived layout (or the GIL_HOME single-
@@ -88,6 +105,42 @@ func Root() *cobra.Command {
 		// core/version package, which is stamped via -ldflags at build
 		// time and falls back to runtime/debug.BuildInfo otherwise.
 		Version: version.String(),
+		// Args=NoArgs forbids `gil <unknown>` (cobra would otherwise
+		// emit "unknown command"); we want our own tighter error path,
+		// and the no-arg case is handled by RunE below.
+		Args: cobra.NoArgs,
+		// RunE only fires on bare `gil` (no subcommand, no `--help`,
+		// no `--version`). Cobra resolves --help / --version itself
+		// before this hook, so we get a clean choice between two UX
+		// modes:
+		//
+		//   - TTY  → drop into the chat REPL (Phase 24).
+		//   - pipe → keep the mission-control summary so scripts can
+		//            still grep `gil` output for session metadata.
+		//
+		// stdoutIsTTY (chat.go) is the single source of truth for the
+		// switch; --no-chat (and the explicit `gil chat` subcommand)
+		// override it for power users who want one form regardless of
+		// where stdout points.
+		//
+		// G4 NOTE — followup §2.6 violations #42 / #44 flag this branch
+		// as "two surfaces, not one." It is a known compromise: bare
+		// `gil | grep ...` scripts depend on the summary output and
+		// removing it would break headless workflows. Resolution path
+		// (TBD): expose JSON-only `gil --output json` summary equivalents
+		// in non-TTY mode while keeping chat as the only visible surface.
+		// Until that lands, leave the branch with explicit comments
+		// rather than pretending it isn't there.
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if !noChat && stdoutIsTTY() {
+				// Phase 26.6: TTY chat surface lives in the tui module —
+				// a persistent panel layout with a magenta-bordered prompt
+				// panel as the visual focal point. Non-TTY and --no-chat
+				// continue to fall through to the line-based summary.
+				return tuirun.Chat(cmd.Context(), defaultSocket())
+			}
+			return runSummary(cmd.OutOrStdout(), defaultSocket(), defaultBase(), asciiMode)
+		},
 	}
 	// SetVersionTemplate strips cobra's default "gil version vX.Y.Z\n"
 	// banner in favour of just the version line — matches the goose /
@@ -105,24 +158,69 @@ func Root() *cobra.Command {
 	// instead of the human table. Default "text" preserves the existing
 	// CLI surface 1:1; unknown values fall through to text.
 	root.PersistentFlags().StringVar(&outputFormat, "output", "text", "output format: text|json")
-	root.AddCommand(daemonCmd())
-	root.AddCommand(authCmd())
-	root.AddCommand(initCmd())
-	root.AddCommand(doctorCmd())
-	root.AddCommand(newCmd())
-	root.AddCommand(statusCmd())
-	root.AddCommand(interviewCmd())
-	root.AddCommand(resumeCmd())
-	root.AddCommand(specCmd())
-	root.AddCommand(runCmd())
-	root.AddCommand(eventsCmd())
-	root.AddCommand(exportCmd())
-	root.AddCommand(importCmd())
-	root.AddCommand(restoreCmd())
-	root.AddCommand(costCmd())
-	root.AddCommand(statsCmd())
-	root.AddCommand(mcpCmd())
-	root.AddCommand(updateCmd())
-	root.AddCommand(newCompletionCmd(root))
+	// --ascii is the global toggle for the Unicode glyph set used by
+	// the visual surfaces (no-arg summary, watch, status). Off by
+	// default so the spec aesthetic ships out of the box; users on
+	// terminals without a Unicode font opt in (LANG=C is also a
+	// reasonable trigger but we leave that to the caller; the env
+	// variable does not auto-flip the flag).
+	root.PersistentFlags().BoolVar(&asciiMode, "ascii", false, "use ASCII fallback glyphs (no Unicode)")
+	// --no-chat: opt out of the Phase 24 chat-first UX. When set, bare
+	// `gil` always renders the legacy summary regardless of TTY state.
+	// Off by default so the conversational surface ships as the new
+	// front door.
+	root.PersistentFlags().BoolVar(&noChat, "no-chat", false, "skip the chat REPL on bare gil; always render the summary")
+	// --no-intent-router: bypass the §2.6(b) natural-language verb router
+	// in the chat REPL, forwarding every prompt directly to the daemon.
+	// Useful for debugging / regression-testing the pre-26.6 behavior.
+	root.PersistentFlags().BoolVar(&noIntentRouter, "no-intent-router", false, "disable natural-language verb routing (always forward prompts)")
+	// Phase 25 A2 — surface a stage-based grouping in `gil --help` so
+	// the dump-of-25-commands maps onto the user's mental model: setup
+	// once, then run sessions, then diagnose / maintain. Cobra renders
+	// each group as a header in the help output (commands without a
+	// GroupID fall under "Additional Commands").
+	// Phase 26 T14 — add "advanced" group for verb-mode (headless) commands.
+	root.AddGroup(
+		&cobra.Group{ID: "setup", Title: "Setup:"},
+		&cobra.Group{ID: "session", Title: "Sessions & runs:"},
+		&cobra.Group{ID: "diag", Title: "Diagnostics & history:"},
+		&cobra.Group{ID: "tools", Title: "Tools & integration:"},
+		&cobra.Group{ID: "maint", Title: "Maintenance:"},
+		&cobra.Group{ID: "advanced", Title: "Advanced (headless / scripting):"},
+	)
+	addCmd := func(c *cobra.Command, group string) {
+		c.GroupID = group
+		root.AddCommand(c)
+	}
+	addCmd(initCmd(), "setup")
+	addCmd(authCmd(), "setup")
+	addCmd(doctorCmd(), "setup")
+
+	addCmd(chatCmd(), "session")
+	addCmd(newCmd(), "session")
+	// `gil interview` / `gil resume` / `gil spec` / `gil clarify`
+	// removed in M3 — those were thin wrappers over InterviewService
+	// which is gone. Spec inspection moves into the chat agent's
+	// show_spec tool.
+	addCmd(runCmd(), "advanced")
+	addCmd(watchCmd(), "advanced")
+	addCmd(eventsCmd(), "advanced")
+	// specCmd removed (see comment above interview/resume).
+	// clarifyCmd removed in M3 (interview engine deletion).
+	addCmd(sessionCmd(), "session")
+
+	addCmd(statusCmd(), "diag")
+	addCmd(costCmd(), "diag")
+	addCmd(statsCmd(), "advanced")
+	addCmd(restoreCmd(), "diag")
+	addCmd(exportCmd(), "advanced")
+	addCmd(importCmd(), "advanced")
+
+	addCmd(mcpCmd(), "tools")
+	addCmd(permissionsCmd(), "tools")
+
+	addCmd(daemonCmd(), "maint")
+	addCmd(updateCmd(), "maint")
+	root.AddCommand(newCompletionCmd(root)) // cobra owns this group
 	return root
 }

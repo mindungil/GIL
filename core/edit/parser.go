@@ -6,6 +6,13 @@ import (
 	"strings"
 )
 
+// pathLabelPrefix is the literal label some models (qwen, deepseek-coder)
+// emit before the filename — copying the codex apply_patch convention into
+// edit blocks. We accept it as a leniency so the agent's first attempt
+// still works, and the strip happens transparently. Documented in the
+// edit tool schema description.
+const pathLabelPrefix = "path:"
+
 // DSL marker constants (ported verbatim from Aider editblock_coder.py lines 386-388).
 const (
 	DefaultFence = "```"
@@ -76,8 +83,15 @@ func Parse(content string) ([]Block, error) {
 				filename = currentFilename
 			} else {
 				return blocks, &ParseError{
-					Line:    i + 1,
-					Reason:  "missing filename for SEARCH block",
+					Line: i + 1,
+					Reason: "missing filename for SEARCH block. Format:\n" +
+						"  <filename>\n" +
+						"  <<<<<<< SEARCH\n" +
+						"  <old_lines>\n" +
+						"  =======\n" +
+						"  <new_lines>\n" +
+						"  >>>>>>> REPLACE\n" +
+						"The filename goes on its own line BEFORE the SEARCH marker (not as a 'path:' label inside the block).",
 					Context: lastLines(lines, i+1, 5),
 				}
 			}
@@ -195,6 +209,15 @@ func findFilename(preceding []string) string {
 		if candidate == "..." {
 			continue
 		}
+		// Codex-compat leniency (Phase 20.C): some models prefix the filename
+		// with "path: " (matching apply_patch's hunk header style). Strip it
+		// so "path: foo/bar.go" parses as "foo/bar.go". Case-insensitive
+		// match — matches "Path:", "PATH:", etc. The prefix has to be
+		// followed by a space or another character; bare "path:" alone is
+		// not a filename and continues to fall through.
+		if hasPathLabelPrefix(candidate) {
+			candidate = strings.TrimSpace(candidate[len(pathLabelPrefix):])
+		}
 		candidate = strings.TrimRight(candidate, ":")
 		candidate = strings.TrimLeft(candidate, "#")
 		candidate = strings.TrimSpace(candidate)
@@ -212,6 +235,23 @@ func findFilename(preceding []string) string {
 		}
 	}
 	return ""
+}
+
+// hasPathLabelPrefix reports whether s begins with the case-insensitive
+// "path:" label (codex apply_patch convention). Returns false for the
+// bare label with no following content (just "path:").
+func hasPathLabelPrefix(s string) bool {
+	if len(s) <= len(pathLabelPrefix) {
+		return false
+	}
+	if !strings.EqualFold(s[:len(pathLabelPrefix)], pathLabelPrefix) {
+		return false
+	}
+	// Require something after the colon (so bare "path:" doesn't get
+	// stripped down to ""). Most callers will write "path: foo.go" with a
+	// space; we accept either.
+	rest := s[len(pathLabelPrefix):]
+	return strings.TrimSpace(rest) != ""
 }
 
 // lastLines returns the last n lines ending at (1-indexed) endLine as a string.

@@ -3,9 +3,9 @@
 ## Reporting
 
 Report vulnerabilities **privately** via GitHub Security Advisory:
-https://github.com/jedutools/gil/security/advisories/new
+https://github.com/mindungil/GIL/security/advisories/new
 
-Or email: security@jedutools.io
+Or email: alswnsrlf12@naver.com
 
 We will respond within 7 days and target a fix within 30 days for high-severity issues.
 

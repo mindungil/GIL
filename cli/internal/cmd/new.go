@@ -6,7 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/jedutools/gil/sdk"
+	"github.com/mindungil/gil/sdk"
 )
 
 // newCmd returns the "new" subcommand for creating a new session.

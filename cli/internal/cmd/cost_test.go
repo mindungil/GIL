@@ -11,8 +11,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/jedutools/gil/core/event"
-	"github.com/jedutools/gil/core/paths"
+	"github.com/mindungil/gil/core/event"
+	"github.com/mindungil/gil/core/paths"
 )
 
 // withCostEnv pins HOME, GIL_HOME, XDG_* so `gil cost` and `gil stats`

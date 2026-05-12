@@ -41,8 +41,8 @@ gil writes structured logs to `$XDG_STATE_HOME/gil/logs/`. These are local files
 
 ## Updates
 
-`gil update` checks https://api.github.com/repos/jedutools/gil/releases/latest. This is a public endpoint and does not include any user-identifying information beyond standard GitHub API request metadata (User-Agent header, IP address). You can disable update checks by never running `gil update`.
+`gil update` checks https://api.github.com/repos/mindungil/GIL/releases/latest. This is a public endpoint and does not include any user-identifying information beyond standard GitHub API request metadata (User-Agent header, IP address). You can disable update checks by never running `gil update`.
 
 ## Contact
 
-Privacy questions: privacy@jedutools.io
+Privacy questions: alswnsrlf12@naver.com

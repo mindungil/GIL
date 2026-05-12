@@ -14,7 +14,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/jedutools/gil/core/cliutil"
+	"github.com/mindungil/gil/core/cliutil"
 )
 
 // installerMethod is the channel through which gil was installed. The
@@ -46,13 +46,13 @@ const (
 
 	// installScriptURL is the upstream URL the script-channel users
 	// re-curl. Matches the example in docs/distribution.md.
-	installScriptURL = "https://raw.githubusercontent.com/jedutools/gil/main/scripts/install.sh"
+	installScriptURL = "https://raw.githubusercontent.com/mindungil/GIL/main/scripts/install.sh"
 
 	// latestReleaseAPI is the GitHub releases JSON endpoint used by
 	// `gil update --check`. We deliberately use the JSON API (not the
 	// /releases/latest redirect) here so we can return the human-
 	// readable name as well, which is helpful for the --check output.
-	latestReleaseAPI = "https://api.github.com/repos/jedutools/gil/releases/latest"
+	latestReleaseAPI = "https://api.github.com/repos/mindungil/GIL/releases/latest"
 )
 
 // updateCmd returns the `gil update` subcommand.
@@ -198,7 +198,7 @@ func printAvailableVersion(ctx context.Context, w io.Writer) error {
 	if err != nil {
 		return cliutil.Wrap(err,
 			"could not reach the GitHub releases API",
-			"check your network, or visit https://github.com/jedutools/gil/releases")
+			"check your network, or visit https://github.com/mindungil/gil/releases")
 	}
 	current := strings.TrimSpace(injectedVersion)
 	if current == "" {

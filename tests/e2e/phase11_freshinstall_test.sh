@@ -107,7 +107,9 @@ echo "OK: gil doctor renders 5 sections + summary, anthropic visible"
 echo "OK: gil completion bash + zsh produce shell scripts"
 
 # 8. gil status auto-spawns gild + the UDS appears + table header rendered.
-STATUS_OUT="$("$ROOT/bin/gil" status 2>&1)" || { echo "FAIL: gil status exited non-zero"; echo "$STATUS_OUT"; exit 1; }
+# Phase 14: visual mode is default; --plain keeps the legacy table that
+# this assertion expects (header line "ID  STATUS  ...").
+STATUS_OUT="$("$ROOT/bin/gil" status --plain 2>&1)" || { echo "FAIL: gil status exited non-zero"; echo "$STATUS_OUT"; exit 1; }
 echo "$STATUS_OUT" | grep -q "ID" || { echo "FAIL: gil status missing table header"; echo "$STATUS_OUT"; exit 1; }
 test -S "$BASE/state/gild.sock" || { echo "FAIL: gild.sock did not appear after gil status"; ls -la "$BASE/state"; exit 1; }
 echo "OK: gil status auto-spawned gild (socket present)"

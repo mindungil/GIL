@@ -36,7 +36,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/jedutools/gil/runtime/cloud"
+	"github.com/mindungil/gil/runtime/cloud"
 )
 
 const (

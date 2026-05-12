@@ -9,8 +9,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/jedutools/gil/core/cliutil"
-	"github.com/jedutools/gil/sdk"
+	"github.com/mindungil/gil/core/cliutil"
+	"github.com/mindungil/gil/sdk"
 )
 
 // statusSessionJSON is the JSON shape emitted by `gil status --output json`.
@@ -30,13 +30,38 @@ type statusJSONReport struct {
 }
 
 // statusCmd returns the "status" subcommand for listing sessions.
-// It lists all sessions from the gild gRPC server in a tab-separated table format.
+//
+// As of Phase 14 the default rendering is the visual "mission-control"
+// card layout (one card per session, with a sub-cell progress bar and
+// a meta row underneath). Two flags drop back to the legacy formats:
+//
+//   --plain       the original tab-separated table — script friendly,
+//                 stable column order, never emits ANSI
+//   --output json the structured JSON envelope — same shape as before
+//
+// We deliberately keep both fallbacks: any external script that has
+// been parsing the table since Phase 1-12 keeps working as long as it
+// is updated to pass --plain.
 func statusCmd() *cobra.Command {
 	var socket string
 	var limit int
+	var plain bool
+	var showAll bool
 	c := &cobra.Command{
 		Use:   "status",
 		Short: "List sessions",
+		// Reject positional args with a redirect, not cobra's default
+		// "accepts 0 arg(s), received 1" — the previous behaviour was
+		// to silently ignore `gil status <id>`, matching neither what
+		// users wanted nor what cobra's stock error suggested.
+		Args: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 0 {
+				return nil
+			}
+			return cliutil.New(
+				fmt.Sprintf("status takes no positional args (got %q)", args[0]),
+				`use "gil session show <id>" for one session, or "gil status" for the list`)
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if limit <= 0 {
 				return cliutil.New(
@@ -59,14 +84,36 @@ func statusCmd() *cobra.Command {
 			if err != nil {
 				return wrapRPCError(err)
 			}
+			// Phase 25 S5: hide abandoned sessions (CREATED + 0 events
+			// older than 1 day) by default. The --all flag opts back into
+			// the full list. JSON mode also honours this so dashboards
+			// don't drown in dummy rows.
+			hidden := 0
+			if !showAll {
+				before := len(list)
+				list = filterActiveSessions(list)
+				hidden = before - len(list)
+			}
 			if outputJSON() {
 				return writeStatusJSON(cmd.OutOrStdout(), list)
 			}
-			return writeStatusText(cmd.OutOrStdout(), list)
+			if plain {
+				return writeStatusText(cmd.OutOrStdout(), list)
+			}
+			if err := writeStatusVisual(cmd.OutOrStdout(), list, asciiMode); err != nil {
+				return err
+			}
+			if hidden > 0 {
+				fmt.Fprintf(cmd.OutOrStdout(),
+					"   (%d abandoned session(s) hidden — `gil status --all` to show)\n", hidden)
+			}
+			return nil
 		},
 	}
 	c.Flags().StringVar(&socket, "socket", defaultSocket(), "gild UDS socket path")
 	c.Flags().IntVar(&limit, "limit", 100, "max sessions to list")
+	c.Flags().BoolVar(&plain, "plain", false, "use the legacy tab-separated table (script friendly)")
+	c.Flags().BoolVar(&showAll, "all", false, "include abandoned sessions (CREATED + 0 events + >1d old)")
 	return c
 }
 

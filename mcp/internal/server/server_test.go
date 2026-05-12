@@ -7,7 +7,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/jedutools/gil/core/mcp/jsonrpc"
+	"github.com/mindungil/gil/core/mcp/jsonrpc"
 )
 
 // Tests that don't need a real gild — exercise the dispatcher with a nil Client

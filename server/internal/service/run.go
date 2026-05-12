@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -14,35 +16,46 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	"github.com/jedutools/gil/core/checkpoint"
-	"github.com/jedutools/gil/core/event"
-	"github.com/jedutools/gil/core/exec"
-	"github.com/jedutools/gil/core/mcpregistry"
-	"github.com/jedutools/gil/core/memory"
-	"github.com/jedutools/gil/core/paths"
-	"github.com/jedutools/gil/core/permission"
-	"github.com/jedutools/gil/core/provider"
-	"github.com/jedutools/gil/core/runner"
-	"github.com/jedutools/gil/core/session"
-	"github.com/jedutools/gil/core/specstore"
-	"github.com/jedutools/gil/core/stuck"
-	"github.com/jedutools/gil/core/tool"
-	"github.com/jedutools/gil/core/verify"
-	"github.com/jedutools/gil/core/workspace"
-	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
-	"github.com/jedutools/gil/runtime/cloud"
-	"github.com/jedutools/gil/runtime/daytona"
-	"github.com/jedutools/gil/runtime/docker"
-	"github.com/jedutools/gil/runtime/local"
-	"github.com/jedutools/gil/runtime/modal"
-	"github.com/jedutools/gil/runtime/ssh"
-	"github.com/jedutools/gil/server/internal/metrics"
+	"github.com/mindungil/gil/core/checkpoint"
+	"github.com/mindungil/gil/core/event"
+	"github.com/mindungil/gil/core/exec"
+	"github.com/mindungil/gil/core/lsp"
+	"github.com/mindungil/gil/core/mcpregistry"
+	"github.com/mindungil/gil/core/memory"
+	"github.com/mindungil/gil/core/notify"
+	"github.com/mindungil/gil/core/paths"
+	"github.com/mindungil/gil/core/permission"
+	"github.com/mindungil/gil/core/plan"
+	"github.com/mindungil/gil/core/provider"
+	"github.com/mindungil/gil/core/runner"
+	"github.com/mindungil/gil/core/session"
+	"github.com/mindungil/gil/core/specstore"
+	"github.com/mindungil/gil/core/stuck"
+	"github.com/mindungil/gil/core/tool"
+	"github.com/mindungil/gil/core/verify"
+	"github.com/mindungil/gil/core/workspace"
+	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
+	"github.com/mindungil/gil/runtime/cloud"
+	"github.com/mindungil/gil/runtime/daytona"
+	"github.com/mindungil/gil/runtime/docker"
+	"github.com/mindungil/gil/runtime/local"
+	"github.com/mindungil/gil/runtime/modal"
+	"github.com/mindungil/gil/runtime/ssh"
+	"github.com/mindungil/gil/server/internal/metrics"
 )
 
 // runProgressSnap holds live iteration/token counters for an active run.
+//
+// cost / budgetExceeded / budgetReason are populated by the run's event
+// subscriber when budget_warning / budget_exceeded fire so other RPCs
+// (Session.toProto) can surface the alert state without needing to
+// re-derive the per-iteration cost themselves.
 type runProgressSnap struct {
-	iters  int32
-	tokens int64
+	iters          int32
+	tokens         int64
+	cost           float64
+	budgetExceeded bool
+	budgetReason   string
 }
 
 // pendingAsk records everything AnswerPermission needs to dispatch a
@@ -61,6 +74,20 @@ type pendingAsk struct {
 	evaluator *permission.EvaluatorWithStore // nil ⇒ no session-scoped layer (FULL autonomy)
 }
 
+// pendingClarify records the channel a paused run is waiting on for a
+// `clarify` tool answer. Mirrors pendingAsk but the value is a string
+// (free-form answer) rather than a bool, and the timeout is much longer
+// (60min vs 60s) because human attention to a clarify is an order of
+// magnitude slower than a permission tap.
+type pendingClarify struct {
+	ch chan string
+}
+
+// ProviderFactory returns a Provider + default model name for the given
+// provider name. Used by RunService and SessionService to dial the
+// configured LLM. Lived in interview.go before M3 deleted that file.
+type ProviderFactory func(name string) (provider.Provider, string, error)
+
 // RunService handles RunService gRPC. Loads frozen spec, builds tools/verifier,
 // runs AgentLoop synchronously or in background (detach mode). Tail subscribes
 // to the live event stream.
@@ -75,18 +102,139 @@ type RunService struct {
 	runStreams  map[string]*event.Stream            // per-session live event streams
 	runProgress map[string]*runProgressSnap         // per-session live progress counters
 	pendingAsks map[string]map[string]*pendingAsk   // sessionID → requestID → ask context
+	// pendingClarifications maps sessionID → askID → channel the paused
+	// run is blocking on. AnswerClarification writes the user's answer
+	// into the channel (and closes); the clarify tool's Ask callback
+	// reads it and unblocks. Independent from pendingAsks because the
+	// 60-min timeout, the wire RPC, and the surface UX are all different.
+	pendingClarifications map[string]map[string]*pendingClarify
+	// runLoops holds a pointer to the AgentLoop for each in-flight run so
+	// surface-side RPCs (RequestCompact, PostHint) can stage actions for
+	// the next iteration without preempting the current tool call. The
+	// entry is removed in executeRun's defer once Run() returns. Nil when
+	// no run is in flight for that session.
+	runLoops    map[string]*runner.AgentLoop
+
+	// runCancels stores the cancel func for each detached run so the
+	// stop_run agent-tool (§2.6 verb-tool wave) can signal a running
+	// loop to terminate. Removed in executeRun's defer alongside
+	// runLoops; nil entry means no detached run is in flight for that
+	// session.
+	runCancels map[string]context.CancelFunc
+
+	// mcpClientCache holds the lazy-launched MCP subprocess clients +
+	// surfaced tools per session, keyed by session ID. Populated on
+	// the first call to ensureSessionMCPTools (typically the first
+	// chat turn after the spec is frozen) so chat-mode and run-mode
+	// share one set of MCP subprocesses instead of double-spawning.
+	// Lifetime is daemon-process; the V1 contract is "MCP servers stay
+	// up until the daemon stops" (matches codex / opencode behaviour).
+	mcpClientCache map[string]*mcpLaunchResult
+
+	// notifierFor produces the outbound notification fan-out for a given
+	// run. Overrideable in tests so the e2e suite can inject an
+	// httptest-backed notifier without spinning up notify-send. nil
+	// → defaultNotifierForSession (loads .gil/config.toml [notify] from
+	// the project + global config) is used.
+	notifierFor func(sessionID, projectPath string) notify.Notifier
 }
 
 // NewRunService constructs the service.
 func NewRunService(repo *session.Repo, sessionsBase string, factory ProviderFactory) *RunService {
 	return &RunService{
-		repo:            repo,
-		sessionsBase:    sessionsBase,
-		providerFactory: factory,
-		runStreams:      make(map[string]*event.Stream),
-		runProgress:     make(map[string]*runProgressSnap),
-		pendingAsks:     make(map[string]map[string]*pendingAsk),
+		repo:                  repo,
+		sessionsBase:          sessionsBase,
+		providerFactory:       factory,
+		runStreams:            make(map[string]*event.Stream),
+		runProgress:           make(map[string]*runProgressSnap),
+		pendingAsks:           make(map[string]map[string]*pendingAsk),
+		pendingClarifications: make(map[string]map[string]*pendingClarify),
+		runLoops:              make(map[string]*runner.AgentLoop),
+		runCancels:            make(map[string]context.CancelFunc),
+		mcpClientCache:        make(map[string]*mcpLaunchResult),
 	}
+}
+
+// ensureSessionMCPTools resolves the spec allowlist + global/project
+// MCP registries and lazily launches the named MCP servers for this
+// session. Returns the surfaced tool.Tool slice (empty when the spec
+// has no allowlist or no spec is frozen yet). Idempotent — repeat
+// calls return the cached set without re-spawning subprocesses.
+//
+// This is the chat-mode bridge: SessionService.Prompt calls it on
+// every prompt so the agent's tool registry includes MCP-advertised
+// tools alongside the built-in ones. Run-mode (executeRun) consumes
+// the same cache via a parallel path so chat → run → chat handoffs
+// reuse one subprocess set rather than respawning.
+//
+// stream may be nil; events are dropped silently in that case so
+// the helper stays usable from contexts that don't own a stream.
+func (s *RunService) ensureSessionMCPTools(ctx context.Context, sessionID string, spec *gilv1.FrozenSpec, workspaceDir string, stream *event.Stream) []tool.Tool {
+	if spec == nil || spec.Tools == nil || len(spec.Tools.McpServers) == 0 {
+		return nil
+	}
+	s.mu.Lock()
+	if cached, ok := s.mcpClientCache[sessionID]; ok && cached != nil {
+		s.mu.Unlock()
+		return cached.Tools
+	}
+	s.mu.Unlock()
+
+	// Resolve global + project registries the same way executeRun's
+	// MCP block does so the chat path produces an identical merged
+	// view (spec-pinned wins on collision).
+	regGlobal := ""
+	if layout, lerr := paths.FromEnv(); lerr == nil {
+		regGlobal = layout.MCPConfigFile()
+	}
+	regProject := ""
+	if spec.Workspace != nil && spec.Workspace.Path != "" {
+		regProject = workspace.LocalMCPFile(spec.Workspace.Path)
+	}
+	reg := &mcpregistry.Registry{GlobalPath: regGlobal, ProjectPath: regProject}
+	registryServers, regErr := reg.Load()
+	if regErr != nil {
+		// Soft fail: the spec-only map is still attempted. The
+		// per-server launch loop will report "not_in_registry" for
+		// any name only the registry could have provided.
+		registryServers = map[string]mcpregistry.Server{}
+	}
+	merged := mergeMCPServers(map[string]mcpregistry.Server{}, registryServers)
+	res := launchMCPServers(ctx, merged, spec.Tools.McpServers, workspaceDir, stream, nil)
+
+	s.mu.Lock()
+	// Double-check after lock — a concurrent caller may have raced
+	// and won; close our duplicate clients so the cache stays
+	// canonical.
+	if existing, ok := s.mcpClientCache[sessionID]; ok && existing != nil {
+		s.mu.Unlock()
+		for _, cli := range res.Clients {
+			_ = cli.Close()
+		}
+		return existing.Tools
+	}
+	s.mcpClientCache[sessionID] = &res
+	s.mu.Unlock()
+	return res.Tools
+}
+
+// RequestStop signals a detached run to terminate at its next
+// cancellation checkpoint. Returns ok=true when a cancel func was
+// registered for sessionID (the run was in flight), false otherwise.
+//
+// The stop is cooperative: the runner's loop must read its context
+// to actually unwind. provider.Complete and tool.Run both honour
+// context cancellation so a stop propagates within one tool call's
+// worst-case wall time.
+func (s *RunService) RequestStop(sessionID string) bool {
+	s.mu.Lock()
+	cancel, ok := s.runCancels[sessionID]
+	s.mu.Unlock()
+	if !ok || cancel == nil {
+		return false
+	}
+	cancel()
+	return true
 }
 
 // Progress returns a live snapshot of iteration and token counts for the given
@@ -101,8 +249,43 @@ func (s *RunService) Progress(sessionID string) (iters int32, tokens int64, ok b
 	return p.iters, p.tokens, true
 }
 
+// Budget implements service.BudgetGetter. Returns the live cost +
+// sticky budget_exceeded flag for the in-flight run. ok=false when
+// there is no active run for sessionID — SessionService falls back
+// to the persisted rollup in that case.
+func (s *RunService) Budget(sessionID string) (cost float64, exceeded bool, reason string, ok bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p, ok := s.runProgress[sessionID]
+	if !ok {
+		return 0, false, "", false
+	}
+	return p.cost, p.budgetExceeded, p.budgetReason, true
+}
+
 func (s *RunService) sessionDir(sessionID string) string {
 	return filepath.Join(s.sessionsBase, sessionID)
+}
+
+// ensureSessionStream returns the long-lived event stream associated
+// with sessionID, allocating one lazily when none exists yet.
+//
+// This is the bridge that lets chat-mode (SessionService.Prompt) emit
+// tool_call / tool_result events the same way run-mode does, so the
+// existing Tail RPC + giltui Model + chat surface all see one
+// universal session event timeline. Once allocated, the stream stays
+// until the daemon shuts down — memory cost is small (one Stream per
+// session ever prompted, no fan-out goroutines until a subscriber
+// arrives).
+func (s *RunService) ensureSessionStream(sessionID string) *event.Stream {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if st, ok := s.runStreams[sessionID]; ok && st != nil {
+		return st
+	}
+	st := event.NewStream()
+	s.runStreams[sessionID] = st
+	return st
 }
 
 // buildTools returns the tool set for a run, configured per spec.Workspace.Backend.
@@ -253,6 +436,18 @@ func (s *RunService) Start(ctx context.Context, req *gilv1.StartRunRequest) (*gi
 	}
 	prov = provider.NewRetry(prov)
 
+	// providerName is the FACTORY key the default provider was built
+	// from. Plumbed into executeRun so buildRoleProviders can match
+	// per-role overrides against this name (the Provider's .Name()
+	// carries wrapper suffixes like "+retry" that would break the
+	// match). Fallback to spec.Models.Main.Provider when the request
+	// didn't pin the provider on the wire — keeps the routing
+	// consistent with whatever the factory accepted as its default.
+	providerName := req.Provider
+	if providerName == "" && spec.Models != nil && spec.Models.Main != nil {
+		providerName = spec.Models.Main.Provider
+	}
+
 	tools, err := buildTools(workspaceDir, spec.Workspace)
 	if err != nil {
 		return nil, status.Errorf(codes.FailedPrecondition, "workspace backend: %v", err)
@@ -266,14 +461,21 @@ func (s *RunService) Start(ctx context.Context, req *gilv1.StartRunRequest) (*gi
 	metrics.SessionsRunning.Inc()
 
 	if req.Detach {
+		// Derive a cancellable background context so the stop_run
+		// agent-tool can signal the detached loop to terminate. The
+		// cancel func is registered before the goroutine starts so
+		// concurrent RequestStop calls have something to fire.
+		bgCtx, bgCancel := context.WithCancel(context.Background())
+		s.mu.Lock()
+		s.runCancels[req.SessionId] = bgCancel
+		s.mu.Unlock()
 		go func() {
-			// Use a background context: the gRPC ctx cancels when Start returns.
-			bgCtx := context.Background()
-			_, _ = s.executeRun(bgCtx, req.SessionId, spec, prov, model, tools, ver, workspaceDir)
+			defer bgCancel()
+			_, _ = s.executeRun(bgCtx, req.SessionId, spec, prov, providerName, model, tools, ver, workspaceDir)
 		}()
 		return &gilv1.StartRunResponse{Status: "started"}, nil
 	}
-	return s.executeRun(ctx, req.SessionId, spec, prov, model, tools, ver, workspaceDir)
+	return s.executeRun(ctx, req.SessionId, spec, prov, providerName, model, tools, ver, workspaceDir)
 }
 
 // makeAskCallback returns an AskCallback for use in AgentLoop. When the agent
@@ -283,16 +485,41 @@ func (s *RunService) Start(ctx context.Context, req *gilv1.StartRunRequest) (*gi
 // event (so TUI subscribers can display a modal), then blocks for up to 60s
 // waiting for an AnswerPermission RPC. Timeout = deny, matching Phase 7
 // semantics.
+//
+// S9 — when sessionID is a subagent, the ask is routed to the root
+// session: pendingAsk is keyed under root's id so AnswerPermission
+// against the root unblocks the child, and the permission_ask event
+// emits on the root's event stream so the user watching the root
+// surface sees it. The event payload includes from_session_id +
+// from_subagent_label so the user knows which child is asking.
 func (s *RunService) makeAskCallback(sessionID string, stream *event.Stream, evaluator *permission.EvaluatorWithStore) func(context.Context, runner.AskRequest) bool {
+	// Resolve ask routing target once at callback construction. Subagent
+	// linkage doesn't change during a single run, so a snapshot is
+	// correct for the lifetime of this loop.
+	askRouteID := sessionID
+	askRouteStream := stream
+	fromLabel := ""
+	if sess, err := s.repo.Get(context.Background(), sessionID); err == nil && sess.ParentSessionID != "" {
+		if rootID, rerr := resolveRootSessionID(context.Background(), s.repo, sess); rerr == nil {
+			askRouteID = rootID
+			fromLabel = sess.SubagentLabel
+			s.mu.Lock()
+			if rs, ok := s.runStreams[rootID]; ok {
+				askRouteStream = rs
+			}
+			s.mu.Unlock()
+		}
+	}
+
 	return func(ctx context.Context, req runner.AskRequest) bool {
 		reqID := ulid.Make().String()
 		ch := make(chan bool, 1)
 
 		s.mu.Lock()
-		if s.pendingAsks[sessionID] == nil {
-			s.pendingAsks[sessionID] = make(map[string]*pendingAsk)
+		if s.pendingAsks[askRouteID] == nil {
+			s.pendingAsks[askRouteID] = make(map[string]*pendingAsk)
 		}
-		s.pendingAsks[sessionID][reqID] = &pendingAsk{
+		s.pendingAsks[askRouteID][reqID] = &pendingAsk{
 			ch:        ch,
 			tool:      req.Tool,
 			key:       req.Key,
@@ -301,22 +528,29 @@ func (s *RunService) makeAskCallback(sessionID string, stream *event.Stream, eva
 		s.mu.Unlock()
 
 		// Emit permission_ask event so TUI subscribers see it.
-		data, _ := json.Marshal(map[string]any{
+		payload := map[string]any{
 			"request_id": reqID,
 			"tool":       req.Tool,
 			"key":        req.Key,
-		})
-		_, _ = stream.Append(event.Event{
-			Timestamp: time.Now().UTC(),
-			Source:    event.SourceSystem,
-			Kind:      event.KindNote,
-			Type:      "permission_ask",
-			Data:      data,
-		})
+		}
+		if fromLabel != "" {
+			payload["from_session_id"] = sessionID
+			payload["from_subagent_label"] = fromLabel
+		}
+		data, _ := json.Marshal(payload)
+		if askRouteStream != nil {
+			_, _ = askRouteStream.Append(event.Event{
+				Timestamp: time.Now().UTC(),
+				Source:    event.SourceSystem,
+				Kind:      event.KindNote,
+				Type:      "permission_ask",
+				Data:      data,
+			})
+		}
 
 		defer func() {
 			s.mu.Lock()
-			delete(s.pendingAsks[sessionID], reqID)
+			delete(s.pendingAsks[askRouteID], reqID)
 			s.mu.Unlock()
 		}()
 
@@ -387,6 +621,203 @@ func (s *RunService) AnswerPermission(ctx context.Context, req *gilv1.AnswerPerm
 	}
 }
 
+// resolveNotifier produces the outbound notification fan-out for a run.
+// Resolution order:
+//
+//  1. If a test-supplied notifierFor exists, use its result (lets e2e
+//     inject httptest URLs without touching the user's config).
+//  2. Otherwise load notify.LoadConfig(globalConfig, projectConfig) and
+//     materialise the channels per the [notify] section. Stdout-only is
+//     the always-on default so the daemon log shows clarify questions
+//     even when no other channel is wired.
+//
+// nil is a valid return — the makeClarifyCallback handles it by simply
+// skipping the fan-out (the clarify_requested event is still emitted
+// over the per-session stream so the TUI / CLI can surface the modal).
+func (s *RunService) resolveNotifier(sessionID, projectPath string) notify.Notifier {
+	if s.notifierFor != nil {
+		return s.notifierFor(sessionID, projectPath)
+	}
+	var globalCfgPath string
+	if layout, lerr := paths.FromEnv(); lerr == nil {
+		globalCfgPath = layout.ConfigFile()
+	}
+	var projectCfgPath string
+	if projectPath != "" {
+		if root, derr := workspace.Discover(projectPath); derr == nil {
+			projectCfgPath = workspace.LocalConfigFile(root)
+		}
+	}
+	cfg, err := notify.LoadConfig(globalCfgPath, projectCfgPath)
+	if err != nil {
+		// A malformed config shouldn't kill the run — fall back to the
+		// stdout-only default so the user still sees clarify pauses.
+		cfg = notify.Config{Stdout: true}
+	}
+	// stdout writes to os.Stdout (the daemon's log surface). Tests
+	// override notifierFor before this code path runs.
+	return cfg.Build(daemonLogWriter())
+}
+
+// daemonLogWriter is the io.Writer the StdoutNotifier writes to when
+// running inside gild. We pin it to os.Stdout via a tiny indirection
+// so tests can swap it without touching the global at process scope.
+var daemonLogWriter = func() io.Writer { return os.Stdout }
+
+// clarifyTimeoutDefault is the maximum wall-clock the clarify tool's
+// callback waits for an answer before returning TimedOut=true. We pick
+// 60 minutes because the user may genuinely be away from the keyboard
+// (the safety valve fires for unforeseen blockers, not trivia) — much
+// longer than the 60s permission ask. The tool result mentions the
+// timeout so the agent's error-handling path triggers a "best-effort
+// decision and continue" rather than re-asking.
+const clarifyTimeoutDefault = 60 * time.Minute
+
+// makeClarifyCallback returns the AskClarifyCallback the clarify tool
+// invokes. Pattern mirrors makeAskCallback for permissions:
+//   1) generate an ask_id (ULID)
+//   2) register a pendingClarify entry on the session map
+//   3) emit a clarify_requested event so observers (TUI, CLI) can
+//      surface the question
+//   4) fire the outbound Notifier (desktop / webhook / stdout) with
+//      the urgency-derived hint
+//   5) block on the channel until AnswerClarification fires, ctx is
+//      cancelled, or 60min elapses
+//
+// The notifier never blocks the run — its dispatch happens inside a
+// goroutine so a flaky webhook doesn't extend the ask's effective
+// pause. notifierFor may be nil; in that case the fallback is a stdout-
+// only notifier that writes to the daemon log via os.Stdout.
+func (s *RunService) makeClarifyCallback(stream *event.Stream, projectPath string, notifier notify.Notifier) tool.AskClarifyCallback {
+	return func(ctx context.Context, sessionID string, ask tool.ClarifyAsk) (tool.ClarifyAnswer, error) {
+		askID := ulid.Make().String()
+		ch := make(chan string, 1)
+
+		s.mu.Lock()
+		if s.pendingClarifications[sessionID] == nil {
+			s.pendingClarifications[sessionID] = make(map[string]*pendingClarify)
+		}
+		s.pendingClarifications[sessionID][askID] = &pendingClarify{ch: ch}
+		s.mu.Unlock()
+
+		// Emit clarify_requested event so TUI / CLI observers can
+		// surface a modal or print the question for the user.
+		data, _ := json.Marshal(map[string]any{
+			"ask_id":      askID,
+			"question":    ask.Question,
+			"context":     ask.Context,
+			"suggestions": ask.Suggestions,
+			"urgency":     ask.Urgency,
+		})
+		_, _ = stream.Append(event.Event{
+			Timestamp: time.Now().UTC(),
+			Source:    event.SourceAgent,
+			Kind:      event.KindAction,
+			Type:      "clarify_requested",
+			Data:      data,
+		})
+
+		// Fire-and-forget notification fan-out. We deliberately do NOT
+		// wait for the notifier — its 5-second webhook timeout would
+		// otherwise compound into the user-visible pause, and a slow
+		// Slack hook can make the tool feel hung. A 10-second budget
+		// is plenty for desktop + webhook.
+		if notifier != nil {
+			urgFiltered := notify.FilterByUrgency(notifier, urgencyFloorFor(ask.Urgency))
+			go func() {
+				nctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				_ = urgFiltered.Notify(nctx, notify.Notification{
+					Title:     "gil clarify",
+					Body:      ask.Question,
+					Urgency:   ask.Urgency,
+					SessionID: sessionID,
+					AskID:     askID,
+				})
+			}()
+		}
+
+		defer func() {
+			s.mu.Lock()
+			delete(s.pendingClarifications[sessionID], askID)
+			s.mu.Unlock()
+		}()
+
+		select {
+		case ans, ok := <-ch:
+			if !ok {
+				return tool.ClarifyAnswer{Cancelled: true}, nil
+			}
+			return tool.ClarifyAnswer{Answer: ans}, nil
+		case <-ctx.Done():
+			return tool.ClarifyAnswer{Cancelled: true}, nil
+		case <-time.After(clarifyTimeoutDefault):
+			return tool.ClarifyAnswer{TimedOut: true}, nil
+		}
+	}
+}
+
+// urgencyFloorFor maps the agent's urgency hint to the minimum urgency
+// the notifier surface should fire on. Per spec:
+//   - high → fire ALL channels (desktop bell + webhook + stdout)
+//   - normal → webhook + stdout (skip desktop bell)
+//   - low → stdout only (notifier filters out anything below "low")
+//
+// We translate that into a per-call urgency floor on the wrapped
+// notifier rather than picking different fan-outs per ask, because
+// the user's config.toml is the source of truth for which channels
+// exist; the ask's urgency only controls which of those FIRE.
+func urgencyFloorFor(u string) string {
+	switch u {
+	case "high":
+		return "low" // no filter — every channel fires
+	case "low":
+		return "high" // only stdout-equivalent channels fire (most filter out)
+	default:
+		return "normal"
+	}
+}
+
+// AnswerClarification delivers the user's free-form answer to a pending
+// clarify_requested ask. Returns delivered=false when the ask_id is no
+// longer pending (timed out, already answered, or never existed) — the
+// same race-tolerant shape as AnswerPermission.
+func (s *RunService) AnswerClarification(ctx context.Context, req *gilv1.AnswerClarificationRequest) (*gilv1.AnswerClarificationResponse, error) {
+	s.mu.Lock()
+	per, ok := s.pendingClarifications[req.SessionId]
+	var entry *pendingClarify
+	if ok {
+		entry = per[req.AskId]
+	}
+	s.mu.Unlock()
+	if entry == nil {
+		return &gilv1.AnswerClarificationResponse{Delivered: false}, nil
+	}
+	select {
+	case entry.ch <- req.Answer:
+		return &gilv1.AnswerClarificationResponse{Delivered: true}, nil
+	default:
+		// Channel buffer=1; already filled means the runner already
+		// picked up an answer (a race vs a duplicate Answer call).
+		return &gilv1.AnswerClarificationResponse{Delivered: false}, nil
+	}
+}
+
+// PendingClarifications returns the askIDs currently awaiting a user
+// answer for the session. Used by `gil clarify --list` and surface
+// surfaces that want to render outstanding asks without subscribing to
+// the event stream. Read-only; ordering is non-deterministic.
+func (s *RunService) PendingClarifications(sessionID string) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	per := s.pendingClarifications[sessionID]
+	out := make([]string, 0, len(per))
+	for id := range per {
+		out = append(out, id)
+	}
+	return out
+}
+
 // resolveDecision maps the wire fields to (allow, PersistDecision). The
 // PersistDecision drives what AnswerPermission persists; the bool drives
 // what the AskCallback returns to the runner.
@@ -424,6 +855,7 @@ func (s *RunService) executeRun(
 	sessionID string,
 	spec *gilv1.FrozenSpec,
 	prov provider.Provider,
+	providerName string,
 	model string,
 	tools []tool.Tool,
 	ver *verify.Runner,
@@ -526,30 +958,84 @@ func (s *RunService) executeRun(
 	}
 	defer persister.Close()
 
-	stream := event.NewStream()
+	// Reuse the long-lived per-session stream if a prior chat turn
+	// already allocated one (so existing Tail subscribers stay
+	// connected across the chat → run handoff). Otherwise allocate a
+	// fresh one and register it.
+	stream := s.ensureSessionStream(sessionID)
 
-	// Register stream and progress snap under the lock.
+	// Register progress snap under the lock. The stream is already
+	// registered by ensureSessionStream.
 	s.mu.Lock()
-	s.runStreams[sessionID] = stream
 	s.runProgress[sessionID] = &runProgressSnap{}
 	s.mu.Unlock()
 
-	// Cleanup on exit: remove both stream and progress entry, decrement running gauge.
+	// Wire provider retry observability. The provider was wrapped in
+	// NewRetry at gRPC entry; once we have a stream, attach a callback
+	// that emits a `provider.retry_attempt` event so the chat surface
+	// can show "[retrying 2/4 · 1.0s]" instead of a silent ~30s gap
+	// while exponential backoff drains. Without this hook a flaky
+	// upstream looks indistinguishable from a hang to the user.
+	if rp, ok := prov.(*provider.Retry); ok {
+		rp.OnRetry = func(attempt, maxAttempts int, err error, wait time.Duration) {
+			data, _ := json.Marshal(map[string]any{
+				"attempt":      attempt,
+				"max_attempts": maxAttempts,
+				"wait_ms":      wait.Milliseconds(),
+				"err":          err.Error(),
+			})
+			_, _ = stream.Append(event.Event{
+				Timestamp: time.Now().UTC(),
+				Source:    event.SourceSystem,
+				Kind:      event.KindNote,
+				Type:      "provider.retry_attempt",
+				Data:      data,
+			})
+		}
+	}
+
+	// Cleanup on exit: remove progress, loop, and any
+	// pending-clarification channels. Closing each pending channel
+	// unblocks the clarify tool with Cancelled=true so the run can
+	// finish its termination path cleanly even if the user never
+	// answered.
+	//
+	// The per-session event stream is intentionally NOT deleted on
+	// run exit: chat turns (SessionService.Prompt) emit on the same
+	// stream and giltui's Tail subscription stays connected across
+	// the run → chat handoff. Streams are reaped only when the
+	// daemon shuts down.
 	defer func() {
 		s.mu.Lock()
-		delete(s.runStreams, sessionID)
 		delete(s.runProgress, sessionID)
+		delete(s.runLoops, sessionID)
+		delete(s.runCancels, sessionID)
+		if per := s.pendingClarifications[sessionID]; per != nil {
+			for _, p := range per {
+				close(p.ch)
+			}
+			delete(s.pendingClarifications, sessionID)
+		}
 		s.mu.Unlock()
 		metrics.SessionsRunning.Dec()
 	}()
 
-	// Persistence subscriber: write every event to disk.
+	// Persistence subscriber: write every event to disk. We force a
+	// Sync on clarify_requested so a pausing run's question becomes
+	// observable on disk immediately — surfaces that read the events
+	// file (the `gil clarify --list` CLI, the e2e suite, watchdog
+	// scripts) can otherwise miss the event because the persister's
+	// bufio.Writer holds < 4 KB of buffered output until flushed at
+	// run end. Other event types stay buffered for throughput.
 	persistSub := stream.Subscribe(256)
 	persistDone := make(chan struct{})
 	go func() {
 		defer close(persistDone)
 		for evt := range persistSub.Events() {
 			_ = persister.Write(evt)
+			if evt.Type == "clarify_requested" {
+				_ = persister.Sync()
+			}
 		}
 	}()
 
@@ -567,6 +1053,25 @@ func (s *RunService) executeRun(
 				}
 				if evt.Metrics.Tokens > 0 {
 					snap.tokens += evt.Metrics.Tokens
+				}
+				// Budget signals: parse the JSON payload so the live
+				// cost + sticky exceeded flag are available to
+				// SessionService.toProto(). budget_warning carries the
+				// running cost; budget_exceeded latches the alert bit.
+				if evt.Type == "budget_warning" || evt.Type == "budget_exceeded" {
+					var d struct {
+						Reason string  `json:"reason"`
+						Used   float64 `json:"used"`
+					}
+					if jerr := json.Unmarshal(evt.Data, &d); jerr == nil {
+						if d.Reason == "cost" && d.Used > snap.cost {
+							snap.cost = d.Used
+						}
+						if evt.Type == "budget_exceeded" {
+							snap.budgetExceeded = true
+							snap.budgetReason = d.Reason
+						}
+					}
 				}
 			}
 			s.mu.Unlock()
@@ -638,7 +1143,14 @@ func (s *RunService) executeRun(
 				Data:      data,
 			})
 		} else {
-			specServers := map[string]mcpregistry.Server{} // future: derived from spec.MCP
+			// The frozen spec carries an allowlist (Tools.McpServers) of
+			// server names it wants enabled, NOT full launch records — so
+			// the spec-side map starts empty and we filter the merged
+			// registry by the allowlist below. mergeMCPServers stays in
+			// the loop because future spec versions may embed full
+			// records (codex-style overrides) without renaming the
+			// helper.
+			specServers := map[string]mcpregistry.Server{}
 			merged := mergeMCPServers(specServers, registryServers)
 			shadowed := shadowedRegistryNames(specServers, registryServers)
 			names := make([]string, 0, len(merged))
@@ -659,6 +1171,23 @@ func (s *RunService) executeRun(
 				Type:      "mcp_registry_loaded",
 				Data:      data,
 			})
+
+			// Launch the spec's allowlisted MCP servers, surface their
+			// tools to the agent loop, and defer Close so the
+			// subprocesses tear down with the run. Empty allowlist =
+			// no-op; failures are non-fatal and reported per-server.
+			var allowlist []string
+			if spec.Tools != nil {
+				allowlist = spec.Tools.McpServers
+			}
+			mcpRes := launchMCPServers(ctx, merged, allowlist, workspaceDir, stream, nil)
+			for _, cli := range mcpRes.Clients {
+				cliRef := cli
+				defer func() { _ = cliRef.Close() }()
+			}
+			if len(mcpRes.Tools) > 0 {
+				tools = append(tools, mcpRes.Tools...)
+			}
 		}
 	}
 
@@ -739,8 +1268,83 @@ func (s *RunService) executeRun(
 		&tool.MemoryUpdate{Bank: bank},
 		&tool.MemoryLoad{Bank: bank},
 		&tool.Edit{WorkingDir: workspaceDir},
-		&tool.ApplyPatch{WorkspaceDir: workspaceDir}, // NEW
+		&tool.ApplyPatch{WorkspaceDir: workspaceDir},
+		// web_fetch / web_search are always-on. The fetch tool is
+		// read-only and unconditionally available; the search tool
+		// reports "no backend configured" gracefully when neither
+		// BRAVE_SEARCH_API_KEY nor TAVILY_API_KEY is set, so the agent
+		// can decide whether to fall back to web_fetch on a known URL.
+		&tool.WebFetch{},
+		&tool.WebSearch{},
 	)
+
+	// Plan store + tool (Phase 18 Track A). The plan persists at
+	// <sessionsBase>/<sessionID>/plan.json and is the agent's TODO
+	// checklist surfaced in the TUI/CLI. The tool is added to the
+	// per-run set so the agent can call it directly; the loop's
+	// Plan/SessionID fields below let the runner prepend a plan
+	// summary to the system prompt every iteration. Emit closes over
+	// the per-session stream so plan_updated events flow to TUI/CLI
+	// observers.
+	planStore := plan.NewStore(s.sessionsBase)
+	planTool := &tool.Plan{
+		Store:     planStore,
+		SessionID: sessionID,
+		Emit: func(ctx context.Context, p *plan.Plan, op string) {
+			pen, ip, comp := p.Counts()
+			b, _ := json.Marshal(map[string]any{
+				"op":          op,
+				"version":     p.Version,
+				"items":       len(p.Items),
+				"pending":     pen,
+				"in_progress": ip,
+				"completed":   comp,
+			})
+			_, _ = stream.Append(event.Event{
+				Timestamp: time.Now().UTC(),
+				Source:    event.SourceAgent,
+				Kind:      event.KindObservation,
+				Type:      "plan_updated",
+				Data:      b,
+			})
+		},
+	}
+	tools = append(tools, planTool)
+
+	// LSP manager + tool (Phase 18 Track C). One manager per run, scoped
+	// to the workspace root; servers (gopls / pyright /
+	// typescript-language-server / rust-analyzer) are spawned lazily on
+	// first use, so runs that never touch the lsp tool pay nothing. The
+	// deferred Shutdown reaps every spawned subprocess when the run
+	// ends, even on panic / cancel.
+	//
+	// When workspaceDir is empty (rare — local backend without a
+	// configured path) we still construct the manager so the lsp tool
+	// can return its actionable "no language server configured" hint
+	// instead of a misleading "tool unavailable" error.
+	lspMgr := lsp.NewManager(workspaceDir)
+	tools = append(tools, &tool.LSP{Manager: lspMgr, WorkingDir: workspaceDir})
+	defer func() {
+		// Best-effort: a 5-second budget is plenty for the polite
+		// shutdown handshake; if any server hangs, the manager force-
+		// kills internally so we never leak children.
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = lspMgr.Shutdown(shutdownCtx)
+	}()
+
+	// Clarify tool (Phase 18 Track D). The agent-callable safety valve
+	// for "I genuinely need user input mid-run" (ambiguous spec, missing
+	// credential, external service down). The Ask callback blocks the
+	// runner on a per-session pending channel until AnswerClarification
+	// fires, the run is cancelled, or 60min elapses. Notifier is built
+	// from project + global config.toml [notify] tables, with a stdout
+	// fallback so the user always sees at least one channel.
+	clarifyNotifier := s.resolveNotifier(sessionID, workspaceDir)
+	tools = append(tools, &tool.Clarify{
+		SessionID: sessionID,
+		Ask:       s.makeClarifyCallback(stream, workspaceDir, clarifyNotifier),
+	})
 
 	// exec tool: Recipe runner. Inner tools = everything else built so far.
 	// Filtering happens inside ExecTool.Run defensively.
@@ -761,6 +1365,74 @@ func (s *RunService) executeRun(
 	loop := runner.NewAgentLoop(spec, prov, model, tools, ver)
 	loop.Events = stream
 	loop.Memory = bank
+	// Plumb the factory provider name so the runner can pick the right
+	// system-prompt verbosity (verbose for vllm/local, compact for
+	// anthropic/openai/openrouter). The Provider object's Name() returns
+	// "openai" for all OpenAI-compatible endpoints — useless for this
+	// decision; ProviderName carries the original factory key.
+	loop.ProviderName = providerName
+
+	// Phase 19 Track C: wire the architect/coder split. buildRoleProviders
+	// constructs per-role Provider+Model maps from spec.Models.{planner,
+	// editor, main}, sharing one Provider instance when multiple roles
+	// point at the same backend. Single-provider specs (just main) yield
+	// a 1-entry map and the runner's pickProvider helpers fall through
+	// to a.Provider for any unset role — preserving the legacy single-
+	// provider behaviour bit-for-bit.
+	roleProviders, roleModels, rerr := buildRoleProviders(spec, s.providerFactory, prov, model, providerName)
+	if rerr != nil {
+		// A typo'd provider name in spec.Models is a hard failure: the
+		// user clearly intended an override and we don't want to
+		// silently downgrade. Emit an event before returning so the
+		// failure is visible in the persisted event stream.
+		data, _ := json.Marshal(map[string]any{
+			"err": rerr.Error(),
+		})
+		_, _ = stream.Append(event.Event{
+			Timestamp: time.Now().UTC(),
+			Source:    event.SourceSystem,
+			Kind:      event.KindNote,
+			Type:      "role_providers_error",
+			Data:      data,
+		})
+		_ = s.repo.UpdateStatus(ctx, sessionID, "stopped")
+		return nil, status.Errorf(codes.InvalidArgument, "role provider: %v", rerr)
+	}
+	loop.Providers = roleProviders
+	loop.Models = roleModels
+	// Plan wiring: same per-session store as the plan tool above; the
+	// runner uses it ONLY for the system-prompt prepend (read-side).
+	// All mutations flow through the tool, never the loop directly.
+	loop.Plan = planStore
+	loop.SessionID = sessionID
+
+	// P27 T3: instantiate Compactor from spec so the compaction trigger
+	// in runner.go is no longer dead code.
+	// "" catch-all: workspace.ApplyDefaults may leave ModelChoice.Provider
+	// blank; see core/runner/factory.go for why this entry is required.
+	provsByName := map[string]provider.Provider{providerName: prov, "": prov}
+	compactor, cerr := runner.NewCompactorFromSpec(spec.GetModels(), provsByName)
+	if cerr != nil {
+		data, _ := json.Marshal(map[string]any{"err": cerr.Error()})
+		_, _ = stream.Append(event.Event{
+			Timestamp: time.Now().UTC(),
+			Source:    event.SourceSystem,
+			Kind:      event.KindNote,
+			Type:      "compactor_setup_error",
+			Data:      data,
+		})
+		_ = s.repo.UpdateStatus(ctx, sessionID, "stopped")
+		return nil, status.Errorf(codes.InvalidArgument, "compactor setup: %v", cerr)
+	}
+	loop.Compactor = compactor
+
+	// Register the loop pointer so RequestCompact / PostHint RPCs can
+	// stage actions for the next iteration boundary. Cleared in the
+	// existing exit-cleanup defer below alongside runStreams /
+	// runProgress so the lifetime matches the run exactly.
+	s.mu.Lock()
+	s.runLoops[sessionID] = loop
+	s.mu.Unlock()
 	// Tell the runner where the user's project lives so it can run the
 	// AGENTS.md / CLAUDE.md / .cursor/rules tree-walk and inject the
 	// resulting context into the system prompt. Empty workspaceDir leaves
@@ -772,13 +1444,25 @@ func (s *RunService) executeRun(
 	// the loop itself as the CompactRequester. Appended last so it appears in
 	// the tool list but doesn't shadow other tools.
 	tools = append(tools, &tool.CompactNow{Requester: loop})
-	// Rebuild the loop's internal tool set to include compact_now.
+	// Wire subagent tool (Phase 18 Track E): the tool needs the loop
+	// reference so it can spawn read-only sub-loops via
+	// AgentLoop.RunSubagentWithConfig. Same post-loop-construction
+	// pattern as compact_now.
+	tools = append(tools, &tool.Subagent{Runner: loop.AsSubagentRunner()})
+	// Rebuild the loop's internal tool set to include compact_now + subagent.
 	loop.Tools = tools
 
 	// Wire stuck detector so the long-run soak and production runs can detect
 	// repeated-action patterns and surface them as events. No recovery strategy
 	// here; every signal is unrecovered (counts toward the 3-signal abort).
-	loop.StuckDetector = &stuck.Detector{Window: 50}
+	//
+	// Window=200 keeps the NoProgress detector well-fed: it needs visibility
+	// over Threshold (default 4) full iterations, each ~10-15 events
+	// (iteration_start, provider_request/response, tool_call/tool_result
+	// pairs, verify_run+verify_result*N). A 50-event window can clip the
+	// fourth iter; 200 gives us comfortable headroom for up to ~12 iters
+	// without bloating memory.
+	loop.StuckDetector = &stuck.Detector{Window: 200}
 
 	// Build permission gate from spec.risk.autonomy. Returns nil for FULL.
 	// Wrap the spec evaluator with EvaluatorWithStore so persistent
@@ -1002,13 +1686,20 @@ func eventKindToProto(k event.Kind) gilv1.EventKind {
 // event to the gRPC client. Returns NotFound if no run is active for the
 // session. (Replay from disk is Phase 6.)
 func (s *RunService) Tail(req *gilv1.TailRequest, stream gilv1.RunService_TailServer) error {
-	s.mu.Lock()
-	rs, ok := s.runStreams[req.SessionId]
-	s.mu.Unlock()
-	if !ok {
-		return status.Errorf(codes.NotFound,
-			"no active run for session %q (replay from disk is Phase 6)", req.SessionId)
+	// Verify the session exists so non-existent IDs still produce a
+	// clear NotFound rather than silently subscribing to an empty
+	// stream that never emits.
+	if _, err := s.repo.Get(stream.Context(), req.SessionId); err != nil {
+		if errors.Is(err, session.ErrNotFound) {
+			return status.Errorf(codes.NotFound, "session %q not found", req.SessionId)
+		}
+		return status.Errorf(codes.Internal, "session lookup: %v", err)
 	}
+	// Lazy-allocate the long-lived per-session stream — chat-mode
+	// (SessionService.Prompt) and run-mode (executeRun) both emit on
+	// the same stream, so subscribing here works regardless of which
+	// mode is currently active for this session.
+	rs := s.ensureSessionStream(req.SessionId)
 
 	sub := rs.Subscribe(256)
 	defer sub.Close()

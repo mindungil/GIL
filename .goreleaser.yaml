@@ -47,9 +47,9 @@ builds:
     # version vars themselves.
     ldflags:
       - -s -w
-      - -X 'github.com/jedutools/gil/core/version.Version={{ .Version }}'
-      - -X 'github.com/jedutools/gil/core/version.Commit={{ .Commit }}'
-      - -X 'github.com/jedutools/gil/core/version.BuildDate={{ .Date }}'
+      - -X 'github.com/mindungil/gil/core/version.Version={{ .Version }}'
+      - -X 'github.com/mindungil/gil/core/version.Commit={{ .Commit }}'
+      - -X 'github.com/mindungil/gil/core/version.BuildDate={{ .Date }}'
 
   - id: gild
     binary: gild
@@ -68,9 +68,9 @@ builds:
     # version vars themselves.
     ldflags:
       - -s -w
-      - -X 'github.com/jedutools/gil/core/version.Version={{ .Version }}'
-      - -X 'github.com/jedutools/gil/core/version.Commit={{ .Commit }}'
-      - -X 'github.com/jedutools/gil/core/version.BuildDate={{ .Date }}'
+      - -X 'github.com/mindungil/gil/core/version.Version={{ .Version }}'
+      - -X 'github.com/mindungil/gil/core/version.Commit={{ .Commit }}'
+      - -X 'github.com/mindungil/gil/core/version.BuildDate={{ .Date }}'
 
   - id: giltui
     binary: giltui
@@ -89,9 +89,9 @@ builds:
     # version vars themselves.
     ldflags:
       - -s -w
-      - -X 'github.com/jedutools/gil/core/version.Version={{ .Version }}'
-      - -X 'github.com/jedutools/gil/core/version.Commit={{ .Commit }}'
-      - -X 'github.com/jedutools/gil/core/version.BuildDate={{ .Date }}'
+      - -X 'github.com/mindungil/gil/core/version.Version={{ .Version }}'
+      - -X 'github.com/mindungil/gil/core/version.Commit={{ .Commit }}'
+      - -X 'github.com/mindungil/gil/core/version.BuildDate={{ .Date }}'
 
   - id: gilmcp
     binary: gilmcp
@@ -110,9 +110,9 @@ builds:
     # version vars themselves.
     ldflags:
       - -s -w
-      - -X 'github.com/jedutools/gil/core/version.Version={{ .Version }}'
-      - -X 'github.com/jedutools/gil/core/version.Commit={{ .Commit }}'
-      - -X 'github.com/jedutools/gil/core/version.BuildDate={{ .Date }}'
+      - -X 'github.com/mindungil/gil/core/version.Version={{ .Version }}'
+      - -X 'github.com/mindungil/gil/core/version.Commit={{ .Commit }}'
+      - -X 'github.com/mindungil/gil/core/version.BuildDate={{ .Date }}'
 
 archives:
   # One bundle per (os, arch) containing all four binaries — that's the
@@ -148,9 +148,9 @@ nfpms:
     ids: [gil, gild, giltui, gilmcp]
     file_name_template: >-
       {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
-    vendor: jedutools
-    homepage: https://github.com/jedutools/gil
-    maintainer: jedutools <jedutools@gmail.com>
+    vendor: mindungil
+    homepage: https://github.com/mindungil/GIL
+    maintainer: mindungil <alswnsrlf12@naver.com>
     description: |-
       gil — autonomous coding harness (CLI, server, TUI, MCP).
       Bundles gil, gild, giltui, and gilmcp.
@@ -171,17 +171,17 @@ brews:
   - name: gil
     ids: [gil-bundle]
     repository:
-      owner: jedutools
+      owner: mindungil
       name: homebrew-tap
       branch: main
       # Token is injected via env; see .github/workflows/release.yml.
       # token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
-    homepage: https://github.com/jedutools/gil
+    homepage: https://github.com/mindungil/GIL
     description: Autonomous coding harness (CLI, server, TUI, MCP).
     license: MIT
     commit_author:
       name: gil-release-bot
-      email: jedutools@gmail.com
+      email: alswnsrlf12@naver.com
     install: |
       bin.install "gil"
       bin.install "gild"
@@ -192,8 +192,8 @@ brews:
 
 release:
   github:
-    owner: jedutools
-    name: gil
+    owner: mindungil
+    name: GIL
   draft: true
   prerelease: auto
   name_template: 'gil v{{ .Version }}'

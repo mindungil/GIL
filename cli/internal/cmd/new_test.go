@@ -7,15 +7,16 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
-	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
+	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
 )
 
 func startGildForTest(t *testing.T) (sock string, cleanup func()) {
@@ -31,7 +32,6 @@ func startGildForTest(t *testing.T) (sock string, cleanup func()) {
 
 	g := grpc.NewServer()
 	gilv1.RegisterSessionServiceServer(g, &testSessionServer{})
-	gilv1.RegisterInterviewServiceServer(g, &testInterviewServer{})
 	gilv1.RegisterRunServiceServer(g, &testRunServer{})
 	go g.Serve(lis)
 
@@ -77,57 +77,40 @@ func (s *testSessionServer) List(ctx context.Context, req *gilv1.ListRequest) (*
 	return &gilv1.ListResponse{Sessions: append([]*gilv1.Session(nil), s.sessions...)}, nil
 }
 
-// testInterviewServer is a minimal in-test stub of InterviewService.
-type testInterviewServer struct {
-	gilv1.UnimplementedInterviewServiceServer
+// Get / Delete are needed by the session subcommand tests
+// (cli/internal/cmd/session_test.go). They live on the same stub so the
+// shared startGildForTest harness keeps one in-process server.
+func (s *testSessionServer) Get(ctx context.Context, req *gilv1.GetRequest) (*gilv1.Session, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, sess := range s.sessions {
+		if sess.Id == req.Id {
+			return sess, nil
+		}
+	}
+	return nil, status.Errorf(codes.NotFound, "session %q not found", req.Id)
+}
+
+func (s *testSessionServer) Delete(ctx context.Context, req *gilv1.DeleteRequest) (*gilv1.DeleteResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, sess := range s.sessions {
+		if sess.Id == req.Id {
+			if sess.Status == gilv1.SessionStatus_RUNNING {
+				return nil, status.Errorf(codes.FailedPrecondition,
+					"session %q is currently running; stop the run first", req.Id)
+			}
+			s.sessions = append(s.sessions[:i], s.sessions[i+1:]...)
+			return &gilv1.DeleteResponse{FreedBytes: 1024}, nil
+		}
+	}
+	return nil, status.Errorf(codes.NotFound, "session %q not found", req.Id)
 }
 
 // testRunServer is a minimal in-test stub of RunService.
+// (testInterviewServer deleted in M3 — InterviewService is gone.)
 type testRunServer struct {
 	gilv1.UnimplementedRunServiceServer
-}
-
-func (s *testInterviewServer) Start(req *gilv1.StartInterviewRequest, stream gilv1.InterviewService_StartServer) error {
-	stream.Send(&gilv1.InterviewEvent{
-		Payload: &gilv1.InterviewEvent_Stage{
-			Stage: &gilv1.StageTransition{
-				From:   "sensing",
-				To:     "conversation",
-				Reason: "test",
-			},
-		},
-	})
-	return stream.Send(&gilv1.InterviewEvent{
-		Payload: &gilv1.InterviewEvent_AgentTurn{
-			AgentTurn: &gilv1.AgentTurn{
-				Content: "What do you want?",
-			},
-		},
-	})
-}
-
-func (s *testInterviewServer) Reply(req *gilv1.ReplyRequest, stream gilv1.InterviewService_ReplyServer) error {
-	return stream.Send(&gilv1.InterviewEvent{
-		Payload: &gilv1.InterviewEvent_AgentTurn{
-			AgentTurn: &gilv1.AgentTurn{
-				Content: "got: " + req.Content,
-			},
-		},
-	})
-}
-
-func (s *testInterviewServer) GetSpec(ctx context.Context, req *gilv1.GetSpecRequest) (*gilv1.FrozenSpec, error) {
-	return &gilv1.FrozenSpec{
-		SpecId:    "test-spec-id",
-		SessionId: req.SessionId,
-	}, nil
-}
-
-func (s *testInterviewServer) Confirm(ctx context.Context, req *gilv1.ConfirmRequest) (*gilv1.ConfirmResponse, error) {
-	return &gilv1.ConfirmResponse{
-		SpecId:         "test-spec-id",
-		ContentSha256:  strings.Repeat("a", 64),
-	}, nil
 }
 
 // Start implements RunService.Start for testing.

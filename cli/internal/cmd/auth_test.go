@@ -8,7 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jedutools/gil/core/credstore"
+	"github.com/mindungil/gil/core/credstore"
+	"github.com/mindungil/gil/core/provider"
 )
 
 // runAuthCmd executes a `gil auth ...` command in-process and returns the
@@ -301,6 +302,287 @@ func TestAuthList_JSONOutput(t *testing.T) {
 			t.Errorf("vllm base_url not propagated, got %q", p.BaseURL)
 		}
 	}
+}
+
+// TestAuthLogin_NonInteractive_SavesModel checks the new --model flag:
+// when supplied alongside --api-key, the model id round-trips through
+// the credstore and shows up on `gil auth list`.
+func TestAuthLogin_NonInteractive_SavesModel(t *testing.T) {
+	dir := t.TempDir()
+	authFile := filepath.Join(dir, "auth.json")
+
+	if _, _, err := runAuthCmd(t, authFile,
+		"login", "anthropic",
+		"--api-key", "sk-ant-test1234567890abcd",
+		"--model", "claude-sonnet-4-6",
+		"--no-test",
+	); err != nil {
+		t.Fatalf("login: %v", err)
+	}
+
+	store := credstore.NewFileStore(authFile)
+	cred, err := store.Get(context.Background(), credstore.Anthropic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cred == nil || cred.Model != "claude-sonnet-4-6" {
+		t.Fatalf("expected model on stored credential, got %+v", cred)
+	}
+
+	stdout, _, _ := runAuthCmd(t, authFile, "list")
+	if !strings.Contains(stdout, "claude-sonnet-4-6") {
+		t.Errorf("expected model in list output, got: %s", stdout)
+	}
+}
+
+// TestAuthLogin_WizardInteractive_PicksProviderKeyModel exercises the
+// full wizard flow with stdin replay. We force TTY mode via the test
+// env override so the wizard renders its multi-step UI; stdin carries
+// the keystrokes that drive each step.
+//
+// The smoke-test step is skipped via --no-test so we don't try to
+// reach api.anthropic.com from the test process.
+func TestAuthLogin_WizardInteractive_PicksProviderKeyModel(t *testing.T) {
+	t.Setenv("GIL_TEST_FORCE_TTY", "1")
+	dir := t.TempDir()
+	authFile := filepath.Join(dir, "auth.json")
+
+	// Stdin replay: pick provider [1] anthropic → key → pick model
+	// default (empty enter → choice 1 = haiku).
+	stdin := strings.NewReader("1\nsk-ant-test1234567890abcd\n\n")
+
+	root := authCmd()
+	root.SetArgs([]string{"login", "--auth-file", authFile, "--no-test"})
+	var out, errBuf bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&errBuf)
+	root.SetIn(stdin)
+
+	if err := root.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("wizard execute: %v\nstdout: %s\nstderr: %s", err, out.String(), errBuf.String())
+	}
+
+	// Banner + step labels rendered.
+	for _, want := range []string{
+		"Provider Setup",
+		"Pick a provider",
+		"Anthropic",
+		"OpenAI",
+		"OpenRouter",
+		"vLLM",
+		"API key",
+		"Default model",
+		"Saved",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("wizard output missing %q\nfull output:\n%s", want, out.String())
+		}
+	}
+
+	// Credential persisted with the picked model (haiku is the default).
+	store := credstore.NewFileStore(authFile)
+	cred, err := store.Get(context.Background(), credstore.Anthropic)
+	if err != nil || cred == nil {
+		t.Fatalf("expected saved credential, got %v / %+v", err, cred)
+	}
+	if cred.Model != "claude-haiku-4-5" {
+		t.Errorf("expected default model claude-haiku-4-5, got %q", cred.Model)
+	}
+	if cred.APIKey != "sk-ant-test1234567890abcd" {
+		t.Errorf("expected api key persisted, got %q", cred.APIKey)
+	}
+}
+
+// TestAuthLogin_WizardInteractive_OpenRouterCustomModel verifies the
+// "Other" branch in the model picker: user picks the sentinel and types
+// a model id verbatim.
+func TestAuthLogin_WizardInteractive_OpenRouterCustomModel(t *testing.T) {
+	t.Setenv("GIL_TEST_FORCE_TTY", "1")
+	dir := t.TempDir()
+	authFile := filepath.Join(dir, "auth.json")
+
+	// 3 = OpenRouter, then key, then 6 = "Other", then custom model id.
+	stdin := strings.NewReader("3\nsk-or-v1-test1234567890ab\n6\nmistralai/mistral-large\n")
+
+	root := authCmd()
+	root.SetArgs([]string{"login", "--auth-file", authFile, "--no-test"})
+	var out, errBuf bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&errBuf)
+	root.SetIn(stdin)
+
+	if err := root.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("wizard execute: %v\nstdout: %s\nstderr: %s", err, out.String(), errBuf.String())
+	}
+
+	store := credstore.NewFileStore(authFile)
+	cred, _ := store.Get(context.Background(), credstore.OpenRouter)
+	if cred == nil {
+		t.Fatal("expected openrouter credential")
+	}
+	if cred.Model != "mistralai/mistral-large" {
+		t.Errorf("expected custom model, got %q", cred.Model)
+	}
+}
+
+// TestAuthLogin_WizardInteractive_VLLMRequiresModel checks that the
+// vllm flow prompts for base URL → key (optional) → model id, and that
+// the saved credential carries all three.
+func TestAuthLogin_WizardInteractive_VLLMRequiresModel(t *testing.T) {
+	t.Setenv("GIL_TEST_FORCE_TTY", "1")
+	dir := t.TempDir()
+	authFile := filepath.Join(dir, "auth.json")
+
+	// 4 = vllm, then base URL, then empty key (enter), then model id.
+	stdin := strings.NewReader("4\nhttp://localhost:8000/v1\n\nqwen3-32b\n")
+
+	root := authCmd()
+	root.SetArgs([]string{"login", "--auth-file", authFile, "--no-test"})
+	var out, errBuf bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&errBuf)
+	root.SetIn(stdin)
+
+	if err := root.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("wizard execute: %v\nstdout: %s\nstderr: %s", err, out.String(), errBuf.String())
+	}
+
+	store := credstore.NewFileStore(authFile)
+	cred, _ := store.Get(context.Background(), credstore.VLLM)
+	if cred == nil {
+		t.Fatal("expected vllm credential")
+	}
+	if cred.BaseURL != "http://localhost:8000/v1" {
+		t.Errorf("expected base url persisted, got %q", cred.BaseURL)
+	}
+	if cred.Model != "qwen3-32b" {
+		t.Errorf("expected model qwen3-32b, got %q", cred.Model)
+	}
+	if !strings.Contains(out.String(), "vLLM endpoint") {
+		t.Errorf("expected vllm endpoint step header, got: %s", out.String())
+	}
+}
+
+// TestAuthEdit_RoundTripsModelChange exercises the new `gil auth edit`
+// subcommand: registering a credential, then changing only the model
+// without re-typing the key, leaves the API key untouched.
+func TestAuthEdit_RoundTripsModelChange(t *testing.T) {
+	dir := t.TempDir()
+	authFile := filepath.Join(dir, "auth.json")
+
+	// Step 1: register with model A.
+	if _, _, err := runAuthCmd(t, authFile,
+		"login", "anthropic",
+		"--api-key", "sk-ant-orig1234567890abcd",
+		"--model", "claude-haiku-4-5",
+		"--no-test",
+	); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// Step 2: edit, changing only --model. We pass the same --api-key
+	// to avoid the interactive key prompt, but in real interactive use
+	// the user would press enter to keep the existing key. We test
+	// the "model swap" outcome — the headline use case.
+	stdout, _, err := runAuthCmd(t, authFile,
+		"edit", "anthropic",
+		"--api-key", "sk-ant-orig1234567890abcd",
+		"--model", "claude-sonnet-4-6",
+		"--no-test",
+	)
+	if err != nil {
+		t.Fatalf("edit: %v\nstdout: %s", err, stdout)
+	}
+
+	store := credstore.NewFileStore(authFile)
+	cred, _ := store.Get(context.Background(), credstore.Anthropic)
+	if cred == nil {
+		t.Fatal("credential should still exist after edit")
+	}
+	if cred.Model != "claude-sonnet-4-6" {
+		t.Errorf("expected updated model, got %q", cred.Model)
+	}
+	if cred.APIKey != "sk-ant-orig1234567890abcd" {
+		t.Errorf("expected key preserved, got %q", cred.APIKey)
+	}
+}
+
+// TestAuthEdit_RejectsMissingProvider — editing a provider that has no
+// credential is an error with a clear "register first" hint.
+func TestAuthEdit_RejectsMissingProvider(t *testing.T) {
+	dir := t.TempDir()
+	authFile := filepath.Join(dir, "auth.json")
+
+	_, _, err := runAuthCmd(t, authFile, "edit", "anthropic", "--no-test")
+	if err == nil {
+		t.Fatal("expected error editing nonexistent provider")
+	}
+	if !strings.Contains(err.Error(), "no credential") {
+		t.Errorf("expected 'no credential' in error, got %v", err)
+	}
+}
+
+// TestAuthTest_NoCredential — `gil auth test` on a provider with no
+// stored credential errors with the same "register first" message as
+// edit, so the two surfaces share vocabulary.
+func TestAuthTest_NoCredential(t *testing.T) {
+	dir := t.TempDir()
+	authFile := filepath.Join(dir, "auth.json")
+
+	_, _, err := runAuthCmd(t, authFile, "test", "anthropic")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "no credential") {
+		t.Errorf("expected 'no credential' in error, got %v", err)
+	}
+}
+
+// TestAuthTest_RoutesThroughTestProvider plumbs a fake builder and
+// checks that `gil auth test` actually exercises credstore.TestProvider
+// — same code path the wizard's smoke test uses.
+func TestAuthTest_RoutesThroughTestProvider(t *testing.T) {
+	dir := t.TempDir()
+	authFile := filepath.Join(dir, "auth.json")
+
+	// Register a credential.
+	if _, _, err := runAuthCmd(t, authFile,
+		"login", "anthropic",
+		"--api-key", "sk-ant-test1234567890abcd",
+		"--model", "claude-haiku-4-5",
+		"--no-test",
+	); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// Swap the provider builder for a fake that returns "ok".
+	called := 0
+	restore := credstore.SetTestProviderBuilder(func(name credstore.ProviderName, _ credstore.Credential) (provider.Provider, string, error) {
+		called++
+		return fakeOKProvider{}, "claude-haiku-4-5", nil
+	})
+	t.Cleanup(func() { credstore.SetTestProviderBuilder(restore) })
+
+	stdout, _, err := runAuthCmd(t, authFile, "test", "anthropic")
+	if err != nil {
+		t.Fatalf("test: %v\nstdout: %s", err, stdout)
+	}
+	if called != 1 {
+		t.Errorf("expected 1 call to test builder, got %d", called)
+	}
+	if !strings.Contains(stdout, "OK") || !strings.Contains(stdout, "claude-haiku-4-5") {
+		t.Errorf("expected OK + model in output, got: %s", stdout)
+	}
+}
+
+// fakeOKProvider is a stand-in provider for `gil auth test` integration
+// tests — it always returns "ok" with no token usage so the assertions
+// don't depend on a real API.
+type fakeOKProvider struct{}
+
+func (fakeOKProvider) Name() string { return "fake" }
+func (fakeOKProvider) Complete(_ context.Context, _ provider.Request) (provider.Response, error) {
+	return provider.Response{Text: "ok", StopReason: "end_turn"}, nil
 }
 
 // TestAuthRoundTrip exercises the full login -> list -> logout -> status

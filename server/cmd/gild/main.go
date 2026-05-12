@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -21,16 +22,16 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	"github.com/jedutools/gil/core/credstore"
-	"github.com/jedutools/gil/core/paths"
-	"github.com/jedutools/gil/core/provider"
-	"github.com/jedutools/gil/core/session"
-	"github.com/jedutools/gil/core/version"
-	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
-	"github.com/jedutools/gil/server/internal/auth"
-	"github.com/jedutools/gil/server/internal/metrics"
-	"github.com/jedutools/gil/server/internal/service"
-	"github.com/jedutools/gil/server/internal/uds"
+	"github.com/mindungil/gil/core/credstore"
+	"github.com/mindungil/gil/core/paths"
+	"github.com/mindungil/gil/core/provider"
+	"github.com/mindungil/gil/core/session"
+	"github.com/mindungil/gil/core/version"
+	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
+	"github.com/mindungil/gil/server/internal/auth"
+	"github.com/mindungil/gil/server/internal/metrics"
+	"github.com/mindungil/gil/server/internal/service"
+	"github.com/mindungil/gil/server/internal/uds"
 )
 
 // server wraps a gRPC server, Unix Domain Socket listener, optional TCP listener,
@@ -67,6 +68,9 @@ func newServer(dbPath, sockPath, sessionsBase, authFile string, authMW *auth.Mid
 		_ = db.Close()
 		return nil, err
 	}
+	// G3 — plan_steps SQLite persistence. Daemon-wide store writes
+	// through to the same DB session.Migrate just prepared.
+	service.SetGlobalPlanDB(db)
 	lis, err := uds.Listen(sockPath)
 	if err != nil {
 		_ = db.Close()
@@ -205,11 +209,258 @@ func newServer(dbPath, sockPath, sessionsBase, authFile string, authMW *auth.Mid
 						StopReason: "tool_use",
 					},
 				}), "mock-model", nil
+			case "run-webfetch":
+				// Phase 18 Track B e2e: agent calls web_fetch on a URL
+				// passed via GIL_MOCK_WEBFETCH_URL (set by
+				// phase18_webfetch_test.sh to point at a local Python
+				// http.server), inspects the result, then ends the
+				// turn. Verifier just passes — assertions live in the
+				// bash script which greps the event log for tool_result
+				// content matching the fixture's title and converted
+				// markdown.
+				url := os.Getenv("GIL_MOCK_WEBFETCH_URL")
+				if url == "" {
+					url = "http://127.0.0.1:0/missing"
+				}
+				input, _ := json.Marshal(map[string]any{"url": url})
+				return provider.NewMockToolProvider([]provider.MockTurn{
+					{
+						Text: "Fetching the docs page.",
+						ToolCalls: []provider.ToolCall{{
+							ID: "wf1", Name: "web_fetch", Input: input,
+						}},
+						StopReason: "tool_use",
+					},
+					{
+						Text:       "Docs read; nothing else needed.",
+						StopReason: "end_turn",
+					},
+				}), "mock-model", nil
+			case "run-lsp":
+				// Phase 18 Track C e2e: agent calls the lsp tool with the
+				// four operations the smoke test exercises (definition,
+				// references, hover, document_symbols). The file +
+				// line/column come from env vars set by the e2e script
+				// (which knows where the fixture file's symbols live).
+				// Verifier just passes — assertions live in the bash
+				// script which greps the event log for tool_result
+				// content matching the fixture's definition/reference
+				// targets.
+				file := os.Getenv("GIL_MOCK_LSP_FILE")
+				if file == "" {
+					file = "use.go"
+				}
+				line := 3
+				col := 28
+				if v, err := strconv.Atoi(os.Getenv("GIL_MOCK_LSP_LINE")); err == nil && v > 0 {
+					line = v
+				}
+				if v, err := strconv.Atoi(os.Getenv("GIL_MOCK_LSP_COL")); err == nil && v > 0 {
+					col = v
+				}
+				defInput, _ := json.Marshal(map[string]any{"operation": "definition", "file": file, "line": line, "column": col})
+				refInput, _ := json.Marshal(map[string]any{"operation": "references", "file": file, "line": line, "column": col})
+				hoverInput, _ := json.Marshal(map[string]any{"operation": "hover", "file": file, "line": line, "column": col})
+				docInput, _ := json.Marshal(map[string]any{"operation": "document_symbols", "file": file})
+				return provider.NewMockToolProvider([]provider.MockTurn{
+					{
+						Text:       "Looking up the definition.",
+						ToolCalls:  []provider.ToolCall{{ID: "lsp1", Name: "lsp", Input: defInput}},
+						StopReason: "tool_use",
+					},
+					{
+						Text:       "Finding references.",
+						ToolCalls:  []provider.ToolCall{{ID: "lsp2", Name: "lsp", Input: refInput}},
+						StopReason: "tool_use",
+					},
+					{
+						Text:       "Reading hover docs.",
+						ToolCalls:  []provider.ToolCall{{ID: "lsp3", Name: "lsp", Input: hoverInput}},
+						StopReason: "tool_use",
+					},
+					{
+						Text:       "Listing symbols.",
+						ToolCalls:  []provider.ToolCall{{ID: "lsp4", Name: "lsp", Input: docInput}},
+						StopReason: "tool_use",
+					},
+					{
+						Text:       "Done.",
+						StopReason: "end_turn",
+					},
+				}), "mock-model", nil
+			case "run-subagent":
+				// Phase 18 Track E e2e: agent calls the subagent tool
+				// with a research goal; the sub-loop returns a 1-paragraph
+				// finding; the parent picks it up via tool_result and
+				// ends its turn. The mock provider serves both parent +
+				// sub-loop turns from the same scripted queue, in order:
+				//   1. parent: call subagent({goal: ...})
+				//   2. sub-loop: return finding text + end_turn
+				//   3. parent: end_turn (uses the finding)
+				goal := os.Getenv("GIL_MOCK_SUBAGENT_GOAL")
+				if goal == "" {
+					goal = "find which file defines the main agent loop"
+				}
+				input, _ := json.Marshal(map[string]any{
+					"goal":           goal,
+					"max_iterations": 3,
+				})
+				return provider.NewMockToolProvider([]provider.MockTurn{
+					// Parent turn 1: invoke subagent tool.
+					{
+						Text: "Delegating research to a subagent.",
+						ToolCalls: []provider.ToolCall{{
+							ID: "sa1", Name: "subagent", Input: input,
+						}},
+						StopReason: "tool_use",
+					},
+					// Sub-loop turn 1: return the finding and end the
+					// sub-loop. The sub-loop's default tool set
+					// (read_file/repomap/memory_load/web_fetch/lsp) is
+					// filtered against the parent's available tools, so
+					// the sub-loop has whatever overlaps; the only
+					// sensible turn for this scripted scenario is
+					// "report the finding".
+					{
+						Text:       "core/runner/runner.go has main loop in func (a *AgentLoop) Run().",
+						StopReason: "end_turn",
+					},
+					// Parent turn 2: incorporate the finding and end.
+					{
+						Text:       "Got the finding from subagent. All done.",
+						StopReason: "end_turn",
+					},
+					// Parent turn 3: memory milestone gate (post-verify).
+					// The runner gives the agent one shot to call
+					// memory_update; we just respond with "no update" so
+					// the gate completes cleanly.
+					{
+						Text:       "no update",
+						StopReason: "end_turn",
+					},
+				}), "mock-model", nil
+			case "run-plan":
+				// Phase 18 Track A e2e: scripted plan-tool flow. The
+				// agent (1) sets a 3-item plan, (2) does some work and
+				// marks items completed via update_item, (3) ends.
+				return provider.NewMockToolProvider([]provider.MockTurn{
+					// Turn 1: write the plan.
+					{
+						Text: "Writing initial plan.",
+						ToolCalls: []provider.ToolCall{{
+							ID: "p1", Name: "plan",
+							Input: json.RawMessage(`{
+                                "operation":"set",
+                                "items":[
+                                    {"text":"create plan-step-1.txt","status":"pending"},
+                                    {"text":"create plan-step-2.txt","status":"pending"},
+                                    {"text":"create plan-step-3.txt","status":"pending"}
+                                ]
+                            }`),
+						}},
+						StopReason: "tool_use",
+					},
+					// Turn 2: start step 1 (mark in_progress).
+					{
+						Text: "Starting step 1.",
+						ToolCalls: []provider.ToolCall{{
+							ID: "p2", Name: "plan",
+							Input: json.RawMessage(`{"operation":"update_item","id":"i1","status":"in_progress"}`),
+						}},
+						StopReason: "tool_use",
+					},
+					// Turn 3: do step 1 (write the file).
+					{
+						Text: "Creating plan-step-1.txt",
+						ToolCalls: []provider.ToolCall{{
+							ID: "w1", Name: "write_file",
+							Input: json.RawMessage(`{"path":"plan-step-1.txt","content":"step 1 done\n"}`),
+						}},
+						StopReason: "tool_use",
+					},
+					// Turn 4: mark step 1 done; start step 2.
+					{
+						Text: "Step 1 done; starting step 2.",
+						ToolCalls: []provider.ToolCall{
+							{ID: "p3", Name: "plan", Input: json.RawMessage(`{"operation":"update_item","id":"i1","status":"completed"}`)},
+							{ID: "p4", Name: "plan", Input: json.RawMessage(`{"operation":"update_item","id":"i2","status":"in_progress"}`)},
+						},
+						StopReason: "tool_use",
+					},
+					// Turn 5: do step 2.
+					{
+						Text: "Creating plan-step-2.txt",
+						ToolCalls: []provider.ToolCall{{
+							ID: "w2", Name: "write_file",
+							Input: json.RawMessage(`{"path":"plan-step-2.txt","content":"step 2 done\n"}`),
+						}},
+						StopReason: "tool_use",
+					},
+					// Turn 6: mark step 2 done; do step 3 directly.
+					{
+						Text: "Step 2 done; finishing step 3.",
+						ToolCalls: []provider.ToolCall{
+							{ID: "p5", Name: "plan", Input: json.RawMessage(`{"operation":"update_item","id":"i2","status":"completed"}`)},
+							{ID: "w3", Name: "write_file", Input: json.RawMessage(`{"path":"plan-step-3.txt","content":"step 3 done\n"}`)},
+						},
+						StopReason: "tool_use",
+					},
+					// Turn 7: mark step 3 completed and stop.
+					{
+						Text: "All done.",
+						ToolCalls: []provider.ToolCall{{
+							ID: "p6", Name: "plan",
+							Input: json.RawMessage(`{"operation":"update_item","id":"i3","status":"completed"}`),
+						}},
+						StopReason: "tool_use",
+					},
+					// Turn 8: end.
+					{Text: "Plan complete.", StopReason: "end_turn"},
+				}), "mock-model", nil
+			case "run-clarify":
+				// Phase 18 Track D e2e: scripted clarify-tool flow. The
+				// agent (1) calls clarify with two suggestions and
+				// urgency=high, (2) reads the user's answer from the
+				// tool_result, (3) ends the turn. The e2e test answers
+				// the ask via `gil clarify <id> "yes, deploy" --ask-id <id>`
+				// from a side goroutine while the run is paused.
+				return provider.NewMockToolProvider([]provider.MockTurn{
+					{
+						Text: "I need a quick clarification before continuing.",
+						ToolCalls: []provider.ToolCall{{
+							ID:   "cl1",
+							Name: "clarify",
+							Input: json.RawMessage(`{
+                                "question":"Should I deploy now?",
+                                "context":"verifier passed; user did not pre-approve auto-deploy",
+                                "suggestions":["yes, deploy","no, hold"],
+                                "urgency":"high"
+                            }`),
+						}},
+						StopReason: "tool_use",
+					},
+					{
+						Text:       "Acknowledged the user's answer; finishing.",
+						StopReason: "end_turn",
+					},
+				}), "mock-model", nil
 			default:
-				// Text-only Mock for InterviewService scenarios
-				return provider.NewMock([]string{
+				// Text-only Mock for InterviewService scenarios. Uses
+				// the cycling variant so an open-ended chat session
+				// (`gil chat --provider mock`) doesn't crash on turn 3 —
+				// the previous 2-entry list exhausted the moment the
+				// user typed a reply, making mock unusable for dogfood.
+				// The list still leads with the sensing-engine domain
+				// JSON, then rotates clarifying questions and a confirm.
+				return provider.NewMockLoop([]string{
 					`{"domain":"unknown","domain_confidence":0.5,"tech_hints":[],"scale_hint":"unknown","ambiguity":"none"}`,
 					"What's your project goal?",
+					"Got it. What success looks like to you for this run?",
+					"Are there constraints (language, framework, deadlines) I should respect?",
+					"Any files or modules I should focus on first?",
+					"Should the agent stop and ask before destructive actions?",
+					"Tell me one example output you'd accept as 'done'.",
+					"Anything else I should know before we kick off?",
 				}), "mock-model", nil
 			}
 		case "anthropic", "":
@@ -226,15 +477,64 @@ func newServer(dbPath, sockPath, sessionsBase, authFile string, authMW *auth.Mid
 				return nil, "", fmt.Errorf("no credentials for anthropic")
 			}
 			return provider.NewAnthropic(key), "claude-opus-4-7", nil
-		case "openai", "openrouter", "vllm":
-			// Stub: credstore lookup path exists so `gil auth login`
-			// for these providers writes to the right file, but the
-			// actual provider adapters land in Phase 12.
-			_, _ = lookupCredKey(authFile, credstore.ProviderName(name))
-			return nil, "", fmt.Errorf("provider %q not yet implemented (Phase 12)", name)
+		case "openai":
+			cred, _ := lookupCred(authFile, credstore.OpenAI)
+			key := ""
+			base := "https://api.openai.com/v1"
+			if cred != nil {
+				key = cred.APIKey
+				if cred.BaseURL != "" {
+					base = cred.BaseURL
+				}
+			}
+			if key == "" {
+				key = os.Getenv("OPENAI_API_KEY")
+			}
+			if key == "" {
+				return nil, "", fmt.Errorf("no credentials for openai")
+			}
+			return provider.NewOpenAI(key, base), "gpt-4o", nil
+		case "openrouter":
+			cred, _ := lookupCred(authFile, credstore.OpenRouter)
+			key := ""
+			base := "https://openrouter.ai/api/v1"
+			if cred != nil {
+				key = cred.APIKey
+				if cred.BaseURL != "" {
+					base = cred.BaseURL
+				}
+			}
+			if key == "" {
+				key = os.Getenv("OPENROUTER_API_KEY")
+			}
+			if key == "" {
+				return nil, "", fmt.Errorf("no credentials for openrouter")
+			}
+			return provider.NewOpenAI(key, base), "anthropic/claude-sonnet-4", nil
+		case "vllm", "local":
+			cred, _ := lookupCred(authFile, credstore.VLLM)
+			key, base := "", ""
+			if cred != nil {
+				key = cred.APIKey
+				base = cred.BaseURL
+			}
+			if base == "" {
+				base = os.Getenv("VLLM_BASE_URL")
+			}
+			if key == "" {
+				key = os.Getenv("VLLM_API_KEY")
+			}
+			if base == "" {
+				// vLLM has no canonical endpoint; refuse rather than guess.
+				return nil, "", fmt.Errorf("no credentials for vllm: base URL required")
+			}
+			// vLLM often runs unauthenticated, so an empty key is allowed —
+			// the OpenAI adapter omits the Authorization header in that case.
+			// The model name has no default; the caller must specify via
+			// spec.Models.Main since each vLLM deploy serves a different model.
+			return provider.NewOpenAI(key, base), "", nil
 		default:
-			// Listed providers reflect Phase 11 plan; not all are wired yet.
-			return nil, "", fmt.Errorf("unknown provider %q (available: anthropic, mock)", name)
+			return nil, "", fmt.Errorf("unknown provider %q (available: anthropic, openai, openrouter, vllm, mock)", name)
 		}
 	}
 
@@ -248,8 +548,14 @@ func newServer(dbPath, sockPath, sessionsBase, authFile string, authMW *auth.Mid
 	g := grpc.NewServer(grpcOpts...)
 	repo := session.NewRepo(db)
 	runSvc := service.NewRunService(repo, sessionsBase, factory)
-	gilv1.RegisterSessionServiceServer(g, service.NewSessionService(repo, runSvc))
-	gilv1.RegisterInterviewServiceServer(g, service.NewInterviewService(repo, sessionsBase, factory))
+	gilv1.RegisterSessionServiceServer(g, service.
+		NewSessionService(repo, runSvc).
+		WithSessionsBase(sessionsBase).
+		WithBudgetGetter(runSvc).
+		WithProviderFactory(factory))
+	// InterviewService deleted in M3 — chat surface routes through
+	// SessionService.Prompt with the agent's tool registry handling
+	// what sensing/slot-fill/audit used to do.
 	gilv1.RegisterRunServiceServer(g, runSvc)
 
 	return &server{grpc: g, lis: lis, db: db}, nil
@@ -277,6 +583,19 @@ func lookupCredKey(authFile string, name credstore.ProviderName) (string, error)
 		return "", nil
 	}
 	return cred.APIKey, nil
+}
+
+// lookupCred returns the full credential record for name, or (nil, nil)
+// when no credstore file or entry exists. Unlike lookupCredKey, this
+// preserves BaseURL so providers like vllm and openrouter can use a
+// stored endpoint without extra plumbing. Errors are swallowed and
+// returned alongside nil so the factory can fall back to env vars.
+func lookupCred(authFile string, name credstore.ProviderName) (*credstore.Credential, error) {
+	if authFile == "" {
+		return nil, nil
+	}
+	store := credstore.NewFileStore(authFile)
+	return store.Get(context.Background(), name)
 }
 
 // AttachTCP binds an additional TCP listener and serves the same gRPC server on it.
@@ -595,9 +914,7 @@ func runHTTPGateway(addr, sockPath string) error {
 	if err := gilv1.RegisterRunServiceHandlerFromEndpoint(ctx, mux, target, opts); err != nil {
 		return err
 	}
-	if err := gilv1.RegisterInterviewServiceHandlerFromEndpoint(ctx, mux, target, opts); err != nil {
-		return err
-	}
+	// InterviewService gateway removed in M3.
 	slog.Info("http gateway listening", "addr", addr)
 	return http.ListenAndServe(addr, mux)
 }

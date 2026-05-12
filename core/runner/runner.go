@@ -10,29 +10,79 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jedutools/gil/core/checkpoint"
-	"github.com/jedutools/gil/core/compact"
-	"github.com/jedutools/gil/core/event"
-	"github.com/jedutools/gil/core/instructions"
-	"github.com/jedutools/gil/core/memory"
-	"github.com/jedutools/gil/core/permission"
-	"github.com/jedutools/gil/core/provider"
-	"github.com/jedutools/gil/core/stuck"
-	"github.com/jedutools/gil/core/tool"
-	"github.com/jedutools/gil/core/verify"
-	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
+	"github.com/mindungil/gil/core/checkpoint"
+	"github.com/mindungil/gil/core/compact"
+	"github.com/mindungil/gil/core/cost"
+	"github.com/mindungil/gil/core/event"
+	"github.com/mindungil/gil/core/instructions"
+	"github.com/mindungil/gil/core/memory"
+	"github.com/mindungil/gil/core/permission"
+	"github.com/mindungil/gil/core/plan"
+	"github.com/mindungil/gil/core/provider"
+	"github.com/mindungil/gil/core/stuck"
+	"github.com/mindungil/gil/core/tool"
+	"github.com/mindungil/gil/core/verify"
+	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
 	"google.golang.org/protobuf/proto"
 )
 
 // Result is the final outcome of an AgentLoop run.
+//
+// Status values:
+//   - "done" — agent emitted end_turn AND final verify passed.
+//   - "verify_failed" — agent emitted end_turn but final verify failed
+//     (only emitted when the loop exits on agent end_turn with a failing
+//     verify; the in-loop retry path that feeds the failure back to the
+//     agent and continues remains unchanged).
+//   - "max_iterations" — hit the iteration cap. VerifyAll is still
+//     populated by the post-loop best-effort verify run.
+//   - "stuck" — stuck-recovery exhausted. VerifyAll populated.
+//   - "error" — unrecoverable provider/runtime error mid-run.
+//   - "budget_exhausted" — hit the token/cost cap (or its reserve guard)
+//     before the agent declared done AND final verify failed (kept as a
+//     legacy default so older callers keep matching).
+//   - "budget_exhausted_verify_passed" — hit the budget cap, but the
+//     post-loop verify came back green anyway (agent's prior edits were
+//     enough). Caller should treat this almost like "done".
+//   - "budget_exhausted_verify_failed" — hit the budget cap and verify
+//     also failed. Caller usually wants to report the failure detail.
+//
+// When Status starts with "budget_exhausted", BudgetReason records which
+// dimension hit the cap ("tokens" or "cost").
 type Result struct {
-	Status     string // "done" | "max_iterations" | "error" | "stuck"
-	Iterations int
-	Tokens     int64
-	VerifyAll  []verify.Result
-	FinalError error
-	FinalText  string // last assistant text emitted before the loop exited
+	Status       string
+	Iterations   int
+	Tokens       int64
+	CostUSD      float64
+	VerifyAll    []verify.Result
+	FinalError   error
+	FinalText    string // last assistant text emitted before the loop exited
+	BudgetReason string // "tokens" | "cost" — populated when Status starts with "budget_exhausted"
+	// ByRole breaks the run's spend down by classifyTurn role
+	// ("planner", "editor", "main"). Empty when the run never used the
+	// architect/coder split (single-provider configs leave only "main"
+	// populated — and even then the entry is omitted when zero).
+	// Surfaced through `gil cost --by-role` and `gil stats`.
+	ByRole map[string]RoleUsage
 }
+
+// RoleUsage is the per-role slice of a run's spend, mirroring cost.Usage
+// but indexed by classifyTurn role rather than model. Aggregated across
+// iterations: each provider response increments the role that drove that
+// Complete() call.
+type RoleUsage struct {
+	Calls        int     // number of provider.Complete invocations charged to this role
+	InputTokens  int64
+	OutputTokens int64
+	CostUSD      float64
+}
+
+// defaultBudgetReserveTokens is held back from the effective max-total-tokens
+// budget so the post-loop verify check + the closing assistant turn can still
+// run when the cap fires. Sensible across modern LLMs (8k handles a final
+// "I'm done" summary on Sonnet/Haiku/Qwen alike). Overridden by
+// Spec.Budget.ReserveTokens or AgentLoop.BudgetReserveTokens (>0).
+const defaultBudgetReserveTokens int64 = 8000
 
 // AskRequest carries the details surfaced to a human reviewer when
 // Permission returns DecisionAsk and AskCallback is non-nil.
@@ -40,6 +90,14 @@ type AskRequest struct {
 	Tool string
 	Key  string
 }
+
+// Role names recognised by classifyTurn. Kept as exported constants so
+// surface code (server, TUI, tests) refers to them without typo risk.
+const (
+	RolePlanner = "planner"
+	RoleEditor  = "editor"
+	RoleMain    = "main"
+)
 
 // AgentLoop drives Spec to completion.
 type AgentLoop struct {
@@ -49,6 +107,21 @@ type AgentLoop struct {
 	Tools    []tool.Tool
 	Verifier *verify.Runner
 	Events   *event.Stream // optional; if nil, no events emitted
+
+	// Providers + Models implement the architect/coder split (Phase 19
+	// Track C). When a role is missing from either map, the runner falls
+	// back to .Provider / .Model — so single-provider runs (the legacy
+	// shape) keep working unchanged.
+	//
+	// Keys: "planner", "editor", "main". The classifyTurn helper picks
+	// one per iteration based on iteration index + the previous response's
+	// tool-call shape. RunService.executeRun is responsible for
+	// constructing these from Spec.Models, sharing one Provider instance
+	// when multiple roles point at the same (provider,model) pair so we
+	// don't pay the construction cost (or the connection-pool slot) more
+	// than once per unique target.
+	Providers map[string]provider.Provider
+	Models    map[string]string
 
 	// Checkpoint is optional; if non-nil, committed after each tool-using iteration.
 	Checkpoint *checkpoint.ShadowGit
@@ -78,6 +151,15 @@ type AgentLoop struct {
 	// Memory bank, optional. If non-nil, the system prompt prepends bank
 	// contents (full when small, progress-only when large).
 	Memory *memory.Bank
+
+	// Plan, when non-nil, is the per-session run plan (TODO checklist).
+	// SessionID below disambiguates which session's plan to load. The
+	// runner reads the plan once per iteration to prepend a brief
+	// summary into the system prompt. All mutations flow through the
+	// plan tool, never the loop directly. Both nil-checked: leaving
+	// Plan unset disables the feature entirely (no prompt prepend).
+	Plan      *plan.Store
+	SessionID string
 
 	// Compactor + budget. If nil, no compaction.
 	Compactor        *compact.Compactor
@@ -125,6 +207,73 @@ type AgentLoop struct {
 	// NEXT iteration only and then cleared. Used by stuck recovery strategies
 	// (AltToolOrder, AdversaryConsult) to inject one-shot guidance.
 	extraSystemNote string
+
+	// CostCalculator estimates USD spend per iteration so the runner can
+	// enforce Budget.MaxTotalCostUsd. When nil and the budget enables
+	// cost enforcement, Run() lazily constructs one from the embedded
+	// catalog. Models absent from the catalog cost $0 and never trigger
+	// the cost cap (warned but not enforced); the iteration/token caps
+	// still apply.
+	CostCalculator *cost.Calculator
+
+	// BudgetReserveTokens overrides Spec.Budget.ReserveTokens. When > 0,
+	// the runner subtracts this value from the effective max-total-tokens
+	// cap so the loop trips its "stop now" guard at
+	// (max_total_tokens - reserve). The held-back tokens cover the final
+	// verifier run + a closing assistant turn that wraps things up. When
+	// zero, falls back to Spec.Budget.ReserveTokens, then to
+	// defaultBudgetReserveTokens (8000). Has no effect when
+	// max_total_tokens is unset (no cap to reserve from).
+	BudgetReserveTokens int64
+
+	// SystemPromptOpts overrides Spec.Run.SystemPrompt at runtime. Used
+	// by tests + by callers that build a loop programmatically and want
+	// to flip the diet without going through a frozen spec. Zero value
+	// means "fall back to spec"; if both are zero, defaults apply
+	// (memory bank prepended after iter 1, AGENTS.md included).
+	SystemPromptOpts SystemPromptOptions
+
+	// ProviderName is the FACTORY key the default Provider was built
+	// from (e.g. "anthropic", "vllm", "openai", "openrouter", "mock").
+	// Distinct from Provider.Name() because the OpenAI adapter returns
+	// "openai" for all OpenAI-compatible endpoints (openai/openrouter/
+	// vllm). Used by resolveSystemPromptOptions → pickVerbosity to pick
+	// per-provider system-prompt verbosity defaults (verbose for vllm/
+	// local, compact for frontier providers). Empty falls through to
+	// pickVerbosity's "unknown" branch which defaults to verbose —
+	// safe choice for callers that didn't plumb the name yet.
+	ProviderName string
+
+	// internal: tracks which budget thresholds we've already warned about
+	// so each crossing emits one budget_warning rather than one per
+	// iteration after 75%.
+	warnedTokens bool
+	warnedCost   bool
+
+	// internal: set once Run() prints the system-prompt breakdown so
+	// later iterations don't spam stderr with the same numbers.
+	breakdownLogged bool
+
+	// NoGrace disables the budget-exhaust grace call (Hermes pattern).
+	// When true, the loop halts cold on budget cap with no wrap-up summary.
+	NoGrace bool
+
+	// graceFired marks that the wrap-up call has already been made for
+	// this run, preventing double-firing on repeated budget checks.
+	graceFired bool
+
+	// internal: grace-call state — synced from Run()'s local vars at
+	// the budget-break sites so checkBudgetAndMaybeGrace can read them.
+	graceBudgetMaxTokens  int64
+	graceBudgetMaxCostUSD float64
+	graceTotalTokens      int64
+	graceTotalCostUSD     float64
+	graceMessages         []provider.Message
+
+	// graceStatus is set by checkBudgetAndMaybeGrace and read by Run()'s
+	// post-loop section to override the verify-based status classification
+	// when a grace call was (or was not) made.
+	graceStatus string
 }
 
 // CompactRequester is satisfied by AgentLoop; the compact_now tool uses it
@@ -139,6 +288,16 @@ func (a *AgentLoop) RequestCompact() {
 	a.compactNowRequested = true
 }
 
+// QueueSystemNote stages a one-shot note that will be appended to the
+// system prompt for the NEXT iteration only. Subsequent calls overwrite
+// any pending note (single-shot semantics — only the most recent
+// suggestion gets through). Used by RunService.PostHint to deliver
+// surface-issued hints (e.g., model preference) without preempting the
+// in-flight tool call. The agent decides whether to honor it.
+func (a *AgentLoop) QueueSystemNote(note string) {
+	a.extraSystemNote = note
+}
+
 // NewAgentLoop constructs a loop.
 func NewAgentLoop(spec *gilv1.FrozenSpec, prov provider.Provider, model string, tools []tool.Tool, ver *verify.Runner) *AgentLoop {
 	return &AgentLoop{Spec: spec, Provider: prov, Model: model, Tools: tools, Verifier: ver}
@@ -151,13 +310,27 @@ func (a *AgentLoop) Run(ctx context.Context) (*Result, error) {
 		maxIter = int(a.Spec.Budget.MaxIterations)
 	}
 
+	// P27 T6: reset grace state at the start of every Run() so that an
+	// AgentLoop reused for a second run gets a fresh grace flag set.
+	a.graceFired = false
+	a.graceStatus = ""
+	// Snapshot fields are written by syncGraceState before they're read,
+	// but reset them too to avoid leaving stale values in the struct.
+	a.graceBudgetMaxTokens = 0
+	a.graceBudgetMaxCostUSD = 0
+	a.graceTotalTokens = 0
+	a.graceTotalCostUSD = 0
+	a.graceMessages = nil
+
 	// Resolve project-level instructions (AGENTS.md / CLAUDE.md /
 	// cursor rules) once per run. The result lives between the base
 	// system prompt and the memory bank and is invariant for the life of
 	// the run — important so the cache prefix stays stable across
 	// iterations on prompt-caching providers (Anthropic system block).
 	a.loadInstructions()
-	system := buildSystemPrompt(a.Spec, a.Tools, a.Memory, a.instructionsRendered)
+	// Resolve effective SystemPromptOptions: explicit AgentLoop field
+	// wins, otherwise fall back to spec.run.system_prompt.
+	promptOpts := a.resolveSystemPromptOptions()
 	tools := make([]provider.ToolDef, 0, len(a.Tools))
 	toolByName := map[string]tool.Tool{}
 	for _, t := range a.Tools {
@@ -179,6 +352,21 @@ func (a *AgentLoop) Run(ctx context.Context) (*Result, error) {
 	}}
 	var lastAssistantText string
 
+	// Per-role usage aggregation (Phase 19 Track C). Populated as each
+	// iteration's classifyTurn pick rolls in; the resulting map flows into
+	// Result.ByRole so `gil cost --by-role` and `gil stats` can break the
+	// run's spend down by planner/editor/main.
+	byRole := map[string]RoleUsage{}
+	// Tracks the previous iteration's (response, role) for two reasons:
+	//   1) classifyTurn(iter, lastResponse) needs the prior response shape
+	//      to decide whether to keep planning or hand off to the editor.
+	//   2) we emit a model_switched event on EVERY transition between
+	//      consecutive iterations, so observers (TUI/CLI/event consumers)
+	//      see the architect/coder split in action without reverse-
+	//      engineering it from provider_request payloads.
+	var lastResponse *provider.Response
+	var lastRole string
+
 	if a.Checkpoint != nil {
 		if err := a.Checkpoint.Init(ctx); err != nil {
 			a.emit(event.SourceSystem, event.KindNote, "checkpoint_init_error", map[string]any{"err": err.Error()})
@@ -190,18 +378,105 @@ func (a *AgentLoop) Run(ctx context.Context) (*Result, error) {
 	}
 
 	var totalTokens int64
+	var totalInTokens, totalOutTokens int64
+	var totalCostUSD float64
+	// Resolve budget caps once. Zero means "unbounded on this dimension".
+	var budgetMaxTokens int64
+	var budgetMaxCostUSD float64
+	var budgetReserveTokens int64
+	if a.Spec != nil && a.Spec.Budget != nil {
+		budgetMaxTokens = a.Spec.Budget.MaxTotalTokens
+		budgetMaxCostUSD = a.Spec.Budget.MaxTotalCostUsd
+		budgetReserveTokens = a.Spec.Budget.ReserveTokens
+	}
+	// Caller override beats spec value. Negative override means "no
+	// reserve at all" (legacy escape hatch for callers that explicitly
+	// want pre-Phase-19 semantics).
+	if a.BudgetReserveTokens != 0 {
+		budgetReserveTokens = a.BudgetReserveTokens
+	}
+	if budgetReserveTokens == 0 {
+		// Default policy: 8000 tokens or 10% of the cap, whichever is
+		// smaller. The smaller-is-better cap keeps the default safe for
+		// tiny budgets (sub-loops with 5_000 tokens, integration tests
+		// with 100-token caps) where a flat 8k would dominate the cap
+		// and trip the reserve guard before any real work could run.
+		budgetReserveTokens = defaultBudgetReserveTokens
+		if budgetMaxTokens > 0 && budgetMaxTokens/10 < budgetReserveTokens {
+			budgetReserveTokens = budgetMaxTokens / 10
+		}
+	}
+	if budgetReserveTokens < 0 {
+		budgetReserveTokens = 0
+	}
+	// Effective cap = max - reserve. The reserve is held back so the post-loop
+	// final verify + a closing "I'm done" turn can still run when the cap
+	// fires. When reserve >= max (misconfiguration), clamp to a near-zero
+	// effective cap so the very first iteration trips the guard, leaving the
+	// reserve intact for the final verify.
+	effectiveMaxTokens := budgetMaxTokens - budgetReserveTokens
+	if budgetMaxTokens > 0 && effectiveMaxTokens <= 0 {
+		effectiveMaxTokens = 1
+	}
+	// Lazily build a calculator only when cost enforcement is wanted.
+	if a.CostCalculator == nil && budgetMaxCostUSD > 0 {
+		a.CostCalculator = cost.NewCalculator()
+	}
+
+	// Exit reason captured by the loop body. After the for-loop exits we
+	// run a single best-effort verify pass (when no inline verify already
+	// fired and a Verifier is wired) and map (exit reason, verify result)
+	// onto a final Result. This is the Phase 19 fix for the dogfood bug
+	// where budget exhaustion fired before the loop's inline verify could
+	// run, leaving the user with no signal as to whether the work was
+	// actually green.
+	type exitState struct {
+		// reason is the why we left the loop:
+		//   "done"           — agent end_turn + inline verify passed (early return preserved)
+		//   "budget_tokens"  — token reserve guard tripped
+		//   "budget_cost"    — cost cap hit
+		//   "stuck"          — stuck-recovery exhausted
+		//   "max_iter"       — for-loop counter reached cap
+		//   "verify_failed"  — inline verify failed and we exited (only when no retry was possible — current code retries, so this is reserved for future use)
+		reason     string
+		iterations int
+		err        error
+	}
+	var exit exitState
+
+loop:
 	for iter := 1; iter <= maxIter; iter++ {
 		a.emit(event.SourceSystem, event.KindNote, "iteration_start", map[string]any{"iter": iter})
 
 		// Compaction check: runs before provider_request so the context is
 		// already trimmed before the next LLM call.
 		if a.Compactor != nil {
-			maxCtx := a.MaxContextTokens
-			if maxCtx <= 0 {
-				maxCtx = 200_000
+			// P27 T5: per-model context window. When MaxContextTokens is
+			// explicitly set by the caller, honour it as an override (preserves
+			// backward-compat for tests and callers that hard-code a budget).
+			// Otherwise resolve the upcoming-turn role — same logic classifyTurn
+			// applies a few lines below — and look up the per-model window from
+			// the provider capacity table so the trigger fires at the right
+			// threshold for each role (e.g. editor=ollama:llama3:8b fires at 8k,
+			// main=claude-opus-4-7 fires at 1M).
+			var ctxWindow int64
+			if a.MaxContextTokens > 0 {
+				ctxWindow = int64(a.MaxContextTokens)
+			} else {
+				nextRole := classifyTurn(iter-1, lastResponse)
+				nextModel := a.pickModel(nextRole)
+				ctxWindow = provider.ContextTokens(nextModel)
+				// ContextTokens returns 200_000 for unknown models; belt-and-
+				// suspenders guard in case the implementation ever changes.
+				if ctxWindow == 0 {
+					ctxWindow = 200_000
+				}
 			}
-			estimated := estimateMessagesTokens(messages)
-			threshold := int64(float64(maxCtx) * 0.95)
+			// Use a.ProviderName (the un-wrapped factory key), not a.Provider.Name()
+			// — the latter returns "<provider>+retry" because RunService wraps with
+			// NewRetry. Same bug class as the T4 fix (runner.go HasPrefix).
+			estimated := estimateMessagesTokens(a.ProviderName, messages)
+			threshold := int64(float64(ctxWindow) * 0.95)
 			forced := a.compactNowRequested
 			a.compactNowRequested = false
 			if forced || estimated >= threshold {
@@ -228,33 +503,134 @@ func (a *AgentLoop) Run(ctx context.Context) (*Result, error) {
 			}
 		}
 
+		// Phase 19 Track C: pick the model role for this iteration BEFORE
+		// the provider_request event so observers see the resolved model
+		// rather than the AgentLoop default. classifyTurn is pure — no
+		// AgentLoop side effects — so the routing decision is reproducible
+		// from the iteration index and the previous response.
+		role := classifyTurn(iter-1, lastResponse)
+		iterProvider := a.pickProvider(role)
+		iterModel := a.pickModel(role)
+		// Emit a model_switched event whenever the role flips between
+		// consecutive iterations. The very first iteration also emits
+		// (lastRole == "") so a TUI subscriber that opens the stream after
+		// iter 1 still sees which role drove the opener.
+		if role != lastRole {
+			a.emit(event.SourceSystem, event.KindNote, "model_switched", map[string]any{
+				"from":     lastRole,
+				"to":       role,
+				"model":    iterModel,
+				"iter":     iter,
+				"reason":   modelSwitchReason(iter-1, lastResponse, role),
+			})
+		}
+
 		a.emit(event.SourceAgent, event.KindAction, "provider_request", map[string]any{
-			"model":   a.Model,
+			"model":   iterModel,
+			"role":    role,
 			"msgs":    len(messages),
 			"tools":   len(tools),
 		})
 
-		// Build the effective system prompt for this iteration. When
-		// extraSystemNote is set (injected by a stuck-recovery strategy),
-		// append it as an URGENT NOTE and then clear it (single-shot).
-		iterSystem := system
+		// Build the effective system prompt for this iteration via the
+		// dedicated assembler (system_prompt.go). Two reasons we
+		// rebuild every turn rather than once-and-cache:
+		//   (1) lazy memory bank — iter 1 should NOT include it, iter 2+
+		//       should, and the bank's contents may also have churned
+		//       (memory_update tool calls).
+		//   (2) breakdown logging — we want one print per Run, but the
+		//       assembly itself is cheap (in-memory string ops).
+		// Cache prefix invariance still holds: base/instructions/tools
+		// are deterministic functions of inputs that don't change once
+		// the loop starts, so the leading bytes match across iterations
+		// 2..N (the only churn is memory_bank tail + plan prepend +
+		// urgent-note suffix, all by design).
+		iterSystem, breakdown := assembleSystemPrompt(SystemPromptInputs{
+			Spec:                 a.Spec,
+			Tools:                a.Tools,
+			Bank:                 a.Memory,
+			InstructionsRendered: a.instructionsRendered,
+			Iteration:            iter,
+			Options:              promptOpts,
+		})
+		if !a.breakdownLogged {
+			debugLogBreakdown(breakdown)
+			a.breakdownLogged = true
+		}
+		// Plan prepend (Phase 18): when the agent has populated a plan
+		// for this session, include a short summary at the top of the
+		// system prompt so the model carries it across iterations and
+		// after compaction. We render fresh from disk each iteration —
+		// the plan is the source of truth, not whatever rendering the
+		// previous iteration emitted. Empty plan → no prepend (keeps
+		// the cache prefix stable for sessions that never use plan).
+		if a.Plan != nil && a.SessionID != "" {
+			if pl, perr := a.Plan.Load(a.SessionID); perr == nil && !pl.IsEmpty() {
+				iterSystem = renderPlanForPrompt(pl) + "\n\n" + iterSystem
+			}
+		}
 		if a.extraSystemNote != "" {
-			iterSystem = system + "\n\n## URGENT NOTE\n" + a.extraSystemNote
+			iterSystem = iterSystem + "\n\n## URGENT NOTE\n" + a.extraSystemNote
 			a.extraSystemNote = "" // single-shot: clear after one use
 		}
 
-		resp, err := a.Provider.Complete(ctx, provider.Request{
-			Model:     a.Model,
+		// P27 T4: Apply Anthropic prompt-caching markers to the last 3
+		// messages so the static prefix is cached and recent turns hit the
+		// rolling cache window. No-op for non-Anthropic providers.
+		//
+		// Use strings.HasPrefix so the check survives the "+retry" suffix
+		// that provider.NewRetry appends to Name() — in production all
+		// providers are wrapped by NewRetry in RunService, so a bare
+		// equality check would never fire.
+		iterMessages := messages
+		if strings.HasPrefix(iterProvider.Name(), "anthropic") {
+			// MarkCacheBreakpoints mutates in place; copy the slice header
+			// so the loop's own messages slice is not affected.
+			iterMessages = make([]provider.Message, len(messages))
+			copy(iterMessages, messages)
+			iterMessages = compact.MarkCacheBreakpoints(iterMessages)
+		}
+		resp, err := iterProvider.Complete(ctx, provider.Request{
+			Model:     iterModel,
 			System:    iterSystem,
-			Messages:  messages,
+			Messages:  iterMessages,
 			Tools:     tools,
 			MaxTokens: 4096,
 		})
 		if err != nil {
 			a.emit(event.SourceSystem, event.KindNote, "run_error", map[string]any{"err": err.Error()})
-			return &Result{Status: "error", Iterations: iter, FinalError: err, FinalText: lastAssistantText}, err
+			// Provider errors short-circuit the post-loop verify (we don't
+			// know if the workspace is in a coherent state) and return
+			// directly the same way the original code did.
+			return &Result{Status: "error", Iterations: iter, Tokens: totalTokens, CostUSD: totalCostUSD, FinalError: err, FinalText: lastAssistantText, ByRole: byRole}, err
 		}
 		totalTokens += resp.InputTokens + resp.OutputTokens
+		totalInTokens += resp.InputTokens
+		totalOutTokens += resp.OutputTokens
+		var iterCostUSD float64
+		if a.CostCalculator != nil {
+			if usd, ok := a.CostCalculator.Estimate(iterModel, cost.Usage{
+				InputTokens:  resp.InputTokens,
+				OutputTokens: resp.OutputTokens,
+			}); ok {
+				iterCostUSD = usd
+				totalCostUSD += usd
+			}
+		}
+		// Aggregate per-role usage for Result.ByRole. Even when CostCalculator
+		// is nil (typical for cost-uncapped runs), the token counters still
+		// flow through so users get a tokens-by-role view; cost stays 0
+		// until they configure cost enforcement (or hit `gil cost`, which
+		// re-runs the calculator over the persisted events).
+		byRole = recordRoleUsage(byRole, role, resp, iterCostUSD)
+		// Capture for next iteration's classifyTurn input. We snapshot a
+		// COPY of the ToolCalls slice because the dispatcher below will
+		// keep iterating over resp.ToolCalls and we don't want the next
+		// turn's classify to see a half-mutated list (resp.ToolCalls is
+		// not mutated today, but future-proofing keeps this honest).
+		copyResp := resp
+		lastResponse = &copyResp
+		lastRole = role
 
 		a.emit(event.SourceAgent, event.KindObservation, "provider_response", map[string]any{
 			"text_len":      len(resp.Text),
@@ -263,6 +639,81 @@ func (a *AgentLoop) Run(ctx context.Context) (*Result, error) {
 			"output_tokens": resp.OutputTokens,
 			"stop_reason":   resp.StopReason,
 		})
+
+		// Capture the agent's text BEFORE the budget check so that even
+		// when the loop exits via the reserve guard on this iteration, the
+		// returned Result.FinalText carries the agent's most recent
+		// summary (callers — esp. the subagent shim — surface this to the
+		// user as Summary). Without the early capture, a budget hit on
+		// the same turn the agent finally said end_turn would land with
+		// FinalText="".
+		if resp.Text != "" {
+			lastAssistantText = resp.Text
+		}
+
+		// Budget enforcement: emit warning at the 75% threshold (once per
+		// dimension), and stop with status=budget_exhausted at >=100% of
+		// the EFFECTIVE cap (max - reserve). The reserve is held back so
+		// the post-loop verify + closing summary turn still has room to
+		// run. The 75% warning + budget_exceeded event semantics are
+		// preserved verbatim — only the threshold value moves down by the
+		// reserve. The exit path used to early-return; now we record the
+		// reason in `exit` and break out of the loop so the post-loop
+		// verifier check fires.
+		if budgetMaxTokens > 0 {
+			// Warning still tracks the user's stated limit so meters in
+			// the TUI line up with the displayed cap.
+			frac := float64(totalTokens) / float64(budgetMaxTokens)
+			if !a.warnedTokens && frac >= 0.75 && frac < 1.0 {
+				a.warnedTokens = true
+				a.emit(event.SourceSystem, event.KindNote, "budget_warning", map[string]any{
+					"reason":   "tokens",
+					"used":     totalTokens,
+					"limit":    budgetMaxTokens,
+					"fraction": frac,
+				})
+			}
+			// The "stop now" trigger uses the EFFECTIVE cap so the
+			// reserve survives for the post-loop verify pass.
+			if totalTokens >= effectiveMaxTokens {
+				a.emit(event.SourceSystem, event.KindNote, "budget_exceeded", map[string]any{
+					"reason":             "tokens",
+					"used":               totalTokens,
+					"limit":              budgetMaxTokens,
+					"effective_limit":    effectiveMaxTokens,
+					"reserve":            budgetReserveTokens,
+					"fraction":           frac,
+				})
+				a.syncGraceState(totalTokens, totalCostUSD, budgetMaxTokens, budgetMaxCostUSD, messages)
+				exit = exitState{reason: "budget_tokens", iterations: iter}
+				break loop
+			}
+		}
+		if budgetMaxCostUSD > 0 {
+			frac := totalCostUSD / budgetMaxCostUSD
+			if !a.warnedCost && frac >= 0.75 && frac < 1.0 {
+				a.warnedCost = true
+				a.emit(event.SourceSystem, event.KindNote, "budget_warning", map[string]any{
+					"reason":   "cost",
+					"used":     totalCostUSD,
+					"limit":    budgetMaxCostUSD,
+					"fraction": frac,
+				})
+			}
+			if frac >= 1.0 {
+				a.emit(event.SourceSystem, event.KindNote, "budget_exceeded", map[string]any{
+					"reason":   "cost",
+					"used":     totalCostUSD,
+					"limit":    budgetMaxCostUSD,
+					"fraction": frac,
+				})
+				a.syncGraceState(totalTokens, totalCostUSD, budgetMaxTokens, budgetMaxCostUSD, messages)
+				exit = exitState{reason: "budget_cost", iterations: iter}
+				break loop
+			}
+		}
+		_ = totalInTokens
+		_ = totalOutTokens
 
 		// Stuck detection: run after each provider_response (or every N iters).
 		if a.StuckDetector != nil {
@@ -363,13 +814,12 @@ func (a *AgentLoop) Run(ctx context.Context) (*Result, error) {
 						"threshold":  threshold,
 						"iterations": iter,
 					})
-					return &Result{
-						Status:     "stuck",
-						Iterations: iter,
-						Tokens:     totalTokens,
-						FinalError: errors.New("aborted: 3 unrecovered stuck signals"),
-						FinalText:  lastAssistantText,
-					}, nil
+					exit = exitState{
+						reason:     "stuck",
+						iterations: iter,
+						err:        errors.New("aborted: 3 unrecovered stuck signals"),
+					}
+					break loop
 				}
 			}
 		}
@@ -405,18 +855,45 @@ func (a *AgentLoop) Run(ctx context.Context) (*Result, error) {
 						Content: "Verification passed. Before declaring done, review the memory bank: is there anything from this run worth recording for future sessions? If yes, call memory_update once or twice now. If no, just reply with 'no update'.",
 					}
 					milestoneMsgs := append(messages[:len(messages):len(messages)], nudge)
-					mResp, mErr := a.Provider.Complete(ctx, provider.Request{
-						Model:     a.Model,
-						System:    system,
+					// Milestone is a one-off "any closing memory updates?"
+					// summary turn — route via RoleMain so it lands on the
+					// generalist default rather than the planner/editor
+					// specialists. Falls back to a.Provider/a.Model when no
+					// architect/coder split is wired.
+					milestoneProv := a.pickProvider(RoleMain)
+					milestoneModel := a.pickModel(RoleMain)
+					mResp, mErr := milestoneProv.Complete(ctx, provider.Request{
+						Model:     milestoneModel,
+						System:    iterSystem,
 						Messages:  milestoneMsgs,
 						Tools:     tools,
 						MaxTokens: 1024,
 					})
 					if mErr != nil {
 						// Soft failure: log + proceed to done as if no milestone existed.
-						a.emit(event.SourceSystem, event.KindNote, "memory_milestone_error", map[string]any{"err": mErr.Error()})
+						// Emit a NOTE-kind event with a non-error name so downstream
+						// consumers that filter on "*_error" do not flag this as a
+						// real error — milestone summarization is best-effort.
+						a.emit(event.SourceSystem, event.KindNote, "memory_milestone_skipped", map[string]any{
+							"reason": "provider_unavailable",
+							"detail": mErr.Error(),
+						})
 					} else {
 						totalTokens += mResp.InputTokens + mResp.OutputTokens
+						// Charge milestone tokens to the main role so
+						// Result.ByRole stays consistent with the global
+						// totalTokens / totalCostUSD counters.
+						var milestoneCostUSD float64
+						if a.CostCalculator != nil {
+							if usd, ok := a.CostCalculator.Estimate(milestoneModel, cost.Usage{
+								InputTokens:  mResp.InputTokens,
+								OutputTokens: mResp.OutputTokens,
+							}); ok {
+								milestoneCostUSD = usd
+								totalCostUSD += usd
+							}
+						}
+						byRole = recordRoleUsage(byRole, RoleMain, mResp, milestoneCostUSD)
 						a.emit(event.SourceAgent, event.KindObservation, "memory_milestone_response", map[string]any{
 							"tool_calls":  len(mResp.ToolCalls),
 							"stop_reason": mResp.StopReason,
@@ -471,7 +948,7 @@ func (a *AgentLoop) Run(ctx context.Context) (*Result, error) {
 						})
 					}
 				}
-				return &Result{Status: "done", Iterations: iter, Tokens: totalTokens, VerifyAll: results, FinalText: lastAssistantText}, nil
+				return &Result{Status: "done", Iterations: iter, Tokens: totalTokens, CostUSD: totalCostUSD, VerifyAll: results, FinalText: lastAssistantText, ByRole: byRole}, nil
 			}
 			// Feed verifier failures back as a user message and let agent continue.
 			messages = append(messages, provider.Message{
@@ -491,8 +968,28 @@ func (a *AgentLoop) Run(ctx context.Context) (*Result, error) {
 
 			if a.Permission != nil {
 				key := permissionKeyFor(tc.Name, tc.Input)
-				decision := a.Permission.Evaluate(tc.Name, key)
+				// bash chain decomposition: a command like "cp x y && mv y z"
+				// has first verb "cp" (allowed) but a chained "mv" (destructive).
+				// Evaluate each chained sub-command's verb separately so the
+				// destructive deny list isn't bypassed via && / ; / || / |.
+				keys := []string{key}
+				if tc.Name == "bash" {
+					if subs := splitBashChain(key); len(subs) > 1 {
+						keys = subs
+					}
+				}
+				decision := permission.DecisionAllow
+				deniedKey := key
+				for _, k := range keys {
+					d := a.Permission.Evaluate(tc.Name, k)
+					if d != permission.DecisionAllow {
+						decision = d
+						deniedKey = k
+						break
+					}
+				}
 				if decision != permission.DecisionAllow {
+					key = deniedKey
 					// When decision is Ask and AskCallback is wired, call it.
 					// If it returns true we treat the call as Allow (fall through);
 					// if false (or no callback), treat as Deny.
@@ -591,28 +1088,231 @@ func (a *AgentLoop) Run(ctx context.Context) (*Result, error) {
 		}
 	}
 
-	a.emit(event.SourceSystem, event.KindNote, "run_max_iterations", map[string]any{"iterations": maxIter, "tokens": totalTokens})
-	return &Result{Status: "max_iterations", Iterations: maxIter, Tokens: totalTokens, FinalText: lastAssistantText}, nil
+	// Loop exited without an early-return done. If `exit.reason` is empty
+	// the for-counter ran out; otherwise it carries the reason set inside
+	// the loop body. Run a single best-effort verify pass so callers
+	// always see what state the workspace is in, then map (reason, verify)
+	// onto a final Result.
+	if exit.reason == "" {
+		exit = exitState{reason: "max_iter", iterations: maxIter}
+		a.emit(event.SourceSystem, event.KindNote, "run_max_iterations", map[string]any{"iterations": maxIter, "tokens": totalTokens})
+	}
+
+	// Always run a final verify pass on exit (Phase 19 fix). This covers
+	// the dogfood bug where budget exhaustion fired before any verify
+	// could run, leaving the user blind to whether the work was actually
+	// green. The verifier itself is shell-only (no LLM cost), and the
+	// reserve we held back from the budget is what makes this safe.
+	verifyResults, verifyAllPass := a.runFinalVerify(ctx)
+
+	finalStatus := ""
+	finalErr := exit.err
+	switch exit.reason {
+	case "budget_tokens", "budget_cost":
+		// Fire the grace wrap-up call (Hermes pattern). Grace appends a
+		// hand-off summary to the message history so a future resume has a
+		// clean starting point. The Result.Status is still determined by
+		// the post-loop verify outcome (verify-based classification below)
+		// so existing callers that match "budget_exhausted*" keep working.
+		_ = a.checkBudgetAndMaybeGrace(ctx)
+		// New three-way classification:
+		//   - verify pass after budget hit  → budget_exhausted_verify_passed
+		//     (best-effort: agent's prior edits already satisfied checks)
+		//   - verify fail after budget hit  → budget_exhausted_verify_failed
+		//   - no verifier checks at all     → keep legacy "budget_exhausted"
+		//     so older test fixtures + dashboards keep matching.
+		if len(verifyResults) == 0 {
+			finalStatus = "budget_exhausted"
+		} else if verifyAllPass {
+			finalStatus = "budget_exhausted_verify_passed"
+		} else {
+			finalStatus = "budget_exhausted_verify_failed"
+		}
+		// graceStatus, when non-empty, is set by checkBudgetAndMaybeGrace to
+		// signal that the wrap-up turn fired and the run hands off cleanly.
+		// It overrides the verify-based classification so callers can detect
+		// the soft-exit path.
+		if a.graceStatus != "" {
+			finalStatus = a.graceStatus
+		}
+	case "stuck":
+		finalStatus = "stuck"
+	case "max_iter":
+		finalStatus = "max_iterations"
+	default:
+		finalStatus = exit.reason
+	}
+
+	budgetReason := ""
+	switch exit.reason {
+	case "budget_tokens":
+		budgetReason = "tokens"
+	case "budget_cost":
+		budgetReason = "cost"
+	}
+
+	return &Result{
+		Status:       finalStatus,
+		Iterations:   exit.iterations,
+		Tokens:       totalTokens,
+		CostUSD:      totalCostUSD,
+		VerifyAll:    verifyResults,
+		FinalError:   finalErr,
+		FinalText:    lastAssistantText,
+		BudgetReason: budgetReason,
+		ByRole:       byRole,
+	}, nil
 }
 
-// RunSubagent satisfies stuck.SubagentRunner. It builds a fresh AgentLoop
-// using the parent's spec/provider/tools (filtered to allowedTools),
-// disables the parent's stuck/checkpoint/memory wiring, and runs it to
-// maxIters iterations. The sub-loop's FinalText becomes the summary.
+// runFinalVerify runs the spec's verifier checks once on exit and emits
+// verify_run + per-result events. Returns nil + true when there's no
+// verifier wired or when there are no checks defined (vacuously pass —
+// nothing to verify, so status mapping treats it the same as "no
+// verifier signal" and falls back to the legacy budget_exhausted /
+// max_iterations status). Errors from individual checks become
+// non-passing entries; we don't surface a Go error from this helper.
+func (a *AgentLoop) runFinalVerify(ctx context.Context) ([]verify.Result, bool) {
+	if a.Verifier == nil {
+		return nil, true
+	}
+	checks := a.Spec.GetVerification().GetChecks()
+	if len(checks) == 0 {
+		return nil, true
+	}
+	a.emit(event.SourceSystem, event.KindAction, "verify_run", map[string]any{"final": true})
+	results, allPass := a.Verifier.RunAll(ctx, checks)
+	for _, vr := range results {
+		a.emit(event.SourceEnvironment, event.KindObservation, "verify_result", map[string]any{
+			"name":      vr.Name,
+			"passed":    vr.Passed,
+			"exit_code": vr.ExitCode,
+			"final":     true,
+		})
+	}
+	return results, allPass
+}
+
+// SubagentConfig parameterises a sub-loop spawn. Used by both stuck-recovery
+// (via the legacy RunSubagent shape) and the agent-callable subagent tool.
+//
+// All fields except Goal are optional:
+//   - AllowedTools: filter for the parent's tool set. Empty → use the
+//     conservative read-only default (read_file + repomap + memory_load +
+//     web_fetch + lsp).
+//   - MaxIterations: hard cap on sub-loop iters. Zero or negative → 8.
+//     Clamped to 20 so a runaway prompt can't blow the parent's budget.
+//   - MaxTokens: soft cap on the sub-loop's combined input+output token
+//     usage. The cap is plumbed through the cloned Budget so the runner's
+//     existing token-budget enforcement triggers a clean budget_exhausted
+//     return rather than running away. Zero → 30_000.
+//   - Model: provider model id override. Empty → reuse the parent's model.
+type SubagentConfig struct {
+	Goal          string
+	AllowedTools  []string
+	MaxIterations int
+	MaxTokens     int64
+	Model         string
+}
+
+// SubagentResult is what the parent sees after a sub-loop completes.
+// Tokens is the combined input+output count so the parent can charge the
+// sub-loop's spend against its own budget if it wants to (the agent-callable
+// subagent tool inspects this on the parent's side).
+type SubagentResult struct {
+	Summary    string
+	Status     string
+	Iterations int
+	Tokens     int64
+}
+
+// Default tools for a sub-loop when the caller passes no AllowedTools.
+// The list matches the read-only investigation surface called out in the
+// subagent tool description: read_file, repomap, memory_load, web_fetch,
+// lsp. NO bash, edit, write_file, apply_patch, exec — those are explicitly
+// dropped so sub-loops stay side-effect-free.
+var defaultSubagentTools = []string{
+	"read_file",
+	"repomap",
+	"memory_load",
+	"web_fetch",
+	"lsp",
+}
+
+// Bounds enforced on every SubagentConfig regardless of caller — keeps a
+// runaway tool call from spending the parent's budget on an ill-conceived
+// sub-loop.
+const (
+	subagentMaxIterCeiling   = 20
+	subagentDefaultMaxIter   = 8
+	subagentDefaultMaxTokens = 30_000
+)
+
+// RunSubagent satisfies stuck.SubagentRunner. Thin wrapper over
+// RunSubagentWithConfig that preserves the original positional shape
+// (subgoal, allowedTools, maxIters) the stuck-recovery interface expects.
+//
+// Stuck-recovery callers (SubagentBranch) come through this path; the
+// agent-callable subagent tool calls RunSubagentWithConfig directly so it
+// can plumb token caps + model overrides + return token usage.
 func (a *AgentLoop) RunSubagent(ctx context.Context, subgoal string, allowedTools []string, maxIters int) (string, error) {
-	// Filter parent's tools to the allowed subset.
+	res, err := a.RunSubagentWithConfig(ctx, SubagentConfig{
+		Goal:          subgoal,
+		AllowedTools:  allowedTools,
+		MaxIterations: maxIters,
+	})
+	if err != nil {
+		return "", err
+	}
+	if res == nil {
+		return "", nil
+	}
+	return res.Summary, nil
+}
+
+// RunSubagentWithConfig is the full-fidelity entrypoint used by the
+// agent-callable subagent tool. It clones the parent's spec, applies the
+// config's iteration + token caps, filters the tool set, and runs the
+// sub-loop in-process (NO new session, NO new event stream — the sub-loop
+// inherits the parent's stream so subagent_started / subagent_done /
+// provider_request events all surface to the same TUI/CLI viewers).
+func (a *AgentLoop) RunSubagentWithConfig(ctx context.Context, cfg SubagentConfig) (*SubagentResult, error) {
+	if strings.TrimSpace(cfg.Goal) == "" {
+		return nil, errors.New("subagent: goal is required")
+	}
+
+	// Resolve caps with defaults + ceilings.
+	maxIter := cfg.MaxIterations
+	if maxIter <= 0 {
+		maxIter = subagentDefaultMaxIter
+	}
+	if maxIter > subagentMaxIterCeiling {
+		maxIter = subagentMaxIterCeiling
+	}
+	maxTokens := cfg.MaxTokens
+	if maxTokens <= 0 {
+		maxTokens = subagentDefaultMaxTokens
+	}
+
+	// Resolve allowed tools. Empty → conservative read-only default.
+	allowedTools := cfg.AllowedTools
+	if len(allowedTools) == 0 {
+		allowedTools = defaultSubagentTools
+	}
 	allow := make(map[string]bool, len(allowedTools))
 	for _, t := range allowedTools {
 		allow[t] = true
 	}
 	var subTools []tool.Tool
+	var actualToolNames []string
 	for _, t := range a.Tools {
 		if allow[t.Name()] {
 			subTools = append(subTools, t)
+			actualToolNames = append(actualToolNames, t.Name())
 		}
 	}
 
-	// Build a sub-spec that overrides max iterations for the sub-loop only.
+	// Build a sub-spec that overrides iteration + token caps for the
+	// sub-loop only. Clone keeps the parent's spec untouched.
 	var subSpec *gilv1.FrozenSpec
 	if a.Spec != nil {
 		subSpec = proto.Clone(a.Spec).(*gilv1.FrozenSpec)
@@ -622,92 +1322,179 @@ func (a *AgentLoop) RunSubagent(ctx context.Context, subgoal string, allowedTool
 	if subSpec.Budget == nil {
 		subSpec.Budget = &gilv1.Budget{}
 	}
-	subSpec.Budget.MaxIterations = int32(maxIters)
+	subSpec.Budget.MaxIterations = int32(maxIter)
+	subSpec.Budget.MaxTotalTokens = maxTokens
+	// Cost budget intentionally not inherited; the parent's
+	// CostCalculator already accounts for every provider call (the
+	// sub-loop reuses the same provider) and a separate cap on the child
+	// would double-count.
+	subSpec.Budget.MaxTotalCostUsd = 0
 	if subSpec.Verification == nil {
 		subSpec.Verification = &gilv1.Verification{}
 	}
 	// No verifier checks for sub-loops: their goal is reconnaissance, not verify-pass.
 	subSpec.Verification.Checks = nil
 
+	model := cfg.Model
+	if model == "" {
+		model = a.Model
+	}
+
+	a.emit(event.SourceSystem, event.KindNote, "subagent_started", map[string]any{
+		"goal":           cfg.Goal,
+		"max_iterations": maxIter,
+		"max_tokens":     maxTokens,
+		"model":          model,
+		"tools":          actualToolNames,
+	})
+
 	sub := &AgentLoop{
 		Spec:            subSpec,
 		Provider:        a.Provider,
-		Model:           a.Model,
+		Model:           model,
 		Tools:           subTools,
 		Verifier:        verify.NewRunner(""),
-		SeedUserMessage: subgoal,
-		// Deliberately leave Stuck/Checkpoint/Memory/Permission/AskCallback nil
+		SeedUserMessage: cfg.Goal,
+		// Deliberately do NOT share the parent's event stream — the
+		// parent has already emitted subagent_started above and emits
+		// subagent_done with the final summary on return. Plumbing every
+		// per-iteration sub-loop event (provider_request / tool_call /
+		// run_done) into the parent stream would (1) confuse stream
+		// consumers that can't tell parent vs child events apart and
+		// (2) break stuck-recovery wiring that filters on run_done /
+		// run_max_iterations to know when the *parent* finished. The
+		// sub-loop runs to completion silently; the parent's two
+		// subagent_* events are the surface API.
+		//
+		// Inherit memory bank READ-ONLY: the runner reads it for the
+		// system-prompt prepend, but without memory_update in the
+		// allowed-tool default the sub-loop can't write back.
+		Memory: a.Memory,
+		// Workspace flows through so AGENTS.md / CLAUDE.md project
+		// instructions feed into the sub-loop's system prompt the same
+		// way they feed the parent's.
+		Workspace: a.Workspace,
+		// Deliberately leave Stuck/Checkpoint/Plan/Permission/AskCallback nil
 		// so the sub-loop is a clean, sandbox-free, no-side-effect investigator.
+		// (Permission gating is enforced at the PARENT level when the agent
+		// invokes the subagent tool — the sub-loop's restricted tool set
+		// makes a second permission layer redundant.)
 	}
 
 	res, err := sub.Run(ctx)
+	out := &SubagentResult{}
+	if res != nil {
+		out.Summary = res.FinalText
+		out.Status = res.Status
+		out.Iterations = res.Iterations
+		out.Tokens = res.Tokens
+	}
+	a.emit(event.SourceSystem, event.KindNote, "subagent_done", map[string]any{
+		"goal":       cfg.Goal,
+		"status":     out.Status,
+		"iterations": out.Iterations,
+		"tokens":     out.Tokens,
+		"summary":    truncateString(out.Summary, 512),
+	})
 	if err != nil {
-		return "", err
+		return out, err
 	}
-	if res == nil {
-		return "", nil
-	}
-	return res.FinalText, nil
+	return out, nil
 }
 
+// AsSubagentRunner returns an adapter that satisfies tool.SubagentRunner
+// for the agent-callable subagent tool. The interface lives in core/tool
+// (alongside the tool itself) to avoid an import cycle (runner → tool →
+// runner). This adapter lives here because it has to reach into the
+// AgentLoop's RunSubagentWithConfig — declaring it on the runner side
+// keeps the tool side completely loop-agnostic.
+func (a *AgentLoop) AsSubagentRunner() tool.SubagentRunner {
+	return &subagentRunnerAdapter{loop: a}
+}
+
+type subagentRunnerAdapter struct {
+	loop *AgentLoop
+}
+
+func (s *subagentRunnerAdapter) RunSubagentWithConfig(ctx context.Context, cfg tool.SubagentRunConfig) (tool.SubagentRunResult, error) {
+	res, err := s.loop.RunSubagentWithConfig(ctx, SubagentConfig{
+		Goal:          cfg.Goal,
+		AllowedTools:  cfg.AllowedTools,
+		MaxIterations: cfg.MaxIterations,
+		MaxTokens:     cfg.MaxTokens,
+		Model:         cfg.Model,
+	})
+	out := tool.SubagentRunResult{}
+	if res != nil {
+		out.Summary = res.Summary
+		out.Status = res.Status
+		out.Iterations = res.Iterations
+		out.Tokens = res.Tokens
+	}
+	return out, err
+}
+
+// buildSystemPrompt is a thin compatibility shim around assembleSystemPrompt
+// preserved for tests that predate the dedicated SystemPromptInputs struct.
+// New call sites should use assembleSystemPrompt directly. Iteration=0
+// signals "act as late-iter" so the memory bank is included (the lazy-mem
+// rule only applies inside Run()'s actual loop).
 func buildSystemPrompt(spec *gilv1.FrozenSpec, tools []tool.Tool, bank *memory.Bank, instructionsSection string) string {
-	goal := "(no goal specified)"
-	if spec != nil && spec.Goal != nil {
-		goal = spec.Goal.OneLiner
+	out, _ := assembleSystemPrompt(SystemPromptInputs{
+		Spec:                 spec,
+		Tools:                tools,
+		Bank:                 bank,
+		InstructionsRendered: instructionsSection,
+		Iteration:            0,
+	})
+	return out
+}
+
+// resolveSystemPromptOptions merges the AgentLoop's runtime override
+// (a.SystemPromptOpts) with the spec's run.system_prompt table and the
+// per-provider verbosity defaults from pickVerbosity.
+//
+// Resolution order (later wins):
+//  1. pickVerbosity(a.ProviderName) — the per-provider baseline
+//     (compact for anthropic/openai/openrouter, verbose for vllm/local,
+//     verbose unknown).
+//  2. a.SystemPromptOpts — the AgentLoop field (test/programmatic
+//     override). Any true flag wins; a true Compact also wins.
+//  3. a.Spec.Run.SystemPrompt — the frozen-spec table (user explicit).
+//     Same any-true-wins rule; explicit user spec is the final word.
+//
+// We don't need a tri-state for Minimal/NoMemory because both are diet
+// flags — turning them on can never hurt correctness. Compact has the
+// same one-way ratchet semantics: a true (drop the verbose block) is
+// always honoured; a false (keep the block) only matters when no
+// upstream layer has flipped Compact true.
+func (a *AgentLoop) resolveSystemPromptOptions() SystemPromptOptions {
+	// Start from per-provider baseline.
+	out := pickVerbosity(a.ProviderName, nil)
+
+	// Apply the AgentLoop field. Any true flag wins; we never silently
+	// downgrade a true to false here.
+	if a.SystemPromptOpts.Minimal {
+		out.Minimal = true
+	}
+	if a.SystemPromptOpts.NoMemory {
+		out.NoMemory = true
+	}
+	if a.SystemPromptOpts.Compact {
+		out.Compact = true
 	}
 
-	var toolList string
-	for _, t := range tools {
-		toolList += fmt.Sprintf("- %s: %s\n", t.Name(), t.Description())
-	}
-
-	var checkList string
-	if spec != nil && spec.Verification != nil {
-		for _, c := range spec.Verification.Checks {
-			checkList += fmt.Sprintf("- %s: `%s`\n", c.Name, c.Command)
+	// Apply the spec — user explicit, final say.
+	if a.Spec != nil && a.Spec.Run != nil && a.Spec.Run.SystemPrompt != nil {
+		sp := a.Spec.Run.SystemPrompt
+		if sp.Minimal {
+			out.Minimal = true
+		}
+		if sp.NoMemory {
+			out.NoMemory = true
 		}
 	}
-	if checkList == "" {
-		checkList = "(no checks defined — any non-tool response will be considered done)\n"
-	}
-
-	base := fmt.Sprintf(`You are an autonomous coding agent. Your job is to make all verification checks pass.
-
-Goal: %s
-
-Verification checks (all must pass):
-%s
-Available tools:
-%s
-Strategy:
-1. Use tools to inspect, write, or run code.
-2. Verify your work matches the check commands above before stopping.
-3. When you believe all checks will pass, stop calling tools — the system will run the checks.
-4. If any check fails, you'll receive the output and should fix the issue.
-
-Be decisive. Don't ask the user — they're not present. Make reasonable assumptions and act.`, goal, checkList, toolList)
-
-	// Order is fixed: base → instructions (AGENTS.md/CLAUDE.md/cursor)
-	// → memory bank. Instructions sit between base and bank because
-	// they're persistent project context (model should read them once
-	// per run, never per-iteration), whereas the bank can churn between
-	// iterations as the agent updates progress.md.
-	out := base
-	if instructionsSection != "" {
-		out += "\n\n## Project Instructions\n\nThe following content was discovered from AGENTS.md, CLAUDE.md, and/or .cursor/rules/*.mdc files in this workspace and its ancestors. Treat it as durable project conventions and persona signals from the user.\n\n" + instructionsSection
-	}
-	if bank == nil {
-		return out
-	}
-	bankSection, err := buildMemoryBankSection(bank)
-	if err != nil {
-		// Soft failure: skip prepend, log nothing here (caller may emit event)
-		return out
-	}
-	if bankSection == "" {
-		return out
-	}
-	return out + "\n\n" + bankSection
+	return out
 }
 
 // loadInstructions populates a.instructionsRendered exactly once per
@@ -914,6 +1701,76 @@ func snapshotMessages(msgs []provider.Message, n int) []provider.Message {
 	return out
 }
 
+// splitBashChain decomposes a bash command line on shell control operators
+// (&&, ||, ;, |) so each sub-command can be permission-checked independently.
+// Best-effort: respects single/double quotes and backslash escapes so
+// operators inside string literals aren't mistaken for chain breaks.
+// Returns the trimmed sub-command strings; an empty input returns an empty
+// slice. A command with no chain operators returns a single-element slice
+// equal to the trimmed input.
+//
+// This is the gil-side fix for the bash-chain permission bypass discovered
+// in self-dogfood Run 9 (see docs/dogfood/2026-04-27-self-dogfood-run9.md):
+// without splitting, a command like "cp x y && mv y z" is gated only on
+// "cp" (the first word), letting "mv" (in the destructive deny list) slip
+// through silently.
+func splitBashChain(cmd string) []string {
+	var parts []string
+	var cur []byte
+	var quote byte // 0, '\'', or '"'
+	push := func() {
+		s := string(cur)
+		// trim leading whitespace; tail trim happens via TrimSpace
+		s = strings.TrimSpace(s)
+		if s != "" {
+			parts = append(parts, s)
+		}
+		cur = cur[:0]
+	}
+	for i := 0; i < len(cmd); i++ {
+		c := cmd[i]
+		// backslash escape: take next byte verbatim (outside quotes too)
+		if c == '\\' && i+1 < len(cmd) {
+			cur = append(cur, c, cmd[i+1])
+			i++
+			continue
+		}
+		if quote != 0 {
+			cur = append(cur, c)
+			if c == quote {
+				quote = 0
+			}
+			continue
+		}
+		switch c {
+		case '\'', '"':
+			quote = c
+			cur = append(cur, c)
+		case '&':
+			if i+1 < len(cmd) && cmd[i+1] == '&' {
+				push()
+				i++
+				continue
+			}
+			cur = append(cur, c)
+		case '|':
+			if i+1 < len(cmd) && cmd[i+1] == '|' {
+				push()
+				i++
+				continue
+			}
+			// single | is also a chain (pipe) — split too
+			push()
+		case ';':
+			push()
+		default:
+			cur = append(cur, c)
+		}
+	}
+	push()
+	return parts
+}
+
 // permissionKeyFor extracts the tool-specific detail string used as the
 // permission key. Best-effort: parses tc.Input as JSON and pulls a
 // well-known field (command for bash, path for file ops, blocks/patch for
@@ -942,23 +1799,258 @@ func permissionKeyFor(toolName string, input json.RawMessage) string {
 		return ""
 	case "apply_patch":
 		return ""
-	case "repomap", "compact_now":
+	case "repomap", "compact_now", "plan":
+		return ""
+	case "lsp":
+		// Use the operation name so users can scope persistent rules
+		// (e.g., always allow lsp/hover but ask on lsp/rename). The
+		// agent passes operation as the discriminator field on every
+		// call, so this stays meaningful even across renames.
+		if v, ok := m["operation"].(string); ok {
+			return v
+		}
+		return ""
+	case "web_fetch":
+		// Use the URL as the rule key so users can pin allow/deny
+		// patterns by host or full URL (e.g., "https://internal.corp/*").
+		if v, ok := m["url"].(string); ok {
+			return v
+		}
+		return ""
+	case "web_search":
+		// Use the query so users can deny obviously-sensitive lookups
+		// at the rule layer if they wish.
+		if v, ok := m["query"].(string); ok {
+			return v
+		}
 		return ""
 	}
 	return ""
 }
 
-// estimateMessagesTokens uses the same 4-chars-per-token heuristic as compact.estimateTokens.
-func estimateMessagesTokens(msgs []provider.Message) int64 {
+// renderPlanForPrompt builds the brief plan summary that gets prepended
+// to the per-iteration system prompt. Format follows the spec:
+//
+//	=== PLAN (3 items: 1 done, 1 in progress, 1 pending) ===
+//	✓ analyze repomap
+//	● refactor theme provider
+//	○ add toggle
+//	=========================================================
+//
+// Aesthetic glyphs (✓ ● ○) per terminal-aesthetic.md §3 (Iconography).
+// We use the Unicode glyphs unconditionally here — this string lives in
+// the system prompt sent to the model, not on the human's terminal, so
+// the locale-based ASCII fallback that the TUI/CLI apply doesn't apply.
+//
+// One level of sub-items is rendered with two-space indent. Note text
+// (when set) is appended as " — <note>" to keep one-item-per-line.
+func renderPlanForPrompt(p *plan.Plan) string {
+	if p == nil || len(p.Items) == 0 {
+		return ""
+	}
+	pen, ip, comp := p.Counts()
+	total := pen + ip + comp
+	header := fmt.Sprintf("=== PLAN (%d items: %d done, %d in progress, %d pending) ===",
+		total, comp, ip, pen)
+
+	var lines []string
+	lines = append(lines, header)
+	for _, it := range p.Items {
+		lines = append(lines, planLine(it, ""))
+		for _, sub := range it.Sub {
+			lines = append(lines, planLine(sub, "  "))
+		}
+	}
+	footer := strings.Repeat("=", len(header))
+	lines = append(lines, footer)
+	return strings.Join(lines, "\n")
+}
+
+// planLine renders one item under renderPlanForPrompt with the given
+// indent prefix. Glyphs are spec-aligned: ✓ done, ● in progress, ○
+// pending.
+func planLine(it plan.Item, indent string) string {
+	var glyph string
+	switch it.Status {
+	case plan.Completed:
+		glyph = "✓"
+	case plan.InProgress:
+		glyph = "●"
+	default:
+		glyph = "○"
+	}
+	body := fmt.Sprintf("%s%s %s", indent, glyph, it.Text)
+	if it.Note != "" {
+		body += " — " + it.Note
+	}
+	return body
+}
+
+// estimateMessagesTokens uses per-provider tokenizer density heuristics to
+// estimate token count. This is provider-aware and replaces the previous
+// uniform 4-chars-per-token approach.
+func estimateMessagesTokens(providerID string, msgs []provider.Message) int64 {
 	var total int64
 	for _, m := range msgs {
-		total += int64(len(m.Content)) / 4
+		total += int64(provider.EstimateTokens(providerID, m.Content))
 		for _, tc := range m.ToolCalls {
-			total += int64(len(tc.Input)) / 4
+			total += int64(provider.EstimateTokens(providerID, string(tc.Input)))
 		}
 		for _, tr := range m.ToolResults {
-			total += int64(len(tr.Content)) / 4
+			total += int64(provider.EstimateTokens(providerID, tr.Content))
 		}
 	}
 	return total
+}
+
+// execToolNames is the set of tool names we treat as "execution" calls
+// for classifyTurn. A response whose tool calls are 100% drawn from this
+// set is routed to RoleEditor — the cheap+fast "coder" model in aider's
+// architect/coder pair. Anything that isn't an execution tool (subagent,
+// repomap, plan, web_search, lsp, etc.) keeps the turn on RoleMain so
+// the model that gets to think doesn't suddenly switch mid-investigation.
+var execToolNames = map[string]bool{
+	"bash":          true,
+	"edit":          true,
+	"write_file":    true,
+	"apply_patch":   true,
+	"read_file":     true, // read_file is read-only but called as part of edit loops
+	"memory_update": true,
+}
+
+// classifyTurn picks the model role for the next iteration. Inputs:
+//
+//   - iterIdx: the upcoming iteration number, 0-indexed (turn 1 == 0).
+//   - lastResponse: the previous iteration's provider response, or nil
+//     when iterIdx == 0.
+//
+// Rules (highest priority first):
+//
+//  1. iterIdx == 0  → RolePlanner. The very first turn always plans
+//     before any tool fires.
+//  2. lastResponse called the `plan` tool → RolePlanner. The agent is
+//     still iterating on its plan, keep it on the strong model.
+//  3. lastResponse called ONLY tools in execToolNames → RoleEditor.
+//     Tool-heavy execution turns hand off to the cheap+fast model.
+//  4. Otherwise (mixed text+tools, no tools, or non-exec tools) →
+//     RoleMain. The "ambiguous" bucket — keeps the run on the default
+//     model until classification is unambiguous again.
+//
+// The function is pure (no AgentLoop reference); it's exported so tests
+// can verify routing in isolation. When AgentLoop.Providers/Models is
+// empty for the picked role, the runner falls back to .Provider/.Model
+// — see pickProvider / pickModel below.
+func classifyTurn(iterIdx int, lastResponse *provider.Response) string {
+	if iterIdx == 0 {
+		return RolePlanner
+	}
+	if lastResponse == nil {
+		return RoleMain
+	}
+	if hasPlanToolCall(lastResponse) {
+		return RolePlanner
+	}
+	if hasOnlyExecTools(lastResponse) {
+		return RoleEditor
+	}
+	return RoleMain
+}
+
+// hasPlanToolCall returns true when any tool call in the response is the
+// `plan` tool. The plan tool is the agent-visible TODO checklist; any
+// invocation signals "still planning, not yet executing".
+func hasPlanToolCall(resp *provider.Response) bool {
+	if resp == nil {
+		return false
+	}
+	for _, tc := range resp.ToolCalls {
+		if tc.Name == "plan" {
+			return true
+		}
+	}
+	return false
+}
+
+// hasOnlyExecTools returns true when ALL tool calls in the response come
+// from execToolNames AND there is at least one tool call. An empty
+// tool-call list returns false (a no-tool response is the verifier-trigger
+// path, not an "execution" turn).
+func hasOnlyExecTools(resp *provider.Response) bool {
+	if resp == nil || len(resp.ToolCalls) == 0 {
+		return false
+	}
+	for _, tc := range resp.ToolCalls {
+		if !execToolNames[tc.Name] {
+			return false
+		}
+	}
+	return true
+}
+
+// pickProvider returns the provider for the given role, falling back to
+// a.Provider when the role isn't wired in a.Providers. nil is never
+// returned for a sane AgentLoop (a.Provider is required) — but we still
+// double-check so a misconfigured map doesn't panic mid-iteration.
+func (a *AgentLoop) pickProvider(role string) provider.Provider {
+	if a.Providers != nil {
+		if p, ok := a.Providers[role]; ok && p != nil {
+			return p
+		}
+	}
+	return a.Provider
+}
+
+// pickModel returns the model id for the given role, falling back to
+// a.Model when not set in a.Models. Empty role string → a.Model.
+func (a *AgentLoop) pickModel(role string) string {
+	if a.Models != nil {
+		if m, ok := a.Models[role]; ok && m != "" {
+			return m
+		}
+	}
+	return a.Model
+}
+
+// recordRoleUsage adds the given provider response to the per-role
+// counters in byRole, allocating the map on first use. The caller is
+// responsible for resolving the per-role costUSD via the same Calculator
+// the global budget uses (so role aggregates and the global total stay
+// consistent).
+func recordRoleUsage(byRole map[string]RoleUsage, role string, resp provider.Response, costUSD float64) map[string]RoleUsage {
+	if byRole == nil {
+		byRole = map[string]RoleUsage{}
+	}
+	cur := byRole[role]
+	cur.Calls++
+	cur.InputTokens += resp.InputTokens
+	cur.OutputTokens += resp.OutputTokens
+	cur.CostUSD += costUSD
+	byRole[role] = cur
+	return byRole
+}
+
+// modelSwitchReason produces the human-readable explanation that ships
+// in the model_switched event payload. Useful for TUI breadcrumbs and
+// post-hoc debugging — "why did we suddenly switch to qwen for turn 7?".
+//
+// The string is intentionally short (no period) and stable across runs
+// so log-grep tooling can rely on the wording.
+func modelSwitchReason(iterIdx int, lastResponse *provider.Response, role string) string {
+	if iterIdx == 0 {
+		return "first_turn"
+	}
+	if hasPlanToolCall(lastResponse) {
+		return "plan_tool_call"
+	}
+	if hasOnlyExecTools(lastResponse) {
+		return "tool_heavy"
+	}
+	switch role {
+	case RolePlanner:
+		return "planner_default"
+	case RoleEditor:
+		return "editor_default"
+	default:
+		return "ambiguous_turn"
+	}
 }

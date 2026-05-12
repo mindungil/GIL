@@ -1,4 +1,4 @@
-.PHONY: tidy test gen build install install-script clean e2e e2e2 e2e3 e2e4 e2e5 e2e6 e2e7 e2e8 e2e9 e2e10-modal e2e10-daytona e2e10-oidc e2e11-freshinstall e2e12-in-session-ux e2e-all python-protos python-test release release-host release-check
+.PHONY: tidy test gen build install install-script clean e2e e2e2 e2e3 e2e4 e2e5 e2e6 e2e7 e2e8 e2e9 e2e10-modal e2e10-daytona e2e10-oidc e2e11-freshinstall e2e12-in-session-ux e2e18-lsp e2e18-webfetch e2e18-subagent e2e18-clarify e2e-all python-protos python-test release release-host release-check
 
 tidy:
 	@for m in core runtime proto server cli tui sdk mcp; do \
@@ -31,9 +31,9 @@ gen:
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "0.0.0-dev")
 COMMIT  := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 DATE    := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
-LDFLAGS := -X 'github.com/jedutools/gil/core/version.Version=$(VERSION)' \
-           -X 'github.com/jedutools/gil/core/version.Commit=$(COMMIT)'   \
-           -X 'github.com/jedutools/gil/core/version.BuildDate=$(DATE)'
+LDFLAGS := -X 'github.com/mindungil/gil/core/version.Version=$(VERSION)' \
+           -X 'github.com/mindungil/gil/core/version.Commit=$(COMMIT)'   \
+           -X 'github.com/mindungil/gil/core/version.BuildDate=$(DATE)'
 
 build:
 	@mkdir -p bin
@@ -107,7 +107,22 @@ e2e11-freshinstall: build
 e2e12-in-session-ux: build
 	@bash tests/e2e/phase12_in_session_ux_test.sh
 
-e2e-all: e2e e2e2 e2e3 e2e4 e2e5 e2e6 e2e7 e2e8 e2e9 e2e10-modal e2e10-daytona e2e10-oidc e2e11-freshinstall e2e12-in-session-ux
+e2e18-lsp: build
+	@bash tests/e2e/phase18_lsp_test.sh
+
+e2e18-webfetch: build
+	@bash tests/e2e/phase18_webfetch_test.sh
+
+e2e18-plan: build
+	@bash tests/e2e/phase18_plan_test.sh
+
+e2e18-subagent: build
+	@bash tests/e2e/phase18_subagent_test.sh
+
+e2e18-clarify: build
+	@bash tests/e2e/phase18_clarify_test.sh
+
+e2e-all: e2e e2e2 e2e3 e2e4 e2e5 e2e6 e2e7 e2e8 e2e9 e2e10-modal e2e10-daytona e2e10-oidc e2e11-freshinstall e2e12-in-session-ux e2e18-plan e2e18-lsp e2e18-webfetch e2e18-subagent e2e18-clarify
 
 # --- release ---------------------------------------------------------------
 # `make release` builds the full 4-binary x 4-platform matrix locally via

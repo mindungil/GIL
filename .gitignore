@@ -54,3 +54,9 @@ python/**/dist/
 # Generated gRPC stubs (regenerate via `python -m gil_atropos.compile_protos`)
 python/gil_atropos/proto/*_pb2.py
 python/gil_atropos/proto/*_pb2_grpc.py
+# Generated gRPC stubs (regenerate via `python -m gil_swebench.compile_protos`)
+python/gil_swebench/proto/*_pb2.py
+python/gil_swebench/proto/*_pb2_grpc.py
+# SWE-bench results / workspaces (typically large; opt-in to commit)
+python/gil_swebench/results/
+python/gil_swebench/workspaces/

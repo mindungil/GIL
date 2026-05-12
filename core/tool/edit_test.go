@@ -10,7 +10,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/jedutools/gil/core/edit"
+	"github.com/mindungil/gil/core/edit"
 )
 
 // makeEditArgs encodes the blocks argument as JSON for Run.

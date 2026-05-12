@@ -1,0 +1,18 @@
+   ▏  G  I  L      ────          /snap/… 
+                                         
+                                         
+   ╴╴  no past sessions                  
+                                         
+         describe a task to begin        
+                                         
+   ╴╴  examples                          
+                                         
+         · "refactor my auth middlewar…  
+         · "build a CLI that scans go …  
+         · "port the Python date-parse…  
+                                         
+                   [ idle  ·  ready ]    
+   ╭────────────────────────────────╮    
+   │ ›                              │    
+   ╰────────────────────────────────╯    
+      describe a task, resume by slug, … 

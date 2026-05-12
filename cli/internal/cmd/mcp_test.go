@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jedutools/gil/core/mcpregistry"
+	"github.com/mindungil/gil/core/mcpregistry"
 )
 
 // runMCPCmd executes a `gil mcp ...` command in-process and returns the

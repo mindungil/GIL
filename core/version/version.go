@@ -5,9 +5,9 @@
 // via -ldflags; see Makefile and .goreleaser.yaml for the canonical
 // invocations:
 //
-//	-ldflags "-X 'github.com/jedutools/gil/core/version.Version=v0.1.0-alpha' \
-//	          -X 'github.com/jedutools/gil/core/version.Commit=<sha>'        \
-//	          -X 'github.com/jedutools/gil/core/version.BuildDate=<rfc3339>'"
+//	-ldflags "-X 'github.com/mindungil/gil/core/version.Version=v0.2.0' \
+//	          -X 'github.com/mindungil/gil/core/version.Commit=<sha>'    \
+//	          -X 'github.com/mindungil/gil/core/version.BuildDate=<rfc3339>'"
 //
 // When the binary is built without ldflags (e.g. `go run`, `go test`,
 // `go build` without the Makefile target), the constants stay at their
@@ -55,7 +55,7 @@ var (
 //
 // Examples:
 //
-//	"v0.1.0-alpha (a1b2c3d, 2026-04-27T12:34:56Z)"
+//	"v0.2.0 (a1b2c3d, 2026-05-12T12:34:56Z)"
 //	"v0.2.0 (devel)"  -- when Commit/BuildDate fall back to BuildInfo
 //	"0.0.0-dev"       -- bare dev build with no BuildInfo either
 //

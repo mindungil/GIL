@@ -11,10 +11,10 @@ import (
 	_ "modernc.org/sqlite"
 	"github.com/stretchr/testify/require"
 
-	"github.com/jedutools/gil/core/provider"
-	"github.com/jedutools/gil/core/session"
-	"github.com/jedutools/gil/core/specstore"
-	gilv1 "github.com/jedutools/gil/proto/gen/gil/v1"
+	"github.com/mindungil/gil/core/provider"
+	"github.com/mindungil/gil/core/session"
+	"github.com/mindungil/gil/core/specstore"
+	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
 )
 
 // TestRunService_Start_AppliesProjectLocalConfig verifies the
