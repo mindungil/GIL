@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -82,6 +83,21 @@ type chatModel struct {
 	providerLabel string
 	modelLabel    string
 
+	// M6.1 agent tree — tool-call timeline that the center pane will
+	// render once M6.3 lands. Populated by the chat_stream message
+	// handlers; reset on session change. Lazy-initialised so the
+	// existing constructors (which don't touch this field) keep
+	// working — newAgentTreeOnce() handles the nil case.
+	agentTree *AgentTree
+}
+
+// newAgentTreeOnce returns the model's tree, allocating on first use.
+// Lets callers stay terse: m.tree().OnToolCall(...).
+func (m *chatModel) tree() *AgentTree {
+	if m.agentTree == nil {
+		m.agentTree = NewAgentTree()
+	}
+	return m.agentTree
 }
 
 func (m *chatModel) Init() tea.Cmd { return nil }
@@ -153,6 +169,10 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// interview stream but a different Recv() shape.
 		m.promptStream = msg.stream
 		m.promptCancel = msg.cancel
+		// M6.2 — fresh turn root so subsequent tool_call/result msgs
+		// land in the right node. OnTurnStart collapses prior turns
+		// so the active turn dominates the (forthcoming) tree pane.
+		m.tree().OnTurnStart(time.Time{})
 		return m, nextChatPromptEventCmd(msg.stream)
 
 	case chatPromptToolCallMsg:
@@ -168,6 +188,10 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			line += "  " + input
 		}
 		m.transcript = append(m.transcript, line)
+		// M6.2 — mirror into the agent tree for the (forthcoming)
+		// center pane. The transcript line stays as-is so M6.3 can
+		// land without churning the chat scrollback.
+		m.tree().OnToolCall(msg.id, msg.name, msg.inputJSON)
 		if m.promptStream != nil {
 			return m, nextChatPromptEventCmd(m.promptStream)
 		}
@@ -184,6 +208,8 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		body = strings.ReplaceAll(body, "\n", " · ")
 		m.transcript = append(m.transcript, glyph+body)
+		// M6.2 — transition the matching tree node.
+		m.tree().OnToolResult(msg.callID, msg.content, msg.isError)
 		if m.promptStream != nil {
 			return m, nextChatPromptEventCmd(m.promptStream)
 		}
@@ -234,6 +260,9 @@ func (m *chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case chatStreamDoneMsg:
 		m.promptStream = nil
+		// M6.2 — close the active tree turn so the next user prompt
+		// opens a fresh root rather than appending.
+		m.tree().OnTurnDone()
 		return m, nil
 
 	case chatStreamErrMsg:
