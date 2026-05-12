@@ -264,6 +264,60 @@ func chatStripPill(m *chatModel, body string) string {
 	}
 }
 
+// chatAgentActivity summarizes the agent tree as a strip body. Returns
+// "" when the tree has no turns yet so callers fall through to the
+// phase-default text. Live turn (last turn not Closed) shows running
+// tools; closed turns show the last turn's tool count + verify
+// breakdown so the user has lasting context between prompts.
+//
+// Format examples:
+//
+//	  active turn:   "agent  ·  ⚒ 3 running  ·  ✓ 1"
+//	  between turns: "ready  ·  last turn: 4 tools  ·  ✓ 3  ✗ 1"
+//
+// Pure — no rendering, lipgloss, or daemon I/O.
+func chatAgentActivity(m *chatModel, dot string) string {
+	if m.agentTree == nil || len(m.agentTree.Turns) == 0 {
+		return ""
+	}
+	last := m.agentTree.Turns[len(m.agentTree.Turns)-1]
+	var running, ok, failed int
+	for _, n := range last.Children {
+		switch n.Status {
+		case NodeRunning:
+			running++
+		case NodeOK:
+			ok++
+		case NodeFailed:
+			failed++
+		}
+	}
+	if !last.Closed {
+		// Active turn — current running count + finished so far.
+		body := fmt.Sprintf("agent  %s  ⚒ %d running", dot, running)
+		if ok > 0 {
+			body += fmt.Sprintf("  %s  ✓ %d", dot, ok)
+		}
+		if failed > 0 {
+			body += fmt.Sprintf("  %s  ✗ %d", dot, failed)
+		}
+		return body
+	}
+	// Between turns: summarize the most recent closed turn.
+	total := running + ok + failed
+	if total == 0 {
+		return ""
+	}
+	body := fmt.Sprintf("ready  %s  last turn: %d tools", dot, total)
+	if ok > 0 {
+		body += fmt.Sprintf("  %s  ✓ %d", dot, ok)
+	}
+	if failed > 0 {
+		body += fmt.Sprintf("  %s  ✗ %d", dot, failed)
+	}
+	return body
+}
+
 // chatStatusBody composes the phase-aware right-side strip text.
 // Pure — testable without rendering. Errors win over phase so the
 // user always sees the most urgent state on top. The leading
@@ -274,6 +328,15 @@ func chatStripPill(m *chatModel, body string) string {
 func chatStatusBody(m *chatModel, dot string) string {
 	if m.err != "" {
 		return "error  " + dot + "  " + m.err
+	}
+	// G2-UI V1 — agent activity from M6.1+M6.2 tree. When a Prompt
+	// stream is open the strip shows the running tool count; between
+	// turns it summarizes the last turn (tool count + verified/failed
+	// breakdown). Only fires when the tree has data, so existing run-
+	// phase paths below are unchanged for sessions that haven't run a
+	// chat agent loop yet.
+	if active := chatAgentActivity(m, dot); active != "" {
+		return active
 	}
 	switch m.phase {
 	case ChatPhaseIdle:

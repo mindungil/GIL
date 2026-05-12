@@ -138,3 +138,29 @@ V1 키바인딩:
 - M6.6 — keybinding 정리 (`m`/`d`/`p` 토글)
 
 각 단계마다 단위/스냅샷 테스트.
+
+## 10. Surface-architecture 보강 (G2-UI 구현 중 발견)
+
+§3의 "현재 (M5)" 4-pane 레이아웃은 *giltui binary*의 `view.go` Model이다.
+그러나 SessionService.Prompt 스트림은 *chatModel(`chat_view.go`) — bare
+`gil` TTY*에만 도착한다. giltui Model은 RunService.Tail만 구독한다.
+
+즉 M6.3-M6.6의 "agent tree pane" 렌더는 giltui에 다음 중 하나가 선행되어야
+의미가 있다:
+
+- **A**: giltui Model이 SessionService.Prompt 구독을 추가 (활성 session의
+  chat 활동을 받음). 별도 아키텍처 작업.
+- **B**: M6를 chat surface (chat_view.go)로 재해석. chat surface는 single-
+  column이라 multi-pane 레이아웃 자체가 redesign 필요.
+- **C**: 양쪽 surface 모두에 agent tree pane. giltui는 옵션 A, chat은 옵션
+  B의 축소판.
+
+V1 결정 보류. 이 결정이 안 정해진 상태에서 view code만 깔면 dead-wiring
+(`feedback_check_production_wiring.md`)이 된다. **G2-UI V1은 의도적으로
+좁혔다**: M6.1+M6.2 데이터 층 + chat surface status strip에 agent tree
+요약 inline 표시 (`chatAgentActivity` in `chat_view.go`). 이건 데이터가
+있는 곳(chatModel)에 visible deliverable을 둔다. 4-pane → 3-pane 교체
+자체는 surface 결정 후 별도 작업.
+
+이 결정이 정해지면 M6.3-M6.6를 그때 진입하면 된다 — 이미 짠 M6.1+M6.2
+데이터 층과 render 함수 stub들은 그대로 재사용.
