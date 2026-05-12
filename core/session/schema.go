@@ -8,7 +8,7 @@ import (
 
 // currentSchemaVersion is the latest schema version. When new migrations
 // are added, this constant must be incremented to match the new version.
-const currentSchemaVersion = 1
+const currentSchemaVersion = 2
 
 // migrations is a slice of SQL migration strings, indexed by version-1.
 // For example, migrations[0] is the SQL for version 1, migrations[1] is for
@@ -31,6 +31,25 @@ var migrations = []string{
 
 	CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status);
 	CREATE INDEX IF NOT EXISTS idx_sessions_created_at ON sessions(created_at);
+	`,
+	// v2 — plan_steps persistence (G3). M5.3 introduced plan_steps + verify
+	// as a state machine; M5.4 honest section flagged that the store was
+	// in-memory only and lost on daemon restart. This table is the durable
+	// backing — the in-memory planStore writes through on every mutation
+	// and re-hydrates on first access per session after a restart.
+	`
+	CREATE TABLE IF NOT EXISTS plan_steps (
+		session_id        TEXT NOT NULL,
+		step_id           INTEGER NOT NULL,
+		description       TEXT NOT NULL,
+		acceptance_check  TEXT NOT NULL,
+		status            TEXT NOT NULL DEFAULT 'pending',
+		last_failure      TEXT NOT NULL DEFAULT '',
+		updated_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		PRIMARY KEY (session_id, step_id)
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_plan_steps_session ON plan_steps(session_id);
 	`,
 }
 

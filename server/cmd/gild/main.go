@@ -68,6 +68,9 @@ func newServer(dbPath, sockPath, sessionsBase, authFile string, authMW *auth.Mid
 		_ = db.Close()
 		return nil, err
 	}
+	// G3 — plan_steps SQLite persistence. Daemon-wide store writes
+	// through to the same DB session.Migrate just prepared.
+	service.SetGlobalPlanDB(db)
 	lis, err := uds.Listen(sockPath)
 	if err != nil {
 		_ = db.Close()

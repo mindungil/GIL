@@ -21,7 +21,7 @@ func TestMigrate_FreshDB_CreatesTables(t *testing.T) {
 	row := db.QueryRow("SELECT version FROM schema_version ORDER BY version DESC LIMIT 1")
 	var v int
 	require.NoError(t, row.Scan(&v))
-	require.Equal(t, 1, v)
+	require.Equal(t, currentSchemaVersion, v)
 }
 
 func TestMigrate_Idempotent(t *testing.T) {

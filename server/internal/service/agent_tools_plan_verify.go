@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -32,9 +33,11 @@ import (
 // codex's "verify after edit" is a prompt suggestion; here it's a
 // state machine that gates progression.
 //
-// V1 scope: per-session in-memory store (lost on daemon restart, same
-// pattern as todoStore + chatHistory). SQLite persistence is a
-// follow-up alongside the chatHistory persistence work.
+// Persistence (G3): when a *sql.DB is wired via SetDB, every mutation
+// writes through to the plan_steps table (schema v2). On cache miss in
+// snapshot() the store lazy-loads from DB so daemon restarts no longer
+// drop verify-loop progress. The in-memory map remains the hot path —
+// DB I/O is per-mutation only.
 
 // --- plan store ------------------------------------------------------
 
@@ -49,16 +52,49 @@ type planStep struct {
 type planStore struct {
 	mu    sync.Mutex
 	items map[string][]*planStep
+	// db is the optional durable backing. When nil the store behaves
+	// exactly as the pre-G3 in-memory version — tests that don't care
+	// about persistence keep working untouched.
+	db *sql.DB
+	// loaded tracks which session IDs have been hydrated from DB so
+	// snapshot() skips the SELECT after the first hit. The map's
+	// presence-only — value is always struct{}{}.
+	loaded map[string]struct{}
 }
 
-var globalPlanStore = &planStore{items: make(map[string][]*planStep)}
+var globalPlanStore = &planStore{
+	items:  make(map[string][]*planStep),
+	loaded: make(map[string]struct{}),
+}
+
+// SetGlobalPlanDB wires the durable backing for plan_steps. Called once
+// at daemon startup by gild after session.Migrate has been run.
+// Subsequent calls overwrite (test harnesses use this).
+func SetGlobalPlanDB(db *sql.DB) { globalPlanStore.SetDB(db) }
+
+// SetDB attaches a *sql.DB to the store. Pass nil to detach (tests).
+// Safe to call multiple times.
+func (p *planStore) SetDB(db *sql.DB) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.db = db
+	// Reset loaded set so the next snapshot rehydrates against the
+	// new backing.
+	p.loaded = make(map[string]struct{})
+}
 
 // replace overwrites the plan for sessionID with the given descriptions.
 // Preserves status (and last_failure) for items whose
-// (description, acceptance_check) pair matches an existing entry.
+// (description, acceptance_check) pair matches an existing entry. When
+// a DB is wired the new plan is persisted: prior rows are deleted and
+// the new step list inserted in one transaction.
 func (p *planStore) replace(sessionID string, descs []planStepInput) []*planStep {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
+	// Hydrate from DB before constructing the diff so we preserve
+	// status across daemon restarts.
+	p.ensureLoadedLocked(sessionID)
 
 	prior := p.items[sessionID]
 	priorByKey := make(map[string]*planStep, len(prior))
@@ -87,12 +123,18 @@ func (p *planStore) replace(sessionID string, descs []planStepInput) []*planStep
 		}
 	}
 	p.items[sessionID] = out
+	if p.loaded == nil {
+		p.loaded = make(map[string]struct{})
+	}
+	p.loaded[sessionID] = struct{}{}
+	p.persistReplaceLocked(sessionID, out)
 	return out
 }
 
 func (p *planStore) snapshot(sessionID string) []*planStep {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.ensureLoadedLocked(sessionID)
 	src := p.items[sessionID]
 	out := make([]*planStep, len(src))
 	for i, s := range src {
@@ -113,6 +155,7 @@ func (p *planStore) markFailed(sessionID string, stepID int, errMsg string) erro
 func (p *planStore) transition(sessionID string, stepID int, status, lastFailure string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.ensureLoadedLocked(sessionID)
 	steps := p.items[sessionID]
 	if stepID < 1 || stepID > len(steps) {
 		return fmt.Errorf("step %d not found (plan has %d steps)", stepID, len(steps))
@@ -124,7 +167,90 @@ func (p *planStore) transition(sessionID string, stepID int, status, lastFailure
 	} else {
 		s.LastFailure = ""
 	}
+	p.persistTransitionLocked(sessionID, stepID, status, s.LastFailure)
 	return nil
+}
+
+// ensureLoadedLocked hydrates p.items[sessionID] from DB on first hit
+// after a SetDB call. Caller holds p.mu. When db is nil this is a
+// no-op (tests that bypass persistence keep working unchanged).
+func (p *planStore) ensureLoadedLocked(sessionID string) {
+	if p.loaded == nil {
+		p.loaded = make(map[string]struct{})
+	}
+	if p.db == nil {
+		return
+	}
+	if _, done := p.loaded[sessionID]; done {
+		return
+	}
+	if _, cached := p.items[sessionID]; cached {
+		p.loaded[sessionID] = struct{}{}
+		return
+	}
+
+	rows, err := p.db.Query(`SELECT step_id, description, acceptance_check, status, last_failure
+		FROM plan_steps WHERE session_id = ? ORDER BY step_id ASC`, sessionID)
+	if err != nil {
+		// Silent failure — pre-restart state is unrecoverable for
+		// this session, but the in-memory store stays consistent.
+		// The agent will see "no plan" and either declare a new one
+		// or proceed without verification gates.
+		return
+	}
+	defer rows.Close()
+	var steps []*planStep
+	for rows.Next() {
+		s := &planStep{}
+		if err := rows.Scan(&s.ID, &s.Description, &s.AcceptanceCheck,
+			&s.Status, &s.LastFailure); err != nil {
+			return
+		}
+		steps = append(steps, s)
+	}
+	if len(steps) > 0 {
+		p.items[sessionID] = steps
+	}
+	p.loaded[sessionID] = struct{}{}
+}
+
+// persistReplaceLocked writes the new plan to DB. Caller holds p.mu.
+// Failures are silent — durability is best-effort and the in-memory
+// store remains authoritative within the daemon's lifetime.
+func (p *planStore) persistReplaceLocked(sessionID string, steps []*planStep) {
+	if p.db == nil {
+		return
+	}
+	tx, err := p.db.Begin()
+	if err != nil {
+		return
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.Exec(`DELETE FROM plan_steps WHERE session_id = ?`, sessionID); err != nil {
+		return
+	}
+	for _, s := range steps {
+		if _, err := tx.Exec(`INSERT INTO plan_steps
+			(session_id, step_id, description, acceptance_check, status, last_failure)
+			VALUES (?, ?, ?, ?, ?, ?)`,
+			sessionID, s.ID, s.Description, s.AcceptanceCheck,
+			s.Status, s.LastFailure); err != nil {
+			return
+		}
+	}
+	_ = tx.Commit()
+}
+
+// persistTransitionLocked updates a single step's status. Caller holds
+// p.mu. Silent failure (same rationale as persistReplaceLocked).
+func (p *planStore) persistTransitionLocked(sessionID string, stepID int, status, lastFailure string) {
+	if p.db == nil {
+		return
+	}
+	_, _ = p.db.Exec(`UPDATE plan_steps SET status = ?, last_failure = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE session_id = ? AND step_id = ?`,
+		status, lastFailure, sessionID, stepID)
 }
 
 func renderPlan(steps []*planStep) string {
