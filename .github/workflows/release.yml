@@ -4,6 +4,17 @@ on:
   push:
     tags:
       - 'v*.*.*'
+  # Manual fallback so a release can be cut without a fresh tag push
+  # (e.g. when the original tag-push trigger was missed because the
+  # workflow didn't exist yet at the time of the tag). The dispatch
+  # form takes an optional tag input; when empty, GoReleaser uses
+  # the most recent tag reachable from the current ref.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (leave empty for latest)'
+        required: false
+        type: string
 
 permissions:
   contents: write   # publish GitHub release + upload assets
