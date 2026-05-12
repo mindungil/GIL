@@ -10,6 +10,7 @@ import (
 	"github.com/mindungil/gil/core/provider"
 	"github.com/mindungil/gil/core/session"
 	"github.com/mindungil/gil/core/specstore"
+	"github.com/mindungil/gil/core/tool"
 	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
 )
 
@@ -36,6 +37,25 @@ type chatTool interface {
 	description() string
 	schema() json.RawMessage
 	run(ctx context.Context, sessionID string, argsJSON json.RawMessage) (provider.ToolResult, error)
+}
+
+// coreToolAdapter wraps a core/tool.Tool (the run-mode tool shape) as
+// a chatTool. Used to surface MCP-advertised tools (which implement
+// core/tool.Tool) into the chat agent's registry without duplicating
+// the MCP client lifecycle. The sessionID parameter is ignored — MCP
+// tools are stateless from the registry's perspective; per-session
+// scoping lives in the cache that owns the underlying *mcp.Client.
+type coreToolAdapter struct{ t tool.Tool }
+
+func (c *coreToolAdapter) name() string            { return c.t.Name() }
+func (c *coreToolAdapter) description() string     { return c.t.Description() }
+func (c *coreToolAdapter) schema() json.RawMessage { return c.t.Schema() }
+func (c *coreToolAdapter) run(ctx context.Context, _ string, argsJSON json.RawMessage) (provider.ToolResult, error) {
+	res, err := c.t.Run(ctx, argsJSON)
+	if err != nil {
+		return provider.ToolResult{}, err
+	}
+	return provider.ToolResult{Content: res.Content, IsError: res.IsError}, nil
 }
 
 // chatToolRegistry holds the active toolset for a single Prompt

@@ -122,6 +122,15 @@ type RunService struct {
 	// session.
 	runCancels map[string]context.CancelFunc
 
+	// mcpClientCache holds the lazy-launched MCP subprocess clients +
+	// surfaced tools per session, keyed by session ID. Populated on
+	// the first call to ensureSessionMCPTools (typically the first
+	// chat turn after the spec is frozen) so chat-mode and run-mode
+	// share one set of MCP subprocesses instead of double-spawning.
+	// Lifetime is daemon-process; the V1 contract is "MCP servers stay
+	// up until the daemon stops" (matches codex / opencode behaviour).
+	mcpClientCache map[string]*mcpLaunchResult
+
 	// notifierFor produces the outbound notification fan-out for a given
 	// run. Overrideable in tests so the e2e suite can inject an
 	// httptest-backed notifier without spinning up notify-send. nil
@@ -142,7 +151,71 @@ func NewRunService(repo *session.Repo, sessionsBase string, factory ProviderFact
 		pendingClarifications: make(map[string]map[string]*pendingClarify),
 		runLoops:              make(map[string]*runner.AgentLoop),
 		runCancels:            make(map[string]context.CancelFunc),
+		mcpClientCache:        make(map[string]*mcpLaunchResult),
 	}
+}
+
+// ensureSessionMCPTools resolves the spec allowlist + global/project
+// MCP registries and lazily launches the named MCP servers for this
+// session. Returns the surfaced tool.Tool slice (empty when the spec
+// has no allowlist or no spec is frozen yet). Idempotent — repeat
+// calls return the cached set without re-spawning subprocesses.
+//
+// This is the chat-mode bridge: SessionService.Prompt calls it on
+// every prompt so the agent's tool registry includes MCP-advertised
+// tools alongside the built-in ones. Run-mode (executeRun) consumes
+// the same cache via a parallel path so chat → run → chat handoffs
+// reuse one subprocess set rather than respawning.
+//
+// stream may be nil; events are dropped silently in that case so
+// the helper stays usable from contexts that don't own a stream.
+func (s *RunService) ensureSessionMCPTools(ctx context.Context, sessionID string, spec *gilv1.FrozenSpec, workspaceDir string, stream *event.Stream) []tool.Tool {
+	if spec == nil || spec.Tools == nil || len(spec.Tools.McpServers) == 0 {
+		return nil
+	}
+	s.mu.Lock()
+	if cached, ok := s.mcpClientCache[sessionID]; ok && cached != nil {
+		s.mu.Unlock()
+		return cached.Tools
+	}
+	s.mu.Unlock()
+
+	// Resolve global + project registries the same way executeRun's
+	// MCP block does so the chat path produces an identical merged
+	// view (spec-pinned wins on collision).
+	regGlobal := ""
+	if layout, lerr := paths.FromEnv(); lerr == nil {
+		regGlobal = layout.MCPConfigFile()
+	}
+	regProject := ""
+	if spec.Workspace != nil && spec.Workspace.Path != "" {
+		regProject = workspace.LocalMCPFile(spec.Workspace.Path)
+	}
+	reg := &mcpregistry.Registry{GlobalPath: regGlobal, ProjectPath: regProject}
+	registryServers, regErr := reg.Load()
+	if regErr != nil {
+		// Soft fail: the spec-only map is still attempted. The
+		// per-server launch loop will report "not_in_registry" for
+		// any name only the registry could have provided.
+		registryServers = map[string]mcpregistry.Server{}
+	}
+	merged := mergeMCPServers(map[string]mcpregistry.Server{}, registryServers)
+	res := launchMCPServers(ctx, merged, spec.Tools.McpServers, workspaceDir, stream, nil)
+
+	s.mu.Lock()
+	// Double-check after lock — a concurrent caller may have raced
+	// and won; close our duplicate clients so the cache stays
+	// canonical.
+	if existing, ok := s.mcpClientCache[sessionID]; ok && existing != nil {
+		s.mu.Unlock()
+		for _, cli := range res.Clients {
+			_ = cli.Close()
+		}
+		return existing.Tools
+	}
+	s.mcpClientCache[sessionID] = &res
+	s.mu.Unlock()
+	return res.Tools
 }
 
 // RequestStop signals a detached run to terminate at its next

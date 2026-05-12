@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/mindungil/gil/core/paths"
 	"github.com/mindungil/gil/core/provider"
 	"github.com/mindungil/gil/core/session"
+	"github.com/mindungil/gil/core/specstore"
 	"github.com/mindungil/gil/core/workspace"
 	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
 )
@@ -173,6 +175,41 @@ Tools — subagent delegation (call to split work in parallel):
 - agent_status: non-blocking list of this session's children with
   their current status / iter / tokens / cost.
 
+Tools — runner control:
+- stop_run: signal a detached run to stop at its next cancellation
+  checkpoint. Use when the user asks to stop, halt, interrupt,
+  abort, or kill. No-op when no run is in flight.
+
+Tools — context steering (user-curated file scope):
+- add_to_workingset: pin specific file paths as in-scope for this
+  session. Use when the user explicitly names files to focus on or
+  asks you to look at specific files. Pass a paths array.
+- drop_from_workingset: remove file paths from the working set.
+  Use when the user says to forget, drop, ignore, or stop tracking
+  specific files.
+- list_workingset: show the paths currently in scope. Use when the
+  user asks what files are in focus.
+
+Tools — workspace rollback:
+- list_checkpoints: list shadow-git checkpoints newest first with
+  1-based step numbers. Use when the user asks for history, undo
+  points, or wants to roll back.
+- restore_checkpoint: roll the workspace back to a prior checkpoint
+  (step=1 oldest, step=-1 newest). Use when the user asks to undo,
+  revert, restore, or go back. Refuses while a run is active —
+  call stop_run first.
+
+Tools — session ops:
+- show_instructions: print this agent's tool families + the natural-
+  language surface contract. Use when the user asks "what can you
+  do", "who are you", or "what are your tools".
+- export_session: return a turn-by-turn transcript of this
+  conversation. Use when the user asks to export, save, share, or
+  copy the chat.
+- reset_session: clear the conversation history so the next prompt
+  starts fresh. Does NOT touch the workspace, frozen spec, or
+  checkpoints. Confirm intent (it cannot be undone) before calling.
+
 Workflow guidance:
 - For non-trivial coding tasks: declare a plan_steps plan first (each
   step with an acceptance_check command), then for each step: do the
@@ -291,6 +328,14 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 	// 5. Build the tool registry for this turn, filtered by the
 	//    agent's tool whitelist (empty whitelist = full registry).
 	registry := s.buildChatToolRegistry(s.runService()).filterByName(agent.Tools)
+
+	// MCP surface in chat-mode (chat-mode parity with run-mode).
+	// When the session has a frozen spec naming MCP servers, lazy-
+	// launch them via the per-session cache so chat → run → chat
+	// reuses one subprocess set. Tools get appended after the
+	// whitelist filter — the agent's whitelist concerns built-in
+	// tools, not the user's explicitly-pinned MCP servers.
+	registry = appendChatMCPTools(ctx, registry, s.runService(), sessionID, s.sessionsBase)
 	toolDefs := registry.defs()
 
 	// M6 Option A bridge: emit tool_call / tool_result / done events
@@ -479,6 +524,39 @@ func (s *SessionService) chatHistory() *chatHistory {
 		s.chatHist = newChatHistory()
 	}
 	return s.chatHist
+}
+
+// appendChatMCPTools surfaces the session's MCP-advertised tools
+// into the chat agent's registry. No-op when:
+//   - the run service isn't available (tests that bypass it)
+//   - no spec is frozen (chat-only / pre-freeze conversations)
+//   - the frozen spec's Tools.McpServers allowlist is empty
+//
+// Cache + launch live on RunService.ensureSessionMCPTools so chat
+// and run share one subprocess set. Adapter is necessary because
+// chat tools take a sessionID at run-time while core/tool.Tool
+// (which MCP RemoteTool implements) doesn't.
+func appendChatMCPTools(ctx context.Context, registry *chatToolRegistry, rs *RunService, sessionID, sessionsBase string) *chatToolRegistry {
+	if rs == nil || sessionsBase == "" {
+		return registry
+	}
+	store := specstore.NewStore(filepath.Join(sessionsBase, sessionID))
+	spec, err := store.Load()
+	if err != nil || spec == nil {
+		return registry
+	}
+	workspaceDir := ""
+	if spec.Workspace != nil {
+		workspaceDir = spec.Workspace.Path
+	}
+	mcpTools := rs.ensureSessionMCPTools(ctx, sessionID, spec, workspaceDir, nil)
+	if len(mcpTools) == 0 {
+		return registry
+	}
+	for _, t := range mcpTools {
+		registry.tools = append(registry.tools, &coreToolAdapter{t: t})
+	}
+	return registry
 }
 
 // firstTextPart pulls the text body off the first PromptPart that
