@@ -134,6 +134,20 @@ Tools — code I/O (scoped to the session working dir):
 - webfetch: GET an http(s) URL, capped at 256 KB / 15s. Use for docs,
   issue links, public web content.
 
+Tools — session lifecycle (call when the user wants autonomous run):
+- freeze_spec: persist a frozen spec (goal + optional
+  constraints/verification/budget/autonomy) onto the session. Required
+  before start_run. Call ONCE per session; a frozen spec is immutable.
+  Pass only the slots you've extracted from conversation —
+  goal.one_liner is the only hard requirement, everything else is
+  optional. Don't ask the user to re-state things you already know.
+- start_run: kick the autonomous run loop on a frozen spec. Detached;
+  use show_status / list_sessions to observe progress. Refuses
+  unfrozen sessions.
+- apply_diff: confirm what the agent's edits landed this turn. In chat
+  mode edits write directly to the working directory; this is for the
+  "apply it / 적용해" moment after show_diff.
+
 Workflow guidance:
 - For non-trivial coding tasks: declare a plan_steps plan first (each
   step with an acceptance_check command), then for each step: do the

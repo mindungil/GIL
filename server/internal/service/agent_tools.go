@@ -19,10 +19,12 @@ import (
 // to invoke based on the user's natural-language input — there is no
 // client-side dispatch.
 //
-// V1 ships read-only tools plus request_compact. Destructive write
-// tools (freeze_spec, start_run, apply_diff) are deferred to a follow-
-// up commit because they need careful design (spec-build state shape,
-// merge semantics).
+// V1 ships read-only meta tools, write/exec tools, M5 verify-loop
+// tools, and (since G1) the session-lifecycle tools — freeze_spec,
+// start_run, apply_diff. apply_diff is the honest minimal form: it
+// reports the turn-scoped tracker in chat mode and surfaces the
+// shadow diff in run mode; a separate merge-to-original verb is a
+// follow-up beyond G1.
 
 // chatTool is the interface the V1 chat agent loop uses for its tool
 // registry. Mirrors core/tool.Tool but takes a sessionID at Run time
@@ -89,16 +91,9 @@ func (r *chatToolRegistry) filterByName(allow []string) *chatToolRegistry {
 }
 
 // buildChatToolRegistry assembles the V1 tool registry for a Prompt
-// call. The agent has access to:
-//   - show_diff: read the unified diff vs the latest checkpoint
-//   - show_spec: read the frozen spec JSON
-//   - show_status: terse session metadata (status, iter, cost)
-//   - list_sessions: enumerate recent sessions
-//   - request_compact: ask the runner to compact at the next boundary
-//
-// Destructive tools (freeze_spec, start_run, apply_diff) are not yet
-// registered; the agent will tell the user it can't perform those
-// actions yet when asked.
+// call. Returns the FULL registry; agent profiles' tool whitelists are
+// applied separately via filterByName so we have one canonical list of
+// what the daemon supports.
 func (s *SessionService) buildChatToolRegistry(runSvc *RunService) *chatToolRegistry {
 	return &chatToolRegistry{
 		tools: []chatTool{
@@ -135,6 +130,13 @@ func (s *SessionService) buildChatToolRegistry(runSvc *RunService) *chatToolRegi
 			// pass" — discipline as a state machine, not a prompt.
 			&toolPlanSteps{},
 			&toolVerify{repo: s.repo, tracker: s.diffTracker},
+			// Session lifecycle (G1) — see agent_tools_lifecycle.go.
+			// freeze_spec is the FrozenSpec producer that was deleted
+			// with InterviewService in M3; without it the system_prompt's
+			// spec slot stays empty.
+			&toolFreezeSpec{sess: s, base: s.sessionsBase},
+			&toolStartRun{rs: runSvc},
+			&toolApplyDiff{rs: runSvc, tracker: s.diffTracker},
 		},
 	}
 }
