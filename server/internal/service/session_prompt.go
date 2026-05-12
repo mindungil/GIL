@@ -210,6 +210,13 @@ Tools — session ops:
   starts fresh. Does NOT touch the workspace, frozen spec, or
   checkpoints. Confirm intent (it cannot be undone) before calling.
 
+Additional tools — MCP servers (dynamic):
+- If the frozen spec lists MCP servers under tools.mcp_servers,
+  those servers' tools appear alongside the built-ins in this
+  turn's tool list. Their names are server-specific (e.g. "fs.read",
+  "github.create_issue"); inspect the tool list provided by the
+  runtime to see what's available.
+
 Workflow guidance:
 - For non-trivial coding tasks: declare a plan_steps plan first (each
   step with an acceptance_check command), then for each step: do the

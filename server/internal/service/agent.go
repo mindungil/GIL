@@ -41,13 +41,31 @@ var builtinAgents = map[string]*Agent{
 		Name:         "explore",
 		Description:  "Read-only investigator. Use for codebase questions where edits are not yet wanted.",
 		SystemPrompt: exploreChatSystemPrompt,
-		Tools:        []string{"read_file", "grep", "glob", "show_diff", "show_spec", "show_status", "list_sessions"},
+		// Read-only set: code/meta inspection + read-only §2.6 verbs
+		// (workingset listing, checkpoint listing, instruction/export).
+		Tools: []string{
+			"read_file", "grep", "glob",
+			"show_diff", "show_spec", "show_status", "list_sessions",
+			"list_workingset", "list_checkpoints",
+			"show_instructions", "export_session",
+		},
 	},
 	"plan": {
 		Name:         "plan",
 		Description:  "Planner. Investigates and produces an actionable plan without modifying the workspace.",
 		SystemPrompt: planChatSystemPrompt,
-		Tools:        []string{"read_file", "grep", "glob", "todowrite", "plan_steps", "show_diff", "show_spec", "show_status", "list_sessions"},
+		// Read-only + planning + context-steering. The workingset
+		// mutators are appropriate here because plan agents often
+		// pin/unpin files as the plan crystallises; they don't
+		// touch the workspace.
+		Tools: []string{
+			"read_file", "grep", "glob",
+			"todowrite", "plan_steps",
+			"show_diff", "show_spec", "show_status", "list_sessions",
+			"add_to_workingset", "drop_from_workingset", "list_workingset",
+			"list_checkpoints",
+			"show_instructions", "export_session",
+		},
 	},
 }
 
