@@ -63,6 +63,13 @@ type SessionService struct {
 	// run_bash tool's "polluted" flag. Reset at the start of every
 	// Prompt RPC. Always non-nil — constructor wires it.
 	diffTracker *turnDiffTracker
+
+	// Subagent (G5). registry caps concurrent children per root;
+	// releases pins the registry-decrement closures keyed by child id
+	// so wait_agent can fire them on terminal status. Always non-nil
+	// post-constructor.
+	subagentRegistry *subagentRegistry
+	subagentReleases *subagentReleaseRegistry
 }
 
 // NewSessionService returns a new SessionService backed by the provided Repo.
@@ -75,10 +82,33 @@ type SessionService struct {
 // session_test.go that construct SessionService with no filesystem.
 func NewSessionService(repo *session.Repo, progress ProgressGetter) *SessionService {
 	return &SessionService{
-		repo:        repo,
-		progress:    progress,
-		diffTracker: newTurnDiffTracker(),
+		repo:             repo,
+		progress:         progress,
+		diffTracker:      newTurnDiffTracker(),
+		subagentRegistry: newSubagentRegistry(),
+		subagentReleases: newSubagentReleaseRegistry(),
 	}
+}
+
+// registerSubagentRelease pins the release closure returned by
+// subagentRegistry.spawn so wait_agent can fire it on terminal status.
+// Called by toolSpawnAgent after a successful start; the symmetric
+// fire happens in releaseSubagent.
+func (s *SessionService) registerSubagentRelease(childID string, fn func()) {
+	if s.subagentReleases == nil {
+		return
+	}
+	s.subagentReleases.set(childID, fn)
+}
+
+// releaseSubagent fires (and removes) the release closure for childID.
+// Idempotent — second call is a no-op so the spawn/wait race doesn't
+// double-decrement the registry count.
+func (s *SessionService) releaseSubagent(childID string) {
+	if s.subagentReleases == nil {
+		return
+	}
+	s.subagentReleases.fire(childID)
 }
 
 // WithSessionsBase returns s mutated to use base as the on-disk root

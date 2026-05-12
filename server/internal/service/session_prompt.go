@@ -148,6 +148,20 @@ Tools — session lifecycle (call when the user wants autonomous run):
   mode edits write directly to the working directory; this is for the
   "apply it / 적용해" moment after show_diff.
 
+Tools — subagent delegation (call to split work in parallel):
+- spawn_agent: create a child agent running on a sliced copy of this
+  session's frozen spec. Pass a short label (lowercase) and a task
+  string the child receives as its first user message. Optional
+  agent_type (default / explore / plan) and spec_override (narrows
+  workspace / tools / max_iterations). Subject to V1 caps: max 8
+  active children per root, depth 1 only (children cannot spawn
+  further). Returns the child's agent_id + label.
+- wait_agent: block until a spawned child reaches terminal state
+  (done / failed / stopped / budget_exceeded). Identify by agent_id
+  (from spawn_agent) OR label. Default 600s timeout.
+- agent_status: non-blocking list of this session's children with
+  their current status / iter / tokens / cost.
+
 Workflow guidance:
 - For non-trivial coding tasks: declare a plan_steps plan first (each
   step with an acceptance_check command), then for each step: do the

@@ -137,6 +137,13 @@ func (s *SessionService) buildChatToolRegistry(runSvc *RunService) *chatToolRegi
 			&toolFreezeSpec{sess: s, base: s.sessionsBase},
 			&toolStartRun{rs: runSvc},
 			&toolApplyDiff{rs: runSvc, tracker: s.diffTracker},
+			// Subagent delegation (G5) — see agent_tools_subagent.go.
+			// spawn_agent creates a child session with a sliced spec
+			// and detached run; wait_agent blocks until terminal;
+			// agent_status peeks without blocking.
+			&toolSpawnAgent{sess: s, rs: runSvc, registry: s.subagentRegistry, base: s.sessionsBase},
+			&toolWaitAgent{sess: s},
+			&toolAgentStatus{sess: s},
 		},
 	}
 }
