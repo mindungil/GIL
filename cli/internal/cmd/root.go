@@ -122,6 +122,15 @@ func Root() *cobra.Command {
 		// switch; --no-chat (and the explicit `gil chat` subcommand)
 		// override it for power users who want one form regardless of
 		// where stdout points.
+		//
+		// G4 NOTE — followup §2.6 violations #42 / #44 flag this branch
+		// as "two surfaces, not one." It is a known compromise: bare
+		// `gil | grep ...` scripts depend on the summary output and
+		// removing it would break headless workflows. Resolution path
+		// (TBD): expose JSON-only `gil --output json` summary equivalents
+		// in non-TTY mode while keeping chat as the only visible surface.
+		// Until that lands, leave the branch with explicit comments
+		// rather than pretending it isn't there.
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if !noChat && stdoutIsTTY() {
 				// Phase 26.6: TTY chat surface lives in the tui module —

@@ -41,26 +41,33 @@ var noIntentRouter bool
 // repl.NewGRPCClient) and a Renderer (StdoutChatRenderer) and hands
 // off to repl.Run.
 func chatCmd() *cobra.Command {
-	var socket, providerName, model string
+	var socket, providerName, model, workingDir string
 	c := &cobra.Command{
 		Use:     "chat",
 		Aliases: []string{"talk"},
 		Short:   "Drop into the gil conversational surface (no verbs needed)",
-		Long: `Start the gil chat surface. Tell the agent what you want to do in
-plain language; gil routes your message to the right downstream flow
-(interview for new work, resume for prior sessions, status for a
-glance at what's running).
+		Long: `Start the gil chat surface. Type what you want to do in plain
+language; the agent owns all verb dispatch via tools (show_diff,
+freeze_spec, start_run, etc.). There are no slash commands and no
+client-side routing — every prompt streams straight to the daemon.
 
-The same surface is launched when you run bare gil in an interactive
-terminal — gil chat is the explicit form for piped or scripted use.`,
+Bare ` + "`gil`" + ` in a TTY launches the same surface. ` + "`gil chat`" + ` is the
+explicit form for piped/scripted use and for the rare case the user
+wants the chat surface regardless of TTY state.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runChat(cmd, socket, providerName, model)
 		},
 	}
 	c.Flags().StringVar(&socket, "socket", defaultSocket(), "gild UDS socket path")
-	c.Flags().StringVar(&providerName, "provider", "", "LLM provider for the interview (anthropic|openai|openrouter|vllm|mock)")
-	c.Flags().StringVar(&model, "model", "", "LLM model id for the interview engine (empty → provider default)")
+	c.Flags().StringVar(&providerName, "provider", "", "LLM provider (anthropic|openai|openrouter|vllm|mock); empty → workspace config")
+	c.Flags().StringVar(&model, "model", "", "LLM model id; empty → provider default or workspace config")
+	// G4 — #32 followup: the chat handler reads --working-dir via
+	// cmd.Flags().GetString but the flag wasn't registered here, so
+	// the value silently fell through to os.Getwd(). Register it so
+	// `gil chat --working-dir /other/path` actually pins the session
+	// to that directory.
+	c.Flags().StringVar(&workingDir, "working-dir", "", "project working directory; empty → current working directory")
 	return c
 }
 
@@ -69,10 +76,9 @@ terminal — gil chat is the explicit form for piped or scripted use.`,
 // renderer, then runs repl.Run until the user types /quit or hits EOF.
 //
 // providerName and model are forwarded into the GRPCClient via
-// SetProvider so they reach the daemon's StartInterview RPC. Empty
-// values defer to the daemon's layered workspace-config defaults
-// (server/internal/service/interview.go applies workspace.Resolve when
-// both are empty).
+// SetProvider so they reach the daemon's SessionService.Prompt RPC
+// (InterviewService removed in M3). Empty values defer to the layered
+// workspace-config defaults applied by session_prompt.go.
 func runChat(cmd *cobra.Command, socket, providerName, model string) error {
 	out := cmd.OutOrStdout()
 	in := cmd.InOrStdin()
