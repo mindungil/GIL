@@ -138,6 +138,13 @@ message PromptRequest {
   // through to the daemon's layered config (global + project +
   // factory default).
   ModelChoice model = 4;
+  // working_dir, when session_id is empty, seeds the auto-created
+  // session's working directory so the agent's run_bash / write_file
+  // tools have a place to operate. Ignored when session_id is set
+  // (the existing session's working_dir wins). Empty falls through
+  // to "no working dir" — write/exec tools then refuse with a clear
+  // error rather than silently writing to /tmp.
+  string working_dir = 5;
 }
 
 // PromptPart is a single piece of the user message. V1 ships only the

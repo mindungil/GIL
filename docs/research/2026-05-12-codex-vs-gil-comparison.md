@@ -314,3 +314,113 @@ When those two are in place, the perf comparison can be parameterised
 on a small task pool (5–10 SWE-bench Lite tasks) and run to
 completion in a couple of hours. Until then, the structural
 comparison above is the most we can do without simulating outcomes.
+
+## 16 · Execution perf — OSLab qwen3.6-27b (2026-05-12)
+
+We did run a live comparison on the same vLLM endpoint
+(`http://113.198.66.44:10010/v1`, model `qwen3.6-27b`, OSLab-hosted).
+Both harnesses configured to talk to the same endpoint over OpenAI-
+compatible Chat Completions. codex 0.50.0 (`@openai/codex@0.50.0`
+npm tarball, last release that still supports `wire_api = "chat"`;
+0.125+ dropped it in favor of the Responses API only). gil v0.2.0
+(`v0.2.0-2-gca49a78`, freshly `make install`-ed off main).
+
+A bug found in the process: gil's `chat --working-dir` flag was
+registered (G4 follow-up) but didn't propagate to the auto-created
+session's `working_dir`, so the agent's tools failed with "session
+has no working directory." Fixed in the same session: added
+`working_dir = 5;` to `PromptRequest`, plumbed through SDK + server
+auto-create path. The benchmark below is on the post-fix binary.
+
+### Task pool
+
+Three small tasks, each a clean scratch dir:
+
+- **T1 — Write quicksort from scratch.** Empty Go module dir. Goal:
+  create `qsort.go` (`Quicksort([]int) []int`), `qsort_test.go` with
+  ≥3 cases (empty / reverse / already-sorted), run `go test`,
+  confirm pass. Requires 4–6 tool calls.
+- **T2 — Fix an off-by-one bug.** Given `sum.go` with
+  `for i := lo; i < hi; i++` (loop should be `<=`) and a failing
+  test. Goal: read, fix, re-run, confirm pass. Requires 3–4 tool
+  calls.
+- **T3 — Explain DFS.** Text-only prompt. "Explain in 2-3 sentences
+  what a depth-first search is. No code, just prose." Requires 0
+  tool calls.
+
+### Results
+
+| Task | gil v0.2.0 | codex 0.50.0 |
+|---|---|---|
+| Sanity ("Reply: SANITY_OK") | 2.2 s ✓ | 2.3 s ✓ |
+| T1 quicksort (multi-turn tool) | **22.6 s ✓** — `go test` pass | ✗ — 400 mid-stream on 2nd turn |
+| T2 off-by-one fix (multi-turn tool) | **9.5 s ✓** — fixed, test pass | ✗ — 400 mid-stream after 1st tool call |
+| T3 DFS explain (text-only) | 3.2 s ✓ | 3.2 s ✓ |
+
+### What broke for codex
+
+codex 0.50.0's vllm path consistently fails on **multi-turn tool
+flows**. First tool call (e.g. `find *.go`) succeeds; the very next
+turn — when codex sends the assistant-message-with-tool_call back to
+vllm — vllm replies HTTP 400:
+
+```
+{"error":{"message":"Extra data: line 1 column 67 (char 66)",
+ "type":"BadRequestError","param":null,"code":400}}
+```
+
+Reproduced across two distinct multi-turn tasks (T1, T2), with
+retries disabled (`stream_max_retries=0`, `request_max_retries=0`).
+Same prompts run text-only (T3) complete cleanly. The bug is
+codex's specific tool-call serialisation that vllm-qwen's
+chat-completions implementation cannot parse. codex 0.125+ removed
+chat-API support entirely (only Responses now), which is the
+opposite direction from what'd fix this.
+
+This is itself a comparison datapoint: gil's vllm path is solid
+(7 tool calls / 4 verify rounds / 1 plan_steps in T1, all green);
+codex's vllm path can only do single-turn or text-only.
+
+### gil tool-call breakdown (T1)
+
+```
+plan_steps  →  Initialize Go module + run go test (2 acceptance checks)
+run_bash    →  go mod init qsort
+write_file  →  qsort.go (632 bytes)
+write_file  →  qsort_test.go (1173 bytes)
+verify      →  go test -v ./... → exit 0, 575 ms, 5/5 PASS
+```
+
+Plan + verify discipline (M5) actually fires — `verified` status
+flips because the acceptance check succeeded, not because the agent
+asserted success. This is the gil-only state-machine discipline
+described in §4 of this doc; in the live run it cost ~600 ms (the
+go-test wall time) for full ground-truth on completion.
+
+### Honest caveats
+
+- **Sample size.** Three tasks isn't a benchmark, it's a smoke
+  test. Real comparison needs N≥20 SWE-bench Lite tasks across a
+  spread of difficulty.
+- **Provider asymmetry.** codex hit a vllm tool-call bug that
+  isn't fundamental — it'd presumably work against
+  `api.openai.com`. gil's Anthropic-native + OpenAI-compatible
+  paths are both well-tested. A fair perf comparison needs the
+  *same model on a fully-conformant provider* on both sides.
+- **Iterations / tokens not measured.** gil emits per-turn metrics
+  in its event stream; codex's `--exec` output doesn't break those
+  out without parsing the rollout JSON. Both harnesses ran on
+  whatever budget the agent decided to spend; nothing imposed a
+  cap.
+
+### Takeaway from the live run
+
+For an offline / on-prem / OSS-LLM deployment story, **gil
+empirically works on a real vllm endpoint with tool calls; codex
+0.50.0 does not**. For text-only conversational use both finish at
+parity speed. For the comparison to extend further (token counts,
+iterations, pass rates at scale) we need a fully OpenAI-conformant
+endpoint codex's vllm path can use — or, equivalently, a future
+codex version that re-supports the chat API + a vllm build with
+strict OpenAI tool_call format compliance. Neither is in the
+current environment.

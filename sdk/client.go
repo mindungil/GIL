@@ -307,6 +307,12 @@ type PromptOptions struct {
 	Agent     string
 	Provider  string
 	Model     string
+	// WorkingDir is forwarded to the daemon when SessionID is empty
+	// so the auto-created session is rooted at the caller's chosen
+	// path. Ignored when SessionID names an existing session (its
+	// stored working_dir wins). Empty means "unrooted" — tools then
+	// refuse with a clear error rather than silently writing to /tmp.
+	WorkingDir string
 }
 
 // Prompt opens a streaming chat turn against the daemon's agent
@@ -318,8 +324,9 @@ type PromptOptions struct {
 // finally DonePart. Caller drains the returned stream until EOF.
 func (c *Client) Prompt(ctx context.Context, opt PromptOptions) (gilv1.SessionService_PromptClient, error) {
 	req := &gilv1.PromptRequest{
-		SessionId: opt.SessionID,
-		Agent:     opt.Agent,
+		SessionId:  opt.SessionID,
+		Agent:      opt.Agent,
+		WorkingDir: opt.WorkingDir,
 		Parts: []*gilv1.PromptPart{
 			{Body: &gilv1.PromptPart_Text{Text: opt.Text}},
 		},

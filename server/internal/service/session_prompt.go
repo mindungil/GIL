@@ -255,7 +255,15 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 	if sessionID == "" {
 		hint := firstTextPart(req.GetParts())
 		hint = truncateGoalHint(hint, 80)
-		sess, err := s.repo.Create(ctx, session.CreateInput{GoalHint: hint})
+		// PromptRequest.working_dir seeds the auto-created session's
+		// working directory so the agent's run_bash / write_file
+		// tools have a place to operate. Empty value leaves the
+		// session unrooted; tools then refuse with a clear error
+		// rather than silently writing to /tmp.
+		sess, err := s.repo.Create(ctx, session.CreateInput{
+			GoalHint:   hint,
+			WorkingDir: req.GetWorkingDir(),
+		})
 		if err != nil {
 			return status.Errorf(codes.Internal, "auto-create session: %v", err)
 		}

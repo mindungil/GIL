@@ -174,10 +174,11 @@ func (g *GRPCClient) SendPrompt(ctx context.Context, prompt string) error {
 	done := g.chunkDone
 
 	stream, err := g.sdk.Prompt(ctx, sdk.PromptOptions{
-		SessionID: g.activeSess,
-		Text:      prompt,
-		Provider:  g.providerName,
-		Model:     g.model,
+		SessionID:  g.activeSess,
+		Text:       prompt,
+		Provider:   g.providerName,
+		Model:      g.model,
+		WorkingDir: g.workingDir,
 	})
 	if err != nil {
 		return errmap.WrapRPCError(err)

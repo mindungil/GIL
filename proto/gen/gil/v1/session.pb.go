@@ -555,7 +555,14 @@ type PromptRequest struct {
 	// model overrides workspace.Resolve when set. Empty fields fall
 	// through to the daemon's layered config (global + project +
 	// factory default).
-	Model         *ModelChoice `protobuf:"bytes,4,opt,name=model,proto3" json:"model,omitempty"`
+	Model *ModelChoice `protobuf:"bytes,4,opt,name=model,proto3" json:"model,omitempty"`
+	// working_dir, when session_id is empty, seeds the auto-created
+	// session's working directory so the agent's run_bash / write_file
+	// tools have a place to operate. Ignored when session_id is set
+	// (the existing session's working_dir wins). Empty falls through
+	// to "no working dir" — write/exec tools then refuse with a clear
+	// error rather than silently writing to /tmp.
+	WorkingDir    string `protobuf:"bytes,5,opt,name=working_dir,json=workingDir,proto3" json:"working_dir,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -616,6 +623,13 @@ func (x *PromptRequest) GetModel() *ModelChoice {
 		return x.Model
 	}
 	return nil
+}
+
+func (x *PromptRequest) GetWorkingDir() string {
+	if x != nil {
+		return x.WorkingDir
+	}
+	return ""
 }
 
 // PromptPart is a single piece of the user message. V1 ships only the
@@ -1224,13 +1238,15 @@ const file_gil_v1_session_proto_rawDesc = "" +
 	"\x02id\x18\x01 \x01(\tR\x02id\"1\n" +
 	"\x0eDeleteResponse\x12\x1f\n" +
 	"\vfreed_bytes\x18\x01 \x01(\x03R\n" +
-	"freedBytes\"\x99\x01\n" +
+	"freedBytes\"\xba\x01\n" +
 	"\rPromptRequest\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12(\n" +
 	"\x05parts\x18\x02 \x03(\v2\x12.gil.v1.PromptPartR\x05parts\x12\x14\n" +
 	"\x05agent\x18\x03 \x01(\tR\x05agent\x12)\n" +
-	"\x05model\x18\x04 \x01(\v2\x13.gil.v1.ModelChoiceR\x05model\"*\n" +
+	"\x05model\x18\x04 \x01(\v2\x13.gil.v1.ModelChoiceR\x05model\x12\x1f\n" +
+	"\vworking_dir\x18\x05 \x01(\tR\n" +
+	"workingDir\"*\n" +
 	"\n" +
 	"PromptPart\x12\x14\n" +
 	"\x04text\x18\x01 \x01(\tH\x00R\x04textB\x06\n" +
