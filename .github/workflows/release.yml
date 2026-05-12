@@ -29,6 +29,11 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0   # full history + tags for changelog
+          # When triggered via workflow_dispatch with a tag input,
+          # check out that tag so goreleaser sees HEAD == tag (its
+          # release-mode invariant). On a real tag-push event the
+          # ref is already the tag, so the fallback is github.ref.
+          ref: ${{ github.event.inputs.tag || github.ref }}
 
       - name: Set up Go
         uses: actions/setup-go@v5
