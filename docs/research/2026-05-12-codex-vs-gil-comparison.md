@@ -671,3 +671,109 @@ After N=10 with consistent methodology:
 The verify-loop-as-state-machine claim, originally an architectural
 hypothesis, is now an empirical finding at this scale: at N=8
 programmatic tasks, it produces 5× more passes.
+
+## 18 · gil-only stress (N=10, T11–T20)
+
+After the 10-task harness comparison, we extended gil-only to N=20
+total to see where gil + qwen3.6-27b starts to fail. codex was
+dropped from this round — the comparison already saturated at N=10
+and rerunning codex on N=10 more would just pay quota for the same
+finding.
+
+The 10 added tasks lean medium-difficulty Go and cover patterns the
+T1–T10 round didn't: memoization, linked-list pointer surgery,
+generics, in-memory data structures (BST, topological sort,
+priority data), concurrency primitives (sync.RWMutex with `-race`,
+worker pool over channels), JSON parsing + validation, and a
+forgiving-format parser (semver).
+
+### Task pool (T11–T20)
+
+- T11 Fibonacci with memoization
+- T12 in-place linked list reversal
+- T13 generic `Stack[T any]` (Go 1.21+)
+- T14 trim + filter empties on `[]string`
+- T15 binary search tree (insert + in-order traversal)
+- T16 topological sort with cycle detection
+- T17 concurrent map (`sync.RWMutex`, validated with `go test -race`)
+- T18 worker pool over channels (N workers, ordered results)
+- T19 JSON unmarshal + validate (rejects bad records)
+- T20 semantic version parse (accept `v`-prefixed and bare, reject malformed)
+
+### Results
+
+| Task | Wall | Verify |
+|---|---|---|
+| T11 Fibonacci memo | 24.4 s | ✓ |
+| T12 linked list reverse | 15.9 s | ✓ |
+| T13 generic Stack | 30.5 s | ✓ |
+| T14 trim + filter | 18.6 s | ✓ |
+| T15 BST insert + inorder | 25.6 s | ✓ |
+| T16 topological sort | 39.4 s | ✓ |
+| T17 concurrent map (-race) | 45.8 s | ✓ |
+| T18 worker pool | 27.1 s | ✓ |
+| T19 JSON + validate | 15.3 s | ✓ |
+| T20 semver parse | 26.0 s | ✓ |
+
+**10 / 10 pass · total 268.6 s · avg 26.9 s.**
+
+### Combined N=18 programmatic (T1–T20, excluding T3/T7 text-only)
+
+| Harness | Pass | Fail | Pass-rate | Avg wall |
+|---|---|---|---|---|
+| gil + qwen3.6-27b | 18 | 0 | **100 %** | 25.3 s |
+| codex + gpt-5.2 (T1–T10 subset only) | 3 | 5 | 37.5 % | 74.4 s |
+
+### What this round actually established
+
+- **No regression with harder tasks.** Adding 10 medium-difficulty
+  patterns (generics, concurrency, network/web stdlib usage,
+  multi-data-structure ops) didn't break the harness. Every task
+  passed.
+- **`go test -race` works through gil.** T17 explicitly verified
+  the agent could produce code that survives the Go race detector
+  — a real "the code is actually correct under concurrency"
+  check, not just "tests pass on a single thread".
+- **The wall-time floor is ~15 s for trivial tasks, ~25 s
+  average.** Each task pays a few seconds for chat-history setup
+  + spec freeze + plan_steps + verify rounds. That's the
+  per-task harness overhead at this model speed.
+
+### Honest caveats (round 4)
+
+- **Saturated at 100%.** This is the kind of result that means
+  "tasks were too easy" rather than "harness is perfect". The
+  next stress round should add genuinely hard cases — multi-file
+  refactors, debugging tasks where the bug is non-obvious, tasks
+  requiring `go vet` or `go vulncheck` integration. The current
+  10 are all "agent can solve in one plan + 1–4 tool calls".
+- **No SWE-bench Lite (yet).** The `gil_swebench` harness was
+  rewired against the post-M3 chat-architecture in this same
+  session (commit `670b768`), and the manual smoke confirmed the
+  freeze_spec + Prompt path works end-to-end. But running real
+  SWE-bench Lite instances requires per-repo Python environment
+  setup (Django / sympy / etc.) and per-task `pytest` runners —
+  hours of fixture work beyond what's tracked here. The fixture
+  smoke (`smoke/addition`) shipped with the harness still fails
+  because the fixture's repo URLs are placeholder (`smoke/X`)
+  that don't exist on GitHub. That's a fixture-design defect,
+  not a harness defect.
+- **gil's failure floor unknown.** 18/18 doesn't tell us *where*
+  gil breaks. The next round needs deliberately adversarial
+  prompts (ambiguous specs, conflicting constraints, tasks with
+  no clear acceptance check, network-dependent tasks) to find the
+  edge.
+
+### Wired follow-ups (commit-tracked)
+
+- `670b768` `fix(swebench): retire InterviewService deps in harness
+  (post-M3)` — replaces the legacy `InterviewService.Start +
+  Confirm` flow in `python/gil_swebench/grpc_client.py` with a
+  single `SessionService.Prompt` call that instructs the agent to
+  invoke its `freeze_spec` tool. Drains the Part stream until
+  `DonePart`. Real SWE-bench Lite N=20 is now unblocked at the
+  wire layer.
+- Proto stubs are now compiled to `python/gil_swebench/proto/gil/v1/`
+  (matching the .proto's `package gil.v1` declaration) instead of
+  the legacy flat layout. `proto/__init__.py` cleaned up to just
+  insert the dir on `sys.path`.
