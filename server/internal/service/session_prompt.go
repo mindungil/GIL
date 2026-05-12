@@ -2,17 +2,21 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"sync"
 	"time"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/mindungil/gil/core/event"
 	"github.com/mindungil/gil/core/paths"
 	"github.com/mindungil/gil/core/provider"
 	"github.com/mindungil/gil/core/session"
+	"github.com/mindungil/gil/core/specstore"
 	"github.com/mindungil/gil/core/workspace"
 	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
 )
@@ -66,6 +70,15 @@ func (h *chatHistory) append(sid string, msg provider.Message) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.all[sid] = append(h.all[sid], msg)
+}
+
+// reset clears the message log for sid so a subsequent Prompt starts
+// the agent loop with no prior context. Used by the reset_session
+// verb tool (§2.6) when the user asks to "start over" or "clear chat".
+func (h *chatHistory) reset(sid string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.all, sid)
 }
 
 // WithProviderFactory wires the same ProviderFactory used by Run /
@@ -161,6 +174,48 @@ Tools — subagent delegation (call to split work in parallel):
   (from spawn_agent) OR label. Default 600s timeout.
 - agent_status: non-blocking list of this session's children with
   their current status / iter / tokens / cost.
+
+Tools — runner control:
+- stop_run: signal a detached run to stop at its next cancellation
+  checkpoint. Use when the user asks to stop, halt, interrupt,
+  abort, or kill. No-op when no run is in flight.
+
+Tools — context steering (user-curated file scope):
+- add_to_workingset: pin specific file paths as in-scope for this
+  session. Use when the user explicitly names files to focus on or
+  asks you to look at specific files. Pass a paths array.
+- drop_from_workingset: remove file paths from the working set.
+  Use when the user says to forget, drop, ignore, or stop tracking
+  specific files.
+- list_workingset: show the paths currently in scope. Use when the
+  user asks what files are in focus.
+
+Tools — workspace rollback:
+- list_checkpoints: list shadow-git checkpoints newest first with
+  1-based step numbers. Use when the user asks for history, undo
+  points, or wants to roll back.
+- restore_checkpoint: roll the workspace back to a prior checkpoint
+  (step=1 oldest, step=-1 newest). Use when the user asks to undo,
+  revert, restore, or go back. Refuses while a run is active —
+  call stop_run first.
+
+Tools — session ops:
+- show_instructions: print this agent's tool families + the natural-
+  language surface contract. Use when the user asks "what can you
+  do", "who are you", or "what are your tools".
+- export_session: return a turn-by-turn transcript of this
+  conversation. Use when the user asks to export, save, share, or
+  copy the chat.
+- reset_session: clear the conversation history so the next prompt
+  starts fresh. Does NOT touch the workspace, frozen spec, or
+  checkpoints. Confirm intent (it cannot be undone) before calling.
+
+Additional tools — MCP servers (dynamic):
+- If the frozen spec lists MCP servers under tools.mcp_servers,
+  those servers' tools appear alongside the built-ins in this
+  turn's tool list. Their names are server-specific (e.g. "fs.read",
+  "github.create_issue"); inspect the tool list provided by the
+  runtime to see what's available.
 
 Workflow guidance:
 - For non-trivial coding tasks: declare a plan_steps plan first (each
@@ -280,7 +335,40 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 	// 5. Build the tool registry for this turn, filtered by the
 	//    agent's tool whitelist (empty whitelist = full registry).
 	registry := s.buildChatToolRegistry(s.runService()).filterByName(agent.Tools)
+
+	// MCP surface in chat-mode (chat-mode parity with run-mode).
+	// When the session has a frozen spec naming MCP servers, lazy-
+	// launch them via the per-session cache so chat → run → chat
+	// reuses one subprocess set. Tools get appended after the
+	// whitelist filter — the agent's whitelist concerns built-in
+	// tools, not the user's explicitly-pinned MCP servers.
+	registry = appendChatMCPTools(ctx, registry, s.runService(), sessionID, s.sessionsBase)
 	toolDefs := registry.defs()
+
+	// M6 Option A bridge: emit tool_call / tool_result / done events
+	// on the per-session event stream so giltui's existing Tail
+	// subscription sees chat agent activity (not just run-mode). The
+	// stream is allocated lazily by ensureSessionStream and persists
+	// across the chat → run handoff. evtStream may be nil in tests
+	// that bypass RunService (s.runService() returns nil); the helper
+	// closures below no-op in that case.
+	var evtStream *event.Stream
+	if rs := s.runService(); rs != nil {
+		evtStream = rs.ensureSessionStream(sessionID)
+	}
+	emitChatEvent := func(typ string, source event.Source, kind event.Kind, payload map[string]any) {
+		if evtStream == nil {
+			return
+		}
+		data, _ := json.Marshal(payload)
+		_, _ = evtStream.Append(event.Event{
+			Timestamp: time.Now().UTC(),
+			Source:    source,
+			Kind:      kind,
+			Type:      typ,
+			Data:      data,
+		})
+	}
 
 	// 6. Multi-turn agent loop. Each iteration calls the LLM; if it
 	//    emits tool_calls, we dispatch them, append the results, and
@@ -351,6 +439,14 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 			}); err != nil {
 				return err
 			}
+			// Bridge to per-session event stream (M6 Option A) so giltui's
+			// Tail subscription mirrors the call exactly the same way it
+			// mirrors run-mode tool_calls.
+			emitChatEvent("tool_call", event.SourceAgent, event.KindAction, map[string]any{
+				"id":    call.ID,
+				"name":  call.Name,
+				"input": string(call.Input),
+			})
 			result, runErr := dispatchTool(ctx, registry, sessionID, call)
 			if runErr != nil {
 				result = provider.ToolResult{
@@ -369,6 +465,12 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 			}); err != nil {
 				return err
 			}
+			emitChatEvent("tool_result", event.SourceEnvironment, event.KindObservation, map[string]any{
+				"id":       call.ID,
+				"name":     call.Name,
+				"content":  result.Content,
+				"is_error": result.IsError,
+			})
 		}
 
 		// Feed the tool results back as a synthetic user turn (per
@@ -429,6 +531,39 @@ func (s *SessionService) chatHistory() *chatHistory {
 		s.chatHist = newChatHistory()
 	}
 	return s.chatHist
+}
+
+// appendChatMCPTools surfaces the session's MCP-advertised tools
+// into the chat agent's registry. No-op when:
+//   - the run service isn't available (tests that bypass it)
+//   - no spec is frozen (chat-only / pre-freeze conversations)
+//   - the frozen spec's Tools.McpServers allowlist is empty
+//
+// Cache + launch live on RunService.ensureSessionMCPTools so chat
+// and run share one subprocess set. Adapter is necessary because
+// chat tools take a sessionID at run-time while core/tool.Tool
+// (which MCP RemoteTool implements) doesn't.
+func appendChatMCPTools(ctx context.Context, registry *chatToolRegistry, rs *RunService, sessionID, sessionsBase string) *chatToolRegistry {
+	if rs == nil || sessionsBase == "" {
+		return registry
+	}
+	store := specstore.NewStore(filepath.Join(sessionsBase, sessionID))
+	spec, err := store.Load()
+	if err != nil || spec == nil {
+		return registry
+	}
+	workspaceDir := ""
+	if spec.Workspace != nil {
+		workspaceDir = spec.Workspace.Path
+	}
+	mcpTools := rs.ensureSessionMCPTools(ctx, sessionID, spec, workspaceDir, nil)
+	if len(mcpTools) == 0 {
+		return registry
+	}
+	for _, t := range mcpTools {
+		registry.tools = append(registry.tools, &coreToolAdapter{t: t})
+	}
+	return registry
 }
 
 // firstTextPart pulls the text body off the first PromptPart that

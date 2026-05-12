@@ -246,5 +246,31 @@ A부터 시작. 가장 작고 검증 가능. C는 A가 잘 돌아간 다음 B를
 B만 단독 진입은 권하지 않음 — chat surface 캐릭터를 바꾸는데 giltui가 그대로
 면 일관성이 깨짐.
 
+### 진행 상태 (2026-05-12)
+
+**Option A V1 landed**. 구현 분기:
+
+- **A.1** giltui Model에 `chatTree *AgentTree` 필드 추가 (`model.go`).
+  세션 전환 시 reset, lazy allocate via `chatTreeOrNew()`.
+- **A.2** Separate Prompt subscription 대신 더 가벼운 경로 채택:
+  `SessionService.Prompt`가 `tool_call` / `tool_result` 이벤트를
+  per-session event stream (`RunService.ensureSessionStream`)으로
+  bridge. 기존 `RunService.Tail` 한 굴뚝으로 chat-mode + run-mode
+  활동이 통합. giltui Model은 별도 RPC 없이 기존 Tail이 이 이벤트들을
+  받음.
+- **A.3** `Tail`이 chat-only 세션도 따라가도록 RUNNING 게이트 완화 +
+  Tail이 stream을 lazy-allocate (`ensureSessionStream`). NotFound은
+  세션 자체가 없을 때만 반환.
+- **A.4** `view.go` `renderMainColumn`이 `chatTree`에 노드가 있으면
+  Activity pane을 Agent Tree로 교체 (있는 그대로 render되는 single-pane).
+  비어 있으면 기존 activity 행 유지.
+- **A.5** 키바인딩 추가 보류 — V1은 read-only display로 충분.
+- **A.6** unit 테스트 9개 (`chat_tree_bridge_test.go`): nil-guard,
+  iteration_start, tool_call → 노드, tool_result → 상태 전이,
+  malformed JSON, render maxRows / empty.
+
+후속 (Option B 또는 C): chat surface 측 multi-pane. Surface 결정이
+사용자 결정사항이라 별도 분기.
+
 Estimated ordering not committed — 위 옵션은 surface 결정 후 사용자가 phase
 번호 부여.

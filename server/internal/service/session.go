@@ -70,6 +70,15 @@ type SessionService struct {
 	// post-constructor.
 	subagentRegistry *subagentRegistry
 	subagentReleases *subagentReleaseRegistry
+
+	// workingSet holds the user-curated per-session file paths
+	// surfaced through add_to_workingset / drop_from_workingset /
+	// list_workingset (§2.6 verb-tool wave). Lazily allocated on
+	// first tool invocation so existing constructors stay backward-
+	// compatible. workingSetMu protects construction; the workingSet
+	// has its own internal mutex for entry access.
+	workingSetMu sync.Mutex
+	workingSet   *workingSet
 }
 
 // NewSessionService returns a new SessionService backed by the provided Repo.
