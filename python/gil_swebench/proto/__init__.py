@@ -15,23 +15,12 @@ import os
 import sys
 
 # When grpc_tools generates ``session_pb2_grpc.py`` it emits absolute imports
-# of the form ``import gil.v1.session_pb2 as ...``. Register this directory
-# under both ``gil_swebench.proto`` (its real location) and ``gil.v1`` (the
-# import path generated stubs expect).
+# of the form ``import gil.v1.session_pb2 as ...``. Our compile output puts
+# the .py files under ``gil_swebench/proto/gil/v1/`` (because the .proto
+# declares ``package gil.v1``). Register *this dir* on sys.path so
+# ``import gil.v1.session_pb2`` resolves cleanly.
 _THIS_DIR = os.path.dirname(__file__)
 if _THIS_DIR not in sys.path:
     sys.path.insert(0, _THIS_DIR)
-
-# Lazy alias: only needed once stubs are present.
-try:
-    _gil_pkg = sys.modules.setdefault("gil", type(sys)("gil"))
-    _gil_v1 = sys.modules.setdefault("gil.v1", type(sys)("gil.v1"))
-    if not hasattr(_gil_v1, "__path__"):
-        _gil_v1.__path__ = [_THIS_DIR]
-    elif _THIS_DIR not in _gil_v1.__path__:
-        _gil_v1.__path__.append(_THIS_DIR)
-    setattr(_gil_pkg, "v1", _gil_v1)
-except Exception:  # pragma: no cover -- best-effort alias only
-    pass
 
 __all__: list[str] = []

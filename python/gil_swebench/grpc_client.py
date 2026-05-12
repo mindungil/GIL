@@ -55,8 +55,6 @@ def _load_stubs():
             session_pb2_grpc,
             run_pb2,
             run_pb2_grpc,
-            interview_pb2,
-            interview_pb2_grpc,
             event_pb2,
         )
     except ImportError as exc:
@@ -71,8 +69,6 @@ def _load_stubs():
         "session_pb2_grpc": session_pb2_grpc,
         "run_pb2": run_pb2,
         "run_pb2_grpc": run_pb2_grpc,
-        "interview_pb2": interview_pb2,
-        "interview_pb2_grpc": interview_pb2_grpc,
         "event_pb2": event_pb2,
     }
 
@@ -156,7 +152,6 @@ class GilGrpcClient:
 
         self.session_stub = self._stubs["session_pb2_grpc"].SessionServiceStub(self._channel)
         self.run_stub = self._stubs["run_pb2_grpc"].RunServiceStub(self._channel)
-        self.interview_stub = self._stubs["interview_pb2_grpc"].InterviewServiceStub(self._channel)
         # EventService is exposed via RunService.Tail in current proto; alias here
         # for forward compatibility if a standalone EventService is added later.
         self.event_stub = self.run_stub
@@ -194,59 +189,78 @@ class GilGrpcClient:
         )
         return _session_to_dict(resp)
 
-    # --- Interview / spec freezing ----------------------------------------
+    # --- Spec freezing (post-M3 path) -------------------------------------
 
     def freeze_spec(self, session_id: str, spec_dict: Mapping[str, Any]) -> dict[str, str]:
-        """Skip the interactive interview by directly confirming a pre-built spec.
+        """Freeze the session's spec via the agent's ``freeze_spec`` tool.
 
-        Mirrors the behavior in ``gil_atropos.grpc_client.freeze_spec``: send
-        a single-shot ``StartInterview`` with the goal one-liner and confirm
-        as soon as we hit the first agent question or a stage transition out
-        of Sensing. The supplied ``spec_dict`` is stashed on the client for
-        the runner to consult after the run (verification etc.).
+        Post-M3 (v0.2.0+): InterviewService is deleted; the chat agent
+        owns the freeze_spec verb as a tool. We send a single Prompt
+        instructing the agent to call ``freeze_spec`` with the supplied
+        goal + verification, then drain the Part stream until the
+        DonePart arrives. The spec lands on disk via the agent's
+        normal tool dispatch.
+
+        spec_dict shape (typical):
+          {
+            "goal": {"one_liner": "...", "success_criteria": ["..."]},
+            "verification": {"checks": [{"name": "...", "command": "..."}]},
+            "provider": "vllm", "model": "qwen3.6-27b",
+          }
         """
-        interview_pb2 = self._stubs["interview_pb2"]
+        session_pb2 = self._stubs["session_pb2"]
 
         self._last_spec_hint: dict[str, Any] = dict(spec_dict)
 
-        first_input = (
-            spec_dict.get("goal", {}).get("one_liner")
-            or spec_dict.get("goal_hint")
+        goal = spec_dict.get("goal", {}) or {}
+        one_liner = goal.get("one_liner") or spec_dict.get("goal_hint") \
             or "SWE-bench task (auto-generated)"
+
+        verify_checks = (spec_dict.get("verification") or {}).get("checks") or []
+        verify_blob = "\n".join(
+            f"  - name={c.get('name')!r}, command={c.get('command')!r}"
+            for c in verify_checks
         )
-        start_req = interview_pb2.StartInterviewRequest(
+
+        prompt = (
+            "Call the `freeze_spec` tool now with the following spec slots. "
+            "Do not call any other tools, do not respond conversationally — "
+            "just one freeze_spec invocation.\n\n"
+            f"goal.one_liner: {one_liner!r}\n"
+            f"verification.checks:\n{verify_blob}\n"
+        )
+
+        provider = str(spec_dict.get("provider", ""))
+        model = str(spec_dict.get("interview_model", "") or spec_dict.get("model", ""))
+
+        req = session_pb2.PromptRequest(
             session_id=session_id,
-            first_input=str(first_input),
-            provider=str(spec_dict.get("provider", "")),
-            model=str(spec_dict.get("interview_model", "")),
+            parts=[session_pb2.PromptPart(text=prompt)],
+            agent="default",
         )
+        if provider or model:
+            from gil.v1 import spec_pb2  # type: ignore[import-not-found]
+            req.model.CopyFrom(spec_pb2.ModelChoice(provider=provider, model_id=model))
 
+        # Drain until DonePart; we don't care about intermediate Parts
+        # here. The freeze_spec tool call writes spec.yaml + spec.lock
+        # under <sessionsBase>/<sid>/ as a side-effect.
         try:
-            for ev in self.interview_stub.Start(
-                start_req, metadata=self._metadata, timeout=self._timeout
+            for part in self.session_stub.Prompt(
+                req, metadata=self._metadata, timeout=self._timeout
             ):
-                kind = ev.WhichOneof("payload")
-                if kind == "error":
-                    raise RuntimeError(
-                        f"interview error: {ev.error.code}: {ev.error.message}"
-                    )
-                if kind == "stage" and ev.stage.to.lower() in {"conversation", "draft", "frozen"}:
+                kind = part.WhichOneof("body")
+                if kind == "done":
                     break
-                if kind == "agent_turn":
-                    break
-        except Exception:
-            # If Start fails (e.g. session already past interview), fall
-            # through to Confirm and let it return the appropriate error.
-            pass
+        except Exception as exc:
+            raise RuntimeError(f"freeze_spec prompt failed: {exc}") from exc
 
-        confirm_resp = self.interview_stub.Confirm(
-            interview_pb2.ConfirmRequest(session_id=session_id),
-            metadata=self._metadata,
-            timeout=self._timeout,
-        )
+        # The session status flip is observable via Get; spec_id is
+        # implicit (one spec per session post-M3). Return a stable
+        # shape so callers don't have to special-case.
         return {
-            "spec_id": confirm_resp.spec_id,
-            "content_sha256": confirm_resp.content_sha256,
+            "spec_id": session_id,
+            "content_sha256": "",  # not surfaced by Prompt; future: parse from specstore
         }
 
     # --- Run ---------------------------------------------------------------
