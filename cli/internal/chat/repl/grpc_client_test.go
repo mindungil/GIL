@@ -146,3 +146,36 @@ func TestMapRunEvent_StuckDetected_BadJSON_StillRoutesPhase(t *testing.T) {
 	require.Equal(t, "run.stuck", in.Kind)
 	require.Equal(t, "", in.StuckPattern)
 }
+
+func TestMapRunEvent_PermissionAsk_LandsAsTrackerInput(t *testing.T) {
+	// Followup #2 wiring — pre-M3 dropped these events. After this
+	// patch the REPL adapter maps permission_ask → "permission.ask"
+	// and pulls request_id / tool / key / from_subagent_label.
+	ev := &gilv1.Event{
+		Type: "permission_ask",
+		DataJson: []byte(`{
+			"request_id": "01KREQ123",
+			"tool": "bash",
+			"key": "rm -rf /tmp/x",
+			"from_subagent_label": "explore-auth"
+		}`),
+	}
+	in := mapRunEventToTracker("01HQ", ev)
+	require.Equal(t, "permission.ask", in.Kind)
+	require.Equal(t, "01KREQ123", in.RequestID)
+	require.Equal(t, "bash", in.PermissionTool)
+	require.Equal(t, "rm -rf /tmp/x", in.PermissionKey)
+	require.Equal(t, "explore-auth", in.FromSubagentLabel)
+}
+
+func TestMapRunEvent_PermissionAsk_RootSessionNoLabel(t *testing.T) {
+	// Root session asks don't carry from_subagent_label. The field
+	// stays empty; loop.go renders without the "subagent X " prefix.
+	ev := &gilv1.Event{
+		Type:     "permission_ask",
+		DataJson: []byte(`{"request_id":"01KR","tool":"bash","key":"ls"}`),
+	}
+	in := mapRunEventToTracker("01HQ", ev)
+	require.Equal(t, "permission.ask", in.Kind)
+	require.Equal(t, "", in.FromSubagentLabel)
+}

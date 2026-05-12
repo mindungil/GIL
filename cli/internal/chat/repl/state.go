@@ -29,6 +29,14 @@ type TrackerInput struct {
 	StuckPattern string
 	StuckDetail  string
 
+	// Permission-ask payload (#2 followup wiring): populated when
+	// Kind is "permission.ask". S9 subagent routing means the ask can
+	// come from a child — FromSubagentLabel surfaces which one.
+	RequestID         string
+	PermissionTool    string
+	PermissionKey     string
+	FromSubagentLabel string
+
 	// Reason is the StageTransition.Reason payload — e.g.
 	// "domain=cli-tooling confidence=0.85" on interview.started, or
 	// the audit's "ready" reason on interview.ready_to_freeze. Empty

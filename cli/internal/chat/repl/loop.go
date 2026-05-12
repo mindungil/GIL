@@ -364,7 +364,29 @@ func emitDeltaNotes(r render.Renderer, prev, cur render.SessionState, ev Tracker
 			msg += " — " + truncateRetryReason(ev.Reason)
 		}
 		r.SystemNote(render.NoteSystem, msg)
+	case "permission.ask":
+		// Followup #2 — pre-M3 claim was permission_ask events fell on
+		// the chat floor. Surface as a SystemNote with the request_id +
+		// tool + key the user pipes to `gil permission answer`. When the
+		// ask comes from a subagent (S9 routing), the label is prepended
+		// so the user knows which child blocked.
+		src := ""
+		if ev.FromSubagentLabel != "" {
+			src = "subagent " + ev.FromSubagentLabel + " "
+		}
+		msg := fmt.Sprintf("%spermission requested: %s %s · req_id=%s · `gil permission answer %s --allow` (or --deny) within 60s",
+			src, ev.PermissionTool, truncatePermissionKey(ev.PermissionKey), ev.RequestID, ev.RequestID)
+		r.SystemNote(render.NoteSystem, msg)
 	}
+}
+
+// truncatePermissionKey trims a long command/path key down to a width
+// that fits the strip without breaking layout.
+func truncatePermissionKey(k string) string {
+	if len(k) <= 60 {
+		return k
+	}
+	return k[:60] + "…"
 }
 
 // formatTokensCompact returns "1.2k" for ≥1000, the bare integer

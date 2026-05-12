@@ -531,6 +531,29 @@ func mapRunEventToTracker(sessionID string, ev *gilv1.Event) TrackerInput {
 				in.Reason = v
 			}
 		}
+	case "permission_ask":
+		// Followup #2 — pre-M3 claim was "dropped on the chat floor."
+		// Wire the event through TrackerInput so loop.go surfaces it as
+		// a SystemNote with the request_id the user feeds to
+		// `gil permission answer`. S9 subagent routing means the ask
+		// may originate from a child running under this root session;
+		// surface the label so the user knows what asked.
+		in.Kind = "permission.ask"
+		var d map[string]any
+		if jerr := json.Unmarshal(ev.GetDataJson(), &d); jerr == nil {
+			if v, ok := d["request_id"].(string); ok {
+				in.RequestID = v
+			}
+			if v, ok := d["tool"].(string); ok {
+				in.PermissionTool = v
+			}
+			if v, ok := d["key"].(string); ok {
+				in.PermissionKey = v
+			}
+			if v, ok := d["from_subagent_label"].(string); ok {
+				in.FromSubagentLabel = v
+			}
+		}
 	}
 	return in
 }
