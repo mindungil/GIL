@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -10,6 +11,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/mindungil/gil/core/event"
 	"github.com/mindungil/gil/core/paths"
 	"github.com/mindungil/gil/core/provider"
 	"github.com/mindungil/gil/core/session"
@@ -66,6 +68,15 @@ func (h *chatHistory) append(sid string, msg provider.Message) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.all[sid] = append(h.all[sid], msg)
+}
+
+// reset clears the message log for sid so a subsequent Prompt starts
+// the agent loop with no prior context. Used by the reset_session
+// verb tool (§2.6) when the user asks to "start over" or "clear chat".
+func (h *chatHistory) reset(sid string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.all, sid)
 }
 
 // WithProviderFactory wires the same ProviderFactory used by Run /
@@ -282,6 +293,31 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 	registry := s.buildChatToolRegistry(s.runService()).filterByName(agent.Tools)
 	toolDefs := registry.defs()
 
+	// M6 Option A bridge: emit tool_call / tool_result / done events
+	// on the per-session event stream so giltui's existing Tail
+	// subscription sees chat agent activity (not just run-mode). The
+	// stream is allocated lazily by ensureSessionStream and persists
+	// across the chat → run handoff. evtStream may be nil in tests
+	// that bypass RunService (s.runService() returns nil); the helper
+	// closures below no-op in that case.
+	var evtStream *event.Stream
+	if rs := s.runService(); rs != nil {
+		evtStream = rs.ensureSessionStream(sessionID)
+	}
+	emitChatEvent := func(typ string, source event.Source, kind event.Kind, payload map[string]any) {
+		if evtStream == nil {
+			return
+		}
+		data, _ := json.Marshal(payload)
+		_, _ = evtStream.Append(event.Event{
+			Timestamp: time.Now().UTC(),
+			Source:    source,
+			Kind:      kind,
+			Type:      typ,
+			Data:      data,
+		})
+	}
+
 	// 6. Multi-turn agent loop. Each iteration calls the LLM; if it
 	//    emits tool_calls, we dispatch them, append the results, and
 	//    re-call. The loop terminates when the LLM returns no tool
@@ -351,6 +387,14 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 			}); err != nil {
 				return err
 			}
+			// Bridge to per-session event stream (M6 Option A) so giltui's
+			// Tail subscription mirrors the call exactly the same way it
+			// mirrors run-mode tool_calls.
+			emitChatEvent("tool_call", event.SourceAgent, event.KindAction, map[string]any{
+				"id":    call.ID,
+				"name":  call.Name,
+				"input": string(call.Input),
+			})
 			result, runErr := dispatchTool(ctx, registry, sessionID, call)
 			if runErr != nil {
 				result = provider.ToolResult{
@@ -369,6 +413,12 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 			}); err != nil {
 				return err
 			}
+			emitChatEvent("tool_result", event.SourceEnvironment, event.KindObservation, map[string]any{
+				"id":       call.ID,
+				"name":     call.Name,
+				"content":  result.Content,
+				"is_error": result.IsError,
+			})
 		}
 
 		// Feed the tool results back as a synthetic user turn (per

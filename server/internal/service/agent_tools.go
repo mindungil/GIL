@@ -144,6 +144,21 @@ func (s *SessionService) buildChatToolRegistry(runSvc *RunService) *chatToolRegi
 			&toolSpawnAgent{sess: s, rs: runSvc, registry: s.subagentRegistry, base: s.sessionsBase},
 			&toolWaitAgent{sess: s},
 			&toolAgentStatus{sess: s},
+			// §2.6 verb-tool wave — see agent_tools_verbs.go.
+			// Folds the chat REPL's former slash commands (/add,
+			// /drop, /ls, /interrupt, /compact, /undo, /save, /clear,
+			// /instructions) into agent-callable tools. The chat
+			// surface is 100% natural language — no client-side
+			// slash dispatch survives.
+			&toolAddToWorkingSet{sess: s},
+			&toolDropFromWorkingSet{sess: s},
+			&toolListWorkingSet{sess: s},
+			&toolStopRun{rs: runSvc},
+			&toolListCheckpoints{repo: s.repo, base: s.sessionsBase},
+			&toolRestoreCheckpoint{rs: runSvc},
+			&toolShowInstructions{sess: s},
+			&toolExportSession{sess: s},
+			&toolResetSession{sess: s},
 		},
 	}
 }

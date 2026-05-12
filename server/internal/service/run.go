@@ -115,6 +115,13 @@ type RunService struct {
 	// no run is in flight for that session.
 	runLoops    map[string]*runner.AgentLoop
 
+	// runCancels stores the cancel func for each detached run so the
+	// stop_run agent-tool (§2.6 verb-tool wave) can signal a running
+	// loop to terminate. Removed in executeRun's defer alongside
+	// runLoops; nil entry means no detached run is in flight for that
+	// session.
+	runCancels map[string]context.CancelFunc
+
 	// notifierFor produces the outbound notification fan-out for a given
 	// run. Overrideable in tests so the e2e suite can inject an
 	// httptest-backed notifier without spinning up notify-send. nil
@@ -134,7 +141,27 @@ func NewRunService(repo *session.Repo, sessionsBase string, factory ProviderFact
 		pendingAsks:           make(map[string]map[string]*pendingAsk),
 		pendingClarifications: make(map[string]map[string]*pendingClarify),
 		runLoops:              make(map[string]*runner.AgentLoop),
+		runCancels:            make(map[string]context.CancelFunc),
 	}
+}
+
+// RequestStop signals a detached run to terminate at its next
+// cancellation checkpoint. Returns ok=true when a cancel func was
+// registered for sessionID (the run was in flight), false otherwise.
+//
+// The stop is cooperative: the runner's loop must read its context
+// to actually unwind. provider.Complete and tool.Run both honour
+// context cancellation so a stop propagates within one tool call's
+// worst-case wall time.
+func (s *RunService) RequestStop(sessionID string) bool {
+	s.mu.Lock()
+	cancel, ok := s.runCancels[sessionID]
+	s.mu.Unlock()
+	if !ok || cancel == nil {
+		return false
+	}
+	cancel()
+	return true
 }
 
 // Progress returns a live snapshot of iteration and token counts for the given
@@ -165,6 +192,27 @@ func (s *RunService) Budget(sessionID string) (cost float64, exceeded bool, reas
 
 func (s *RunService) sessionDir(sessionID string) string {
 	return filepath.Join(s.sessionsBase, sessionID)
+}
+
+// ensureSessionStream returns the long-lived event stream associated
+// with sessionID, allocating one lazily when none exists yet.
+//
+// This is the bridge that lets chat-mode (SessionService.Prompt) emit
+// tool_call / tool_result events the same way run-mode does, so the
+// existing Tail RPC + giltui Model + chat surface all see one
+// universal session event timeline. Once allocated, the stream stays
+// until the daemon shuts down — memory cost is small (one Stream per
+// session ever prompted, no fan-out goroutines until a subscriber
+// arrives).
+func (s *RunService) ensureSessionStream(sessionID string) *event.Stream {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if st, ok := s.runStreams[sessionID]; ok && st != nil {
+		return st
+	}
+	st := event.NewStream()
+	s.runStreams[sessionID] = st
+	return st
 }
 
 // buildTools returns the tool set for a run, configured per spec.Workspace.Backend.
@@ -340,9 +388,16 @@ func (s *RunService) Start(ctx context.Context, req *gilv1.StartRunRequest) (*gi
 	metrics.SessionsRunning.Inc()
 
 	if req.Detach {
+		// Derive a cancellable background context so the stop_run
+		// agent-tool can signal the detached loop to terminate. The
+		// cancel func is registered before the goroutine starts so
+		// concurrent RequestStop calls have something to fire.
+		bgCtx, bgCancel := context.WithCancel(context.Background())
+		s.mu.Lock()
+		s.runCancels[req.SessionId] = bgCancel
+		s.mu.Unlock()
 		go func() {
-			// Use a background context: the gRPC ctx cancels when Start returns.
-			bgCtx := context.Background()
+			defer bgCancel()
 			_, _ = s.executeRun(bgCtx, req.SessionId, spec, prov, providerName, model, tools, ver, workspaceDir)
 		}()
 		return &gilv1.StartRunResponse{Status: "started"}, nil
@@ -830,11 +885,15 @@ func (s *RunService) executeRun(
 	}
 	defer persister.Close()
 
-	stream := event.NewStream()
+	// Reuse the long-lived per-session stream if a prior chat turn
+	// already allocated one (so existing Tail subscribers stay
+	// connected across the chat → run handoff). Otherwise allocate a
+	// fresh one and register it.
+	stream := s.ensureSessionStream(sessionID)
 
-	// Register stream and progress snap under the lock.
+	// Register progress snap under the lock. The stream is already
+	// registered by ensureSessionStream.
 	s.mu.Lock()
-	s.runStreams[sessionID] = stream
 	s.runProgress[sessionID] = &runProgressSnap{}
 	s.mu.Unlock()
 
@@ -862,16 +921,22 @@ func (s *RunService) executeRun(
 		}
 	}
 
-	// Cleanup on exit: remove stream, progress, loop, and any
+	// Cleanup on exit: remove progress, loop, and any
 	// pending-clarification channels. Closing each pending channel
 	// unblocks the clarify tool with Cancelled=true so the run can
 	// finish its termination path cleanly even if the user never
 	// answered.
+	//
+	// The per-session event stream is intentionally NOT deleted on
+	// run exit: chat turns (SessionService.Prompt) emit on the same
+	// stream and giltui's Tail subscription stays connected across
+	// the run → chat handoff. Streams are reaped only when the
+	// daemon shuts down.
 	defer func() {
 		s.mu.Lock()
-		delete(s.runStreams, sessionID)
 		delete(s.runProgress, sessionID)
 		delete(s.runLoops, sessionID)
+		delete(s.runCancels, sessionID)
 		if per := s.pendingClarifications[sessionID]; per != nil {
 			for _, p := range per {
 				close(p.ch)
@@ -1005,7 +1070,14 @@ func (s *RunService) executeRun(
 				Data:      data,
 			})
 		} else {
-			specServers := map[string]mcpregistry.Server{} // future: derived from spec.MCP
+			// The frozen spec carries an allowlist (Tools.McpServers) of
+			// server names it wants enabled, NOT full launch records — so
+			// the spec-side map starts empty and we filter the merged
+			// registry by the allowlist below. mergeMCPServers stays in
+			// the loop because future spec versions may embed full
+			// records (codex-style overrides) without renaming the
+			// helper.
+			specServers := map[string]mcpregistry.Server{}
 			merged := mergeMCPServers(specServers, registryServers)
 			shadowed := shadowedRegistryNames(specServers, registryServers)
 			names := make([]string, 0, len(merged))
@@ -1026,6 +1098,23 @@ func (s *RunService) executeRun(
 				Type:      "mcp_registry_loaded",
 				Data:      data,
 			})
+
+			// Launch the spec's allowlisted MCP servers, surface their
+			// tools to the agent loop, and defer Close so the
+			// subprocesses tear down with the run. Empty allowlist =
+			// no-op; failures are non-fatal and reported per-server.
+			var allowlist []string
+			if spec.Tools != nil {
+				allowlist = spec.Tools.McpServers
+			}
+			mcpRes := launchMCPServers(ctx, merged, allowlist, workspaceDir, stream, nil)
+			for _, cli := range mcpRes.Clients {
+				cliRef := cli
+				defer func() { _ = cliRef.Close() }()
+			}
+			if len(mcpRes.Tools) > 0 {
+				tools = append(tools, mcpRes.Tools...)
+			}
 		}
 	}
 
@@ -1524,13 +1613,20 @@ func eventKindToProto(k event.Kind) gilv1.EventKind {
 // event to the gRPC client. Returns NotFound if no run is active for the
 // session. (Replay from disk is Phase 6.)
 func (s *RunService) Tail(req *gilv1.TailRequest, stream gilv1.RunService_TailServer) error {
-	s.mu.Lock()
-	rs, ok := s.runStreams[req.SessionId]
-	s.mu.Unlock()
-	if !ok {
-		return status.Errorf(codes.NotFound,
-			"no active run for session %q (replay from disk is Phase 6)", req.SessionId)
+	// Verify the session exists so non-existent IDs still produce a
+	// clear NotFound rather than silently subscribing to an empty
+	// stream that never emits.
+	if _, err := s.repo.Get(stream.Context(), req.SessionId); err != nil {
+		if errors.Is(err, session.ErrNotFound) {
+			return status.Errorf(codes.NotFound, "session %q not found", req.SessionId)
+		}
+		return status.Errorf(codes.Internal, "session lookup: %v", err)
 	}
+	// Lazy-allocate the long-lived per-session stream — chat-mode
+	// (SessionService.Prompt) and run-mode (executeRun) both emit on
+	// the same stream, so subscribing here works regardless of which
+	// mode is currently active for this session.
+	rs := s.ensureSessionStream(req.SessionId)
 
 	sub := rs.Subscribe(256)
 	defer sub.Close()
