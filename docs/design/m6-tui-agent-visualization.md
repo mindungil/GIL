@@ -164,3 +164,87 @@ V1 결정 보류. 이 결정이 안 정해진 상태에서 view code만 깔면 d
 
 이 결정이 정해지면 M6.3-M6.6를 그때 진입하면 된다 — 이미 짠 M6.1+M6.2
 데이터 층과 render 함수 stub들은 그대로 재사용.
+
+### Option별 implementation plan (S10)
+
+세 옵션을 코드 수준에서 구체화. 사용자가 A/B/C 중 어느 하나 고르면 그
+trajectory의 step list로 바로 진입.
+
+**Option A — giltui가 chat agent 활동도 본다 (least invasive)**
+
+A의 본질은 giltui Model에 *두 번째 stream subscription*을 더해 활성
+세션의 chat agent 활동도 받아오는 것. 4-pane 레이아웃의 Activity pane
+대상이 RunService.Tail에서 *RunService.Tail + SessionService.Prompt 합본*
+이 된다.
+
+  - **A.1** `tui/internal/app/model.go`: Model에 `chatPromptStream
+    gilv1.SessionService_PromptClient` + `chatTree *AgentTree` 추가.
+    chat agent가 active일 때만 nil 아님.
+  - **A.2** 새 메시지 타입 — `giltuiPromptToolCallMsg` /
+    `giltuiPromptToolResultMsg` / `giltuiPromptDoneMsg` — chat_stream.go의
+    chatModel 메시지 미러. 별도 식별자 (`giltui` prefix) 로 chatModel과
+    name conflict 없이 공존.
+  - **A.3** 활성 session이 chat-only인지 판정. 휴리스틱: session.Status
+    가 "running"이 아니면 chat-only로 간주, Prompt subscription 시도.
+    Status가 "running"이면 기존 Tail subscription 사용.
+  - **A.4** view.go renderMainColumn 갱신: chatTree 데이터가 있으면
+    Activity pane을 chatAgentActivity (chat_view.go의 helper) + tree
+    render로 교체. 없으면 기존 activity (run-mode Tail) 유지.
+  - **A.5** 키바인딩: `t` 로 tree pane focus toggle (현재 progress/memory
+    그대로).
+  - **A.6** 스냅샷 테스트: chat-active vs run-active vs idle 세 케이스.
+
+  Estimated touch: 3-5 files, ~400-600 LOC. 가장 적은 surface 재설계,
+  가장 빠른 user value.
+
+**Option B — chat surface를 multi-pane으로 재설계**
+
+chat_view.go의 single-column transcript-prompt 레이아웃을 갈아엎고
+sessions left + agent tree center + prompt below 구조로 재구성.
+
+  - **B.1** `chat_view.go` 분리: 현재 chatView() 함수 안의 단일 column
+    빌더를 lipgloss.JoinHorizontal로 좌우 분할. left rail = sessions
+    list (현재 renderPreFirstTurn 로직 이주). right = transcript +
+    prompt.
+  - **B.2** right column 내부에 중앙 pane 추가: agent tree (M6 design
+    §4 layout). transcript는 prompt 위로 압축 (오른쪽 절반의 절반).
+  - **B.3** new render functions: renderAgentTreePane,
+    renderTurnDiffPane (turn-scoped show_diff 데이터). 기존 plan pane은
+    plan_steps 파싱하도록 확장 (현재 plan.json 파일 기반).
+  - **B.4** Model에 turnDiff 필드 추가 — show_diff tool result에서
+    파싱. plan_steps도 마찬가지로 tool result에서 파싱 (혹은 새 RPC
+    GetPlanSteps 추가).
+  - **B.5** 모바일 폭 fallback: width < 100 column에서는 multi-pane
+    drop하고 single-column으로 폴백 (terminal-aesthetic.md §3 rhythm
+    유지).
+  - **B.6** 스냅샷 테스트 광범위 갱신: 현존 8-9개 chat snapshot은 모두
+    레이아웃 변경으로 깨짐. 새 baseline 생성.
+
+  Estimated touch: 6-10 files, ~1000-1500 LOC. 가장 큰 redesign, chat
+  surface의 시각 캐릭터 변경. Visual review 사이클 필요.
+
+**Option C — A + B 모두**
+
+C는 A와 B를 leaf level에서 일치시키기: giltui도, chat surface도, 같은
+3-pane을 보여준다. 차이는 입력 surface (chat: prompt panel, giltui:
+read-only) 뿐.
+
+  - **C.1** A.1-A.6 그대로.
+  - **C.2** B.1-B.6 그대로 (chat surface 재설계).
+  - **C.3** render functions를 양쪽에서 공유: renderAgentTreePane,
+    renderTurnDiffPane을 `tui/internal/app/agent_tree_render.go` (신규)
+    에 통합. Model + chatModel 모두 호출.
+  - **C.4** 일관성 테스트: chat surface와 giltui가 같은 데이터 위에서
+    같은 출력 produce 하는지 차이만 측정.
+
+  Estimated touch: A + B의 합. 가장 일관된 user experience, 가장 무거운
+  구현.
+
+### 권장
+
+A부터 시작. 가장 작고 검증 가능. C는 A가 잘 돌아간 다음 B를 별도로 추가.
+B만 단독 진입은 권하지 않음 — chat surface 캐릭터를 바꾸는데 giltui가 그대로
+면 일관성이 깨짐.
+
+Estimated ordering not committed — 위 옵션은 surface 결정 후 사용자가 phase
+번호 부여.

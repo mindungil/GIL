@@ -49,15 +49,42 @@ new readers know which entries to act on.
 
 ### Alive — wiring gap (Group A subset, all pieces still exist)
 
-- **#2** permission_ask — **partial**: TUI wired (`tui/internal/app/update.go:49`),
-  CLI REPL still has zero matches in `cli/internal/chat/repl/`. CLI REPL
-  needs the bridge.
-- **#5** retry visibility, **#6** token surface, **#18** wrapRPCError in
-  REPL, **#23** subagent events, **#24** budget events, **#28** LatencyMs
-  — same shape: server emits, chat adapter ignores.
-- **#31** shortID collisions, **#32** dead chat flags, **#40** redraw
-  timing, **#41** mock provider 2-response exhaustion — DOGFOOD-confirmed,
-  unchanged.
+- **#2** permission_ask — **fixed (this branch)**: TUI was already wired
+  (`tui/internal/app/update.go:49`); CLI REPL gained the bridge in
+  `cli/internal/chat/repl/grpc_client.go` permission_ask case +
+  `loop.go` permission.ask handler. S9 subagent routing carries
+  `from_subagent_label` so the user sees which child blocked.
+- **#5** retry visibility — **fixed since written**: `grpc_client.go`
+  `case "provider.retry_attempt"` + `loop.go` SystemNote.
+- **#6** token surface — **fixed since written**: `grpc_client.go:371`
+  pulls `EventMetrics.Tokens` off every event; `state.go:96`
+  accumulates; `formatRunStrip` displays.
+- **#18** wrapRPCError in REPL — **fixed since written**: `grpc_client.go`
+  calls `errmap.WrapRPCError` at 4 sites; `loop.go` uses
+  `errmap.FormatForChat` for stream/event errors.
+- **#19** stuck event mismatch — **fixed**: `grpc_client.go`
+  `case "stuck_detected"` translates to `run.stuck`.
+- **#23** subagent events — **fixed**: `case "subagent_started"` /
+  `subagent_done` handled with iter/cost.
+- **#24** budget events — **fixed**: `case "budget_warning"` /
+  `budget_exceeded` handled.
+- **#28** LatencyMs — **fixed since written**: pulled off
+  `EventMetrics.LatencyMs` in mapRunEventToTracker, snapshot into
+  `SessionState.LatencyMs`, rendered by `formatRunStrip`.
+- **#30** stream errors dropped — **fixed since written**: `loop.go:143`
+  reads streamErr via humanizeStreamErr + SystemNote.
+- **#31** shortID collisions — **fixed**: `summary.go:401` uses 10-char
+  prefix (covers full ms-precision ULID).
+- **#32** dead chat flags — **partial fix (this branch)**:
+  `--provider` / `--model` were already forwarded; `--working-dir`
+  registered here. All three now functional.
+- **#33** `--ascii` middle-dot — **fixed since written**: `glyph.go`
+  has ASCII glyph set with `Dot: "."`.
+- **#38** `[defaults]` config — **fixed since written**:
+  `core/workspace/config.go:125` two-shape support.
+- **#40** redraw timing, **#41** mock provider exhaustion — still
+  DOGFOOD-confirmed; need fresh dogfood to verify under M5/M6
+  architecture.
 
 ### Alive — §2.6 reformulate (slash → agent-tool)
 
