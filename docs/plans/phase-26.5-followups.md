@@ -15,6 +15,100 @@ into phase plans is a separate step done by the human.
 
 ---
 
+## Triage status (after M3 chat-architecture migration)
+
+The log accumulated against the pre-M3 V1 surface that still had an
+explicit InterviewService + sensing engine. M3 deleted those and M5 added
+verify-loop discipline; a chunk of entries went stale or got fixed
+on the way. Below is a single-pass classification against current code so
+new readers know which entries to act on.
+
+### Stale — close (concept obsolete after M3)
+
+- **#11** CHAT_ONLY mode — interview-bypass concept gone; every prompt
+  already flows through `SessionService.Prompt`. No `SessionMode` enum
+  needed.
+- **#35** interview config asymmetry — `InterviewService` removed
+  (`sdk/client.go:16`, `cli/internal/cmd/new_test.go:111`).
+- **#36** sensing engine breaks on reasoning preambles — sensing engine
+  removed.
+- **#39** sensing→conversation Stage events — sensing gone.
+
+### Fixed since written — close with proof site
+
+- **#19** stuck event name mismatch — chat REPL maps `stuck_detected →
+  run.stuck` (`cli/internal/chat/repl/grpc_client.go` stuck_detected case).
+- **#30** stream errors silently dropped — `drainInterviewStream` was
+  renamed to `drainPromptStream`; `loop.go:143-156` reads `streamErr` via
+  `NextAssistantChunk` and surfaces with `humanizeStreamErr` +
+  `SystemNote`.
+- **#33** `--ascii` middle-dot not stripped — `tui/internal/app/glyph.go`
+  has an ASCII glyph set with `Dot: "."`; `SetAsciiMode(true)` swaps it.
+- **#38** `[defaults]` config silently ignored — `core/workspace/config.go:125`
+  has two-shape support (legacy top-level + `[defaults]` section).
+
+### Alive — wiring gap (Group A subset, all pieces still exist)
+
+- **#2** permission_ask — **partial**: TUI wired (`tui/internal/app/update.go:49`),
+  CLI REPL still has zero matches in `cli/internal/chat/repl/`. CLI REPL
+  needs the bridge.
+- **#5** retry visibility, **#6** token surface, **#18** wrapRPCError in
+  REPL, **#23** subagent events, **#24** budget events, **#28** LatencyMs
+  — same shape: server emits, chat adapter ignores.
+- **#31** shortID collisions, **#32** dead chat flags, **#40** redraw
+  timing, **#41** mock provider 2-response exhaustion — DOGFOOD-confirmed,
+  unchanged.
+
+### Alive — §2.6 reformulate (slash → agent-tool)
+
+The slash-named items below violate the "agent decides verbs via tool
+calls, no client-side dispatch" rule. Convert to agent-callable tools;
+the agent surfaces the verb when natural-language input warrants it. G1
+(freeze_spec / start_run / apply_diff) is the first instance of this
+pattern in production.
+
+- **#1** `/add /drop /ls` → `add_to_workingset` / `drop_from_workingset` / `list_workingset`
+- **#13** `/interrupt` → `stop_run` tool (also: stop emitting fake CLI hint)
+- **#15** shell-exec → already a tool (`run_bash`); just stop promising a slash
+- **#17** `/compact` → already a tool (`request_compact`); surface it via agent
+- **#20** `/undo /checkpoints` → `list_checkpoints` / `restore_checkpoint`
+- **#22** `/instructions` → `show_instructions` tool
+- **#25** `/save /export` → `export_session` tool
+- **#26** `/clear /reset` → `reset_session` tool
+- **#29** `/sessions` filter → `list_sessions` already a tool; surface filter args
+- **#42 #43 #44** — explicit §2.6 audit items; fold into surface cleanup
+  (G4 verb-mode headless-only)
+
+### Alive — cross-cutting (Group C unchanged)
+
+- **#4** reasoning split — typed `AssistantOutput` proto
+- **#8** tool narration — typed action events through runner + Renderer
+- **#12** readline input — input abstraction
+- **#21** markdown rendering — Renderer turn-end + glamour/chroma
+
+### Long-horizon (Group D unchanged)
+
+- **#3** MCP wiring + plugin hooks
+- **#27** web search/fetch surfacing (rolls into #8 typed action pipeline)
+
+### Other surface items still relevant
+
+- **#7** @-mentions (WorkingSet-adjacent — depends on #1's reformulation)
+- **#9** session naming + fork — proto fields + Update/Fork RPCs
+- **#10** per-hunk diff apply + per-edit approval (apply_patch builds on this)
+- **#14** model switching — proto fields + UpdateModelConfig RPC
+- **#16** `gil configure` umbrella
+- **#34** banner enrichment
+
+### Cross-cutting dependencies (rough, unchanged)
+
+- #4 + #8 likely share typed `AssistantOutput`/event design
+- #1 + #7 share WorkingSet
+- #2 + #10 share permission/approval flow
+- #14 shares dialog code with #16
+
+---
+
 ## 1. File-context management is invisible (no /add /drop)
 
 **Reference**: aider — `research/aider/aider/commands.py` (cmd_add / cmd_drop / cmd_ls / cmd_read_only / cmd_paste / cmd_map). 6+ slashes for explicit chat-context control.
