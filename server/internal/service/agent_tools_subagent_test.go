@@ -1,0 +1,127 @@
+package service
+
+import (
+	"context"
+	"encoding/json"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+
+	"github.com/mindungil/gil/core/session"
+)
+
+// agent_tools_subagent_test.go — S5/S6/S7 gate behavior. The full
+// spawn → run → wait → release loop needs a provider factory + real
+// runner, which is out of scope here; this exercises argument
+// validation, registry interaction, and error paths the LLM will hit
+// most often.
+
+func TestToolSpawnAgent_RequiresLabelAndTask(t *testing.T) {
+	sess, base := newTestSessionService(t)
+	rs := NewRunService(sess.repo, base, nil)
+	tool := &toolSpawnAgent{sess: sess, rs: rs, registry: sess.subagentRegistry, base: base}
+
+	wd := t.TempDir()
+	sid := newTestSession(t, sess.repo, wd)
+
+	res, _ := tool.run(context.Background(), sid, json.RawMessage(`{"task":"x"}`))
+	require.True(t, res.IsError)
+	require.Contains(t, res.Content, "label")
+
+	res, _ = tool.run(context.Background(), sid, json.RawMessage(`{"label":"x"}`))
+	require.True(t, res.IsError)
+	require.Contains(t, res.Content, "task")
+}
+
+func TestToolSpawnAgent_RejectsUnfrozenParent(t *testing.T) {
+	sess, base := newTestSessionService(t)
+	rs := NewRunService(sess.repo, base, nil)
+	tool := &toolSpawnAgent{sess: sess, rs: rs, registry: sess.subagentRegistry, base: base}
+
+	wd := t.TempDir()
+	sid := newTestSession(t, sess.repo, wd)
+
+	res, _ := tool.run(context.Background(), sid,
+		json.RawMessage(`{"label":"x","task":"do something"}`))
+	require.True(t, res.IsError)
+	require.Contains(t, res.Content, "freeze_spec first")
+}
+
+func TestToolWaitAgent_RequiresIDOrLabel(t *testing.T) {
+	sess, _ := newTestSessionService(t)
+	tool := &toolWaitAgent{sess: sess}
+	res, _ := tool.run(context.Background(), "sess-x", json.RawMessage(`{}`))
+	require.True(t, res.IsError)
+	require.Contains(t, res.Content, "agent_id or label")
+}
+
+func TestToolWaitAgent_ResolvesByLabel(t *testing.T) {
+	sess, _ := newTestSessionService(t)
+	parentID := newTestSession(t, sess.repo, t.TempDir())
+
+	// Create a child manually (bypass spawn_agent for unit-test
+	// granularity; the spawn_agent flow needs frozen parent + runner).
+	child, err := sess.repo.Create(context.Background(), sessionCreateChild(parentID, "explore-auth"))
+	require.NoError(t, err)
+	require.NoError(t, sess.repo.UpdateStatus(context.Background(), child.ID, "done"))
+
+	tool := &toolWaitAgent{sess: sess}
+	res, _ := tool.run(context.Background(), parentID,
+		json.RawMessage(`{"label":"explore-auth","timeout_seconds":2}`))
+	require.False(t, res.IsError, res.Content)
+	require.Contains(t, res.Content, "explore-auth")
+	require.Contains(t, res.Content, "status=done")
+}
+
+func TestToolWaitAgent_UnknownLabel(t *testing.T) {
+	sess, _ := newTestSessionService(t)
+	parentID := newTestSession(t, sess.repo, t.TempDir())
+
+	tool := &toolWaitAgent{sess: sess}
+	res, _ := tool.run(context.Background(), parentID,
+		json.RawMessage(`{"label":"nope"}`))
+	require.True(t, res.IsError)
+	require.Contains(t, res.Content, "no child with label")
+}
+
+func TestToolAgentStatus_EmptyShowsHint(t *testing.T) {
+	sess, _ := newTestSessionService(t)
+	parentID := newTestSession(t, sess.repo, t.TempDir())
+
+	tool := &toolAgentStatus{sess: sess}
+	res, _ := tool.run(context.Background(), parentID, nil)
+	require.False(t, res.IsError)
+	require.Contains(t, res.Content, "no subagents")
+}
+
+func TestToolAgentStatus_ListsChildren(t *testing.T) {
+	sess, _ := newTestSessionService(t)
+	parentID := newTestSession(t, sess.repo, t.TempDir())
+
+	c1, err := sess.repo.Create(context.Background(), sessionCreateChild(parentID, "explore"))
+	require.NoError(t, err)
+	c2, err := sess.repo.Create(context.Background(), sessionCreateChild(parentID, "build"))
+	require.NoError(t, err)
+	require.NoError(t, sess.repo.UpdateStatus(context.Background(), c1.ID, "running"))
+	require.NoError(t, sess.repo.UpdateStatus(context.Background(), c2.ID, "done"))
+
+	tool := &toolAgentStatus{sess: sess}
+	res, _ := tool.run(context.Background(), parentID, nil)
+	require.False(t, res.IsError, res.Content)
+	require.Contains(t, res.Content, "explore")
+	require.Contains(t, res.Content, "build")
+	require.Contains(t, res.Content, "running")
+	require.Contains(t, res.Content, "done")
+}
+
+// sessionCreateChild is a tiny helper to stamp parent linkage on a
+// new session for tests that bypass the full spawn_agent flow.
+func sessionCreateChild(parentID, label string) session.CreateInput {
+	return session.CreateInput{
+		WorkingDir:      "/tmp",
+		GoalHint:        "test",
+		ParentSessionID: parentID,
+		SubagentDepth:   1,
+		SubagentLabel:   label,
+	}
+}

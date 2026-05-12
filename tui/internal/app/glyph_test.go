@@ -71,3 +71,46 @@ func TestGlyphs_DetectAscii_UTF8Locale(t *testing.T) {
 	t.Setenv("LANG", "en_US.UTF-8")
 	require.False(t, detectAscii())
 }
+
+// Regression: `LANG=C.UTF-8` is the modern POSIX UTF-8 codeset
+// (Ubuntu/Debian default in cloud images). The previous detection
+// dot-split first and matched language="C" → falsely degraded to
+// ASCII. The codeset suffix must be checked first.
+func TestGlyphs_DetectAscii_CDotUTF8IsUnicode(t *testing.T) {
+	t.Setenv("GIL_ASCII", "")
+	t.Setenv("LC_ALL", "")
+	t.Setenv("LC_CTYPE", "")
+	t.Setenv("LANG", "C.UTF-8")
+	require.False(t, detectAscii(), "C.UTF-8 must be treated as Unicode-capable")
+}
+
+func TestGlyphs_DetectAscii_CDotUTF8LowerCase(t *testing.T) {
+	t.Setenv("GIL_ASCII", "")
+	t.Setenv("LC_ALL", "")
+	t.Setenv("LC_CTYPE", "")
+	t.Setenv("LANG", "en_US.utf8")
+	require.False(t, detectAscii(), "lowercase utf8 codeset must also be recognised")
+}
+
+func TestBoxGlyphs_UnicodeAndAscii(t *testing.T) {
+	prev := IsAsciiMode()
+	defer SetAsciiMode(prev)
+
+	SetAsciiMode(false)
+	g := Glyphs()
+	if g.BoxHeavyTL != "╔" || g.BoxHeavyTR != "╗" || g.BoxHeavyHRule != "═" || g.BoxHeavyVRule != "║" {
+		t.Fatalf("unicode heavy box glyphs missing: %+v", g)
+	}
+	if g.BoxLightTL != "╭" || g.BoxLightHRule != "─" {
+		t.Fatalf("unicode light box glyphs missing: %+v", g)
+	}
+
+	SetAsciiMode(true)
+	a := Glyphs()
+	if a.BoxHeavyTL != "+" || a.BoxHeavyHRule != "=" || a.BoxHeavyVRule != "|" {
+		t.Fatalf("ascii heavy box fallback wrong: %+v", a)
+	}
+	if a.BoxLightTL != "+" || a.BoxLightHRule != "-" {
+		t.Fatalf("ascii light box fallback wrong: %+v", a)
+	}
+}

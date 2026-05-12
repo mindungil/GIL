@@ -7,7 +7,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -33,7 +32,6 @@ func startGildForTest(t *testing.T) (sock string, cleanup func()) {
 
 	g := grpc.NewServer()
 	gilv1.RegisterSessionServiceServer(g, &testSessionServer{})
-	gilv1.RegisterInterviewServiceServer(g, &testInterviewServer{})
 	gilv1.RegisterRunServiceServer(g, &testRunServer{})
 	go g.Serve(lis)
 
@@ -109,57 +107,10 @@ func (s *testSessionServer) Delete(ctx context.Context, req *gilv1.DeleteRequest
 	return nil, status.Errorf(codes.NotFound, "session %q not found", req.Id)
 }
 
-// testInterviewServer is a minimal in-test stub of InterviewService.
-type testInterviewServer struct {
-	gilv1.UnimplementedInterviewServiceServer
-}
-
 // testRunServer is a minimal in-test stub of RunService.
+// (testInterviewServer deleted in M3 — InterviewService is gone.)
 type testRunServer struct {
 	gilv1.UnimplementedRunServiceServer
-}
-
-func (s *testInterviewServer) Start(req *gilv1.StartInterviewRequest, stream gilv1.InterviewService_StartServer) error {
-	stream.Send(&gilv1.InterviewEvent{
-		Payload: &gilv1.InterviewEvent_Stage{
-			Stage: &gilv1.StageTransition{
-				From:   "sensing",
-				To:     "conversation",
-				Reason: "test",
-			},
-		},
-	})
-	return stream.Send(&gilv1.InterviewEvent{
-		Payload: &gilv1.InterviewEvent_AgentTurn{
-			AgentTurn: &gilv1.AgentTurn{
-				Content: "What do you want?",
-			},
-		},
-	})
-}
-
-func (s *testInterviewServer) Reply(req *gilv1.ReplyRequest, stream gilv1.InterviewService_ReplyServer) error {
-	return stream.Send(&gilv1.InterviewEvent{
-		Payload: &gilv1.InterviewEvent_AgentTurn{
-			AgentTurn: &gilv1.AgentTurn{
-				Content: "got: " + req.Content,
-			},
-		},
-	})
-}
-
-func (s *testInterviewServer) GetSpec(ctx context.Context, req *gilv1.GetSpecRequest) (*gilv1.FrozenSpec, error) {
-	return &gilv1.FrozenSpec{
-		SpecId:    "test-spec-id",
-		SessionId: req.SessionId,
-	}, nil
-}
-
-func (s *testInterviewServer) Confirm(ctx context.Context, req *gilv1.ConfirmRequest) (*gilv1.ConfirmResponse, error) {
-	return &gilv1.ConfirmResponse{
-		SpecId:         "test-spec-id",
-		ContentSha256:  strings.Repeat("a", 64),
-	}, nil
 }
 
 // Start implements RunService.Start for testing.

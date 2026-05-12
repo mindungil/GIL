@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 	"github.com/stretchr/testify/require"
 )
 
@@ -28,7 +30,9 @@ func TestStyle_NoColorStripsANSI(t *testing.T) {
 		"alert":    styleAlert,
 		"emphasis": styleEmphasis,
 		"critical": styleCritical,
-		"selBg":    styleSelectedBg,
+		"selBg":              styleSelectedBg,
+		"stylePromptBorder":    stylePromptBorder,
+		"stylePromptBorderDim": stylePromptBorderDim,
 	} {
 		out := fn("hello " + name)
 		require.False(t, hasANSI(out), "expected no ANSI in NO_COLOR mode for %s, got %q", name, out)
@@ -70,6 +74,30 @@ func stripANSI(s string) string {
 		b = append(b, in[i])
 	}
 	return string(b)
+}
+
+func TestPromptBorderStyles(t *testing.T) {
+	// Force TrueColor so lipgloss emits ANSI even outside a real TTY.
+	prevProfile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	defer lipgloss.SetColorProfile(prevProfile)
+	// Active style is magenta — verifies a foreground SGR code is set.
+	got := stylePromptBorder("╔══╗")
+	if !strings.Contains(got, "\x1b[") {
+		t.Fatalf("stylePromptBorder should emit ANSI when colors enabled, got %q", got)
+	}
+	// Dim style does NOT use the magenta fg.
+	dimGot := stylePromptBorderDim("╔══╗")
+	if dimGot == got {
+		t.Fatalf("dim and active prompt-border styles should differ")
+	}
+	// NO_COLOR collapses both to plain text.
+	SetNoColor(true)
+	defer SetNoColor(false)
+	plain := stylePromptBorder("╔══╗")
+	if plain != "╔══╗" {
+		t.Fatalf("NO_COLOR should yield plain text, got %q", plain)
+	}
 }
 
 func TestStatusGlyph_PerStatus(t *testing.T) {

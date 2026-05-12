@@ -357,28 +357,41 @@ func overlaySlash(base string, st *slashState, w int) string {
 // active ellipsis glyph (Unicode `…` or ASCII `...`). Returns s
 // unchanged when it already fits. For very small max (<= 3) we hard-
 // truncate without an ellipsis since the visible savings disappear.
+//
+// Walks runes and counts each rune's visual width — multi-byte UTF-8
+// (Korean, CJK, emoji) is never split mid-rune, and East Asian wide
+// runes (which occupy 2 cells) are budgeted correctly.
 func truncate(s string, max int) string {
 	if max <= 0 || lipgloss.Width(s) <= max {
 		return s
 	}
-	if max <= 3 {
-		// Hard truncate; matches the pre-Phase-14 contract used by
-		// existing callers / tests that pass tiny widths.
-		if max > len(s) {
-			max = len(s)
-		}
-		return s[:max]
-	}
 	g := Glyphs()
+	if max <= 3 {
+		// Hard truncate without ellipsis; tiny widths.
+		return takeCells(s, max)
+	}
 	ellipsisW := lipgloss.Width(g.Ellipsis)
 	if max <= ellipsisW {
-		return s[:max]
+		return takeCells(s, max)
 	}
-	cut := max - ellipsisW
-	if cut > len(s) {
-		cut = len(s)
+	return takeCells(s, max-ellipsisW) + g.Ellipsis
+}
+
+// takeCells returns the longest rune-aligned prefix of s whose visual
+// width does not exceed cells.
+func takeCells(s string, cells int) string {
+	if cells <= 0 {
+		return ""
 	}
-	return s[:cut] + g.Ellipsis
+	used := 0
+	for i, r := range s {
+		w := lipgloss.Width(string(r))
+		if used+w > cells {
+			return s[:i]
+		}
+		used += w
+	}
+	return s
 }
 
 // max / min helpers (Go 1.21+ has builtins; we keep the explicit forms

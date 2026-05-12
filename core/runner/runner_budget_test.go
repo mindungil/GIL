@@ -67,6 +67,7 @@ func TestAgentLoop_BudgetTokens_StopsAtCap(t *testing.T) {
 	}
 	tools := []tool.Tool{&noopTool{}}
 	loop := NewAgentLoop(spec, prov, "x", tools, verify.NewRunner(dir))
+	loop.NoGrace = true // isolate verify-based status; grace path tested separately
 	res, err := loop.Run(context.Background())
 	require.NoError(t, err)
 	// `false` verifier check fails on the post-loop run, so the new
@@ -106,6 +107,7 @@ func TestAgentLoop_BudgetTokens_EmitsWarningAt75(t *testing.T) {
 		Tools:    tools,
 		Verifier: verify.NewRunner(dir),
 		Events:   stream,
+		NoGrace:  true, // isolate verify-based status; grace path tested separately
 	}
 	resCh := make(chan *Result, 1)
 	go func() {
@@ -163,6 +165,7 @@ func TestAgentLoop_BudgetCost_StopsAtCap(t *testing.T) {
 	}
 	tools := []tool.Tool{&noopTool{}}
 	loop := NewAgentLoop(spec, prov, "claude-haiku-4-5", tools, verify.NewRunner(dir))
+	loop.NoGrace = true // isolate verify-based status; grace path tested separately
 	res, err := loop.Run(context.Background())
 	require.NoError(t, err)
 	// Cost cap fires same as before, but with the new always-final-verify
@@ -337,6 +340,7 @@ func TestAgentLoop_BudgetExhausted_VerifyFails_NewStatus(t *testing.T) {
 	}
 	tools := []tool.Tool{&noopTool{}}
 	loop := NewAgentLoop(spec, prov, "x", tools, verify.NewRunner(dir))
+	loop.NoGrace = true // isolate verify-based status; grace path tested separately
 	res, err := loop.Run(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, "budget_exhausted_verify_failed", res.Status)
@@ -363,6 +367,7 @@ func TestAgentLoop_BudgetExhausted_VerifyPasses_NewStatus(t *testing.T) {
 	}
 	tools := []tool.Tool{&noopTool{}}
 	loop := NewAgentLoop(spec, prov, "x", tools, verify.NewRunner(dir))
+	loop.NoGrace = true // isolate verify-based status; grace path tested separately
 	res, err := loop.Run(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, "budget_exhausted_verify_passed", res.Status,
@@ -418,6 +423,7 @@ func TestAgentLoop_BudgetReserve_DefaultScaling(t *testing.T) {
 	}
 	tools := []tool.Tool{&noopTool{}}
 	loop := NewAgentLoop(spec, prov, "x", tools, verify.NewRunner(dir))
+	loop.NoGrace = true // isolate verify-based status; grace path tested separately
 	res, err := loop.Run(context.Background())
 	require.NoError(t, err)
 	// effective cap = 100 - 10 = 90. iter1=30, iter2=60, iter3=90 ≥ 90 → trip.

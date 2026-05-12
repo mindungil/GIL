@@ -50,6 +50,28 @@ func ApplyDefaults(spec *gilv1.FrozenSpec, cfg Config) *gilv1.FrozenSpec {
 		if spec.Models.Main.ModelId == "" && cfg.Model != "" {
 			spec.Models.Main.ModelId = cfg.Model
 		}
+		// Propagate provider to every other role that has a ModelId
+		// chosen but no provider — common after an interview that names
+		// only the model. Skip slots that are nil entirely (the
+		// caller hasn't asked for that role).
+		if cfg.Provider != "" {
+			for _, slot := range []**gilv1.ModelChoice{
+				&spec.Models.Weak,
+				&spec.Models.Editor,
+				&spec.Models.Adversary,
+				&spec.Models.Interview,
+				&spec.Models.Planner,
+				&spec.Models.Slot,
+				&spec.Models.Audit,
+			} {
+				if *slot == nil {
+					continue
+				}
+				if (*slot).Provider == "" {
+					(*slot).Provider = cfg.Provider
+				}
+			}
+		}
 	}
 
 	// Workspace backend.

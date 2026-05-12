@@ -122,10 +122,24 @@ func loadFile(path string) (Config, bool, error) {
 		}
 		return Config{}, false, err
 	}
-	var cfg Config
-	if err := toml.Unmarshal(data, &cfg); err != nil {
+	// Two-shape support: legacy top-level fields, and the `[defaults]`
+	// section that `gil init` writes today. Try both, and merge so a
+	// user who writes either form (or both) gets the expected result.
+	// This unblocks every install that has run `gil init` since the
+	// init template diverged from the loader's expectations.
+	var top Config
+	if err := toml.Unmarshal(data, &top); err != nil {
 		return Config{}, false, fmt.Errorf("parse: %w", err)
 	}
+	var sectioned struct {
+		Defaults Config `toml:"defaults"`
+	}
+	if err := toml.Unmarshal(data, &sectioned); err != nil {
+		return Config{}, false, fmt.Errorf("parse [defaults] section: %w", err)
+	}
+	// Section overrides top-level when both set the same field; matches
+	// the existing layered-merge convention (later layer wins).
+	cfg := merge(top, sectioned.Defaults)
 	cfg = normalise(cfg)
 	return cfg, true, nil
 }

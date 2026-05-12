@@ -103,6 +103,7 @@ type summaryEnv struct {
 // has stopped.
 type summaryRow struct {
 	ID             string
+	Name           string // pre-computed display slug — Phase 25 A3
 	Status         string // "RUNNING" / "DONE" / "STUCK" / ...
 	Iter           int32
 	MaxIter        int32
@@ -125,6 +126,7 @@ type summaryRow struct {
 func summaryRowFromSession(s *sdk.Session) summaryRow {
 	row := summaryRow{
 		ID:             s.ID,
+		Name:           displayName(s),
 		Status:         s.Status,
 		Iter:           s.CurrentIteration,
 		MaxIter:        100, // server doesn't expose max yet; matches spec mockup
@@ -187,8 +189,12 @@ func renderSummary(out io.Writer, e summaryEnv) {
 		// 14-char goal column — truncate with ellipsis if longer so the
 		// row stays single-line under the spec's 80-col target.
 		goal := truncRune(r.Goal, 48)
-		fmt.Fprintf(out, "   %s  %s   %s   %-7s  %-18s %s\n",
-			coloured, p.Dim(shortID(r.ID)), bar, iterStr, costStr, goal)
+		name := r.Name
+		if name == "" {
+			name = shortID(r.ID)
+		}
+		fmt.Fprintf(out, "   %s  %-22s   %s   %-7s  %-18s %s\n",
+			coloured, p.Dim(name), bar, iterStr, costStr, goal)
 		if r.StuckNote != "" {
 			indent := strings.Repeat(" ", 49) // hand-aligned with cost column
 			fmt.Fprintf(out, "%s%s %s\n", indent, p.Caution(g.Warn),
@@ -386,15 +392,107 @@ func loadSessionPlanNext(sessionID string) string {
 	return ""
 }
 
-// shortID returns the first 6 chars of the ULID lowercased — enough
-// to disambiguate within a working set, narrow enough for the table.
-// (Same convention the spec mockups use.) Lowercasing keeps the
-// rendering uniform whether the ID came in as upper or mixed case.
+// shortID returns the first 10 chars of the ULID lowercased. 10 chars
+// covers the full 48-bit ms-precision ULID timestamp prefix; the prior
+// 6-char default bins to ~30s windows and produced collision-heavy
+// listings (e.g. nine sessions all rendering as "01kqep" when created
+// inside the same minute). Lowercasing keeps rendering uniform whether
+// the ID came in as upper or mixed case.
 func shortID(id string) string {
-	if len(id) <= 6 {
+	if len(id) <= 10 {
 		return strings.ToLower(id)
 	}
-	return strings.ToLower(id[:6])
+	return strings.ToLower(id[:10])
+}
+
+// displayName returns a human-friendly label for a session — a slug
+// derived from the goal text plus a MMDD date, e.g. "add-dark-mode-
+// 0428". Falls back to shortID when no slug is meaningful (empty goal,
+// non-ASCII-only goal where every char gets stripped). The hex ID
+// remains the canonical reference for commands; this is purely a
+// display win — Phase 25 A3.
+//
+// Reference lift: Heroku-style "happy-fox-1234" friendly names + the
+// kubectl pod-name pattern (slug + short suffix). We use a date suffix
+// rather than a random one because timestamps carry useful signal
+// when scanning a session list.
+func displayName(s *sdk.Session) string {
+	if s == nil {
+		return ""
+	}
+	slug := slugify(s.GoalHint)
+	if slug == "" {
+		return shortID(s.ID)
+	}
+	stamp := s.CreatedAt
+	if stamp.IsZero() {
+		stamp = time.Now()
+	}
+	return slug + "-" + stamp.Format("0102")
+}
+
+// relTime renders a duration relative to now using a small set of
+// units the user can read at a glance: "just now", "5m ago", "2h ago",
+// "3d ago", or "12 Apr" for anything older than ~30 days. Future
+// timestamps (clock skew between client and daemon) collapse to "just
+// now" rather than "in 3s" — this is the status surface, not a
+// scheduling view, and "in" prefixes confuse more than they help.
+//
+// Phase 25 A4. Reference lifts: opencode's session list ("2m ago"
+// short form), aider's relative timestamps in /history.
+func relTime(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	d := time.Since(t)
+	if d < 0 {
+		return "just now"
+	}
+	switch {
+	case d < 45*time.Second:
+		return "just now"
+	case d < 90*time.Second:
+		return "1m ago"
+	case d < 60*time.Minute:
+		return fmt.Sprintf("%dm ago", int(d/time.Minute))
+	case d < 90*time.Minute:
+		return "1h ago"
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh ago", int(d/time.Hour))
+	case d < 48*time.Hour:
+		return "yesterday"
+	case d < 30*24*time.Hour:
+		return fmt.Sprintf("%dd ago", int(d/(24*time.Hour)))
+	}
+	return t.Format("2 Jan")
+}
+
+// slugify converts arbitrary goal text to a kebab-case ASCII slug
+// suitable for filenames and command-line scanning. Non-ASCII letters
+// are dropped (we don't transliterate — Korean/CJK goals fall through
+// to the shortID fallback). Whitespace and punctuation collapse to
+// single hyphens; the result is trimmed and capped at 24 chars.
+func slugify(s string) string {
+	var b strings.Builder
+	prevHyphen := true // prevents leading hyphen
+	for _, r := range strings.ToLower(s) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+			prevHyphen = false
+		default:
+			if !prevHyphen {
+				b.WriteByte('-')
+				prevHyphen = true
+			}
+		}
+	}
+	out := strings.TrimRight(b.String(), "-")
+	const max = 24
+	if len(out) > max {
+		out = strings.TrimRight(out[:max], "-")
+	}
+	return out
 }
 
 // truncRune cuts s to width with a trailing single-char ellipsis when

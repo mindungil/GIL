@@ -71,6 +71,46 @@ func TestRetry_ContextCancelledDuringBackoff(t *testing.T) {
 	require.True(t, errors.Is(err, context.DeadlineExceeded), "got: %v", err)
 }
 
+func TestRetry_OnRetryFiresOncePerRetry(t *testing.T) {
+	// 2 transient failures + 1 success → callback fires twice (once
+	// per retry attempt), never on the final success.
+	flaky := &flakyProvider{failsLeft: 2, failErr: errors.New("status 503 transient")}
+	type call struct {
+		attempt, max int
+		errMsg       string
+		wait         time.Duration
+	}
+	var calls []call
+	r := &Retry{
+		Wrapped:     flaky,
+		MaxAttempts: 4,
+		BaseDelay:   1 * time.Millisecond,
+		OnRetry: func(attempt, max int, err error, wait time.Duration) {
+			calls = append(calls, call{attempt, max, err.Error(), wait})
+		},
+	}
+	_, err := r.Complete(context.Background(), Request{})
+	require.NoError(t, err)
+	require.Len(t, calls, 2, "callback should fire once per retry, not on success")
+	require.Equal(t, 1, calls[0].attempt)
+	require.Equal(t, 4, calls[0].max)
+	require.Contains(t, calls[0].errMsg, "503")
+	require.Greater(t, calls[1].wait, calls[0].wait, "delay should grow each retry")
+}
+
+func TestRetry_OnRetryNotFiredForNonRetryable(t *testing.T) {
+	flaky := &flakyProvider{failsLeft: 1, failErr: errors.New("invalid api key")}
+	called := 0
+	r := &Retry{
+		Wrapped:     flaky,
+		MaxAttempts: 4,
+		BaseDelay:   1 * time.Millisecond,
+		OnRetry:     func(int, int, error, time.Duration) { called++ },
+	}
+	_, _ = r.Complete(context.Background(), Request{})
+	require.Equal(t, 0, called, "non-retryable error should propagate without firing callback")
+}
+
 func TestRetry_NameSuffix(t *testing.T) {
 	flaky := &flakyProvider{}
 	r := NewRetry(flaky)

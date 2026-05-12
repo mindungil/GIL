@@ -82,6 +82,31 @@ func TestApplyDefaults_UnknownEnumIgnored(t *testing.T) {
 	require.Equal(t, gilv1.AutonomyDial_AUTONOMY_UNSPECIFIED, spec.Risk.Autonomy)
 }
 
+func TestApplyDefaults_PropagatesProviderToAllRoles(t *testing.T) {
+	// Interview chose specific models for several roles but only set
+	// Provider on Main. ApplyDefaults should fill the missing Provider
+	// on every populated slot, leaving any nil slot nil.
+	spec := &gilv1.FrozenSpec{
+		Models: &gilv1.ModelConfig{
+			Main:      &gilv1.ModelChoice{Provider: "anthropic", ModelId: "claude-opus-4-7"},
+			Editor:    &gilv1.ModelChoice{ModelId: "claude-haiku-4-5"},
+			Adversary: &gilv1.ModelChoice{ModelId: "claude-sonnet-4-6"},
+			Audit:     &gilv1.ModelChoice{Provider: "openai", ModelId: "gpt-5"},
+		},
+	}
+	cfg := Config{Provider: "anthropic"}
+	ApplyDefaults(spec, cfg)
+
+	require.Equal(t, "anthropic", spec.Models.Main.Provider)
+	require.Equal(t, "anthropic", spec.Models.Editor.Provider, "missing provider should pick up the default")
+	require.Equal(t, "anthropic", spec.Models.Adversary.Provider)
+	require.Equal(t, "openai", spec.Models.Audit.Provider, "explicit provider must survive")
+	require.Nil(t, spec.Models.Weak, "nil slots stay nil — ApplyDefaults must not allocate roles the caller didn't ask for")
+	require.Nil(t, spec.Models.Interview)
+	require.Nil(t, spec.Models.Planner)
+	require.Nil(t, spec.Models.Slot)
+}
+
 func TestApplyDefaults_DefaultsAlone(t *testing.T) {
 	spec := &gilv1.FrozenSpec{}
 	ApplyDefaults(spec, Defaults())

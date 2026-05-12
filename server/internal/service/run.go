@@ -83,6 +83,11 @@ type pendingClarify struct {
 	ch chan string
 }
 
+// ProviderFactory returns a Provider + default model name for the given
+// provider name. Used by RunService and SessionService to dial the
+// configured LLM. Lived in interview.go before M3 deleted that file.
+type ProviderFactory func(name string) (provider.Provider, string, error)
+
 // RunService handles RunService gRPC. Loads frozen spec, builds tools/verifier,
 // runs AgentLoop synchronously or in background (detach mode). Tail subscribes
 // to the live event stream.
@@ -352,16 +357,41 @@ func (s *RunService) Start(ctx context.Context, req *gilv1.StartRunRequest) (*gi
 // event (so TUI subscribers can display a modal), then blocks for up to 60s
 // waiting for an AnswerPermission RPC. Timeout = deny, matching Phase 7
 // semantics.
+//
+// S9 — when sessionID is a subagent, the ask is routed to the root
+// session: pendingAsk is keyed under root's id so AnswerPermission
+// against the root unblocks the child, and the permission_ask event
+// emits on the root's event stream so the user watching the root
+// surface sees it. The event payload includes from_session_id +
+// from_subagent_label so the user knows which child is asking.
 func (s *RunService) makeAskCallback(sessionID string, stream *event.Stream, evaluator *permission.EvaluatorWithStore) func(context.Context, runner.AskRequest) bool {
+	// Resolve ask routing target once at callback construction. Subagent
+	// linkage doesn't change during a single run, so a snapshot is
+	// correct for the lifetime of this loop.
+	askRouteID := sessionID
+	askRouteStream := stream
+	fromLabel := ""
+	if sess, err := s.repo.Get(context.Background(), sessionID); err == nil && sess.ParentSessionID != "" {
+		if rootID, rerr := resolveRootSessionID(context.Background(), s.repo, sess); rerr == nil {
+			askRouteID = rootID
+			fromLabel = sess.SubagentLabel
+			s.mu.Lock()
+			if rs, ok := s.runStreams[rootID]; ok {
+				askRouteStream = rs
+			}
+			s.mu.Unlock()
+		}
+	}
+
 	return func(ctx context.Context, req runner.AskRequest) bool {
 		reqID := ulid.Make().String()
 		ch := make(chan bool, 1)
 
 		s.mu.Lock()
-		if s.pendingAsks[sessionID] == nil {
-			s.pendingAsks[sessionID] = make(map[string]*pendingAsk)
+		if s.pendingAsks[askRouteID] == nil {
+			s.pendingAsks[askRouteID] = make(map[string]*pendingAsk)
 		}
-		s.pendingAsks[sessionID][reqID] = &pendingAsk{
+		s.pendingAsks[askRouteID][reqID] = &pendingAsk{
 			ch:        ch,
 			tool:      req.Tool,
 			key:       req.Key,
@@ -370,22 +400,29 @@ func (s *RunService) makeAskCallback(sessionID string, stream *event.Stream, eva
 		s.mu.Unlock()
 
 		// Emit permission_ask event so TUI subscribers see it.
-		data, _ := json.Marshal(map[string]any{
+		payload := map[string]any{
 			"request_id": reqID,
 			"tool":       req.Tool,
 			"key":        req.Key,
-		})
-		_, _ = stream.Append(event.Event{
-			Timestamp: time.Now().UTC(),
-			Source:    event.SourceSystem,
-			Kind:      event.KindNote,
-			Type:      "permission_ask",
-			Data:      data,
-		})
+		}
+		if fromLabel != "" {
+			payload["from_session_id"] = sessionID
+			payload["from_subagent_label"] = fromLabel
+		}
+		data, _ := json.Marshal(payload)
+		if askRouteStream != nil {
+			_, _ = askRouteStream.Append(event.Event{
+				Timestamp: time.Now().UTC(),
+				Source:    event.SourceSystem,
+				Kind:      event.KindNote,
+				Type:      "permission_ask",
+				Data:      data,
+			})
+		}
 
 		defer func() {
 			s.mu.Lock()
-			delete(s.pendingAsks[sessionID], reqID)
+			delete(s.pendingAsks[askRouteID], reqID)
 			s.mu.Unlock()
 		}()
 
@@ -801,6 +838,30 @@ func (s *RunService) executeRun(
 	s.runProgress[sessionID] = &runProgressSnap{}
 	s.mu.Unlock()
 
+	// Wire provider retry observability. The provider was wrapped in
+	// NewRetry at gRPC entry; once we have a stream, attach a callback
+	// that emits a `provider.retry_attempt` event so the chat surface
+	// can show "[retrying 2/4 · 1.0s]" instead of a silent ~30s gap
+	// while exponential backoff drains. Without this hook a flaky
+	// upstream looks indistinguishable from a hang to the user.
+	if rp, ok := prov.(*provider.Retry); ok {
+		rp.OnRetry = func(attempt, maxAttempts int, err error, wait time.Duration) {
+			data, _ := json.Marshal(map[string]any{
+				"attempt":      attempt,
+				"max_attempts": maxAttempts,
+				"wait_ms":      wait.Milliseconds(),
+				"err":          err.Error(),
+			})
+			_, _ = stream.Append(event.Event{
+				Timestamp: time.Now().UTC(),
+				Source:    event.SourceSystem,
+				Kind:      event.KindNote,
+				Type:      "provider.retry_attempt",
+				Data:      data,
+			})
+		}
+	}
+
 	// Cleanup on exit: remove stream, progress, loop, and any
 	// pending-clarification channels. Closing each pending channel
 	// unblocks the clarify tool with Cancelled=true so the run can
@@ -1182,6 +1243,26 @@ func (s *RunService) executeRun(
 	// All mutations flow through the tool, never the loop directly.
 	loop.Plan = planStore
 	loop.SessionID = sessionID
+
+	// P27 T3: instantiate Compactor from spec so the compaction trigger
+	// in runner.go is no longer dead code.
+	// "" catch-all: workspace.ApplyDefaults may leave ModelChoice.Provider
+	// blank; see core/runner/factory.go for why this entry is required.
+	provsByName := map[string]provider.Provider{providerName: prov, "": prov}
+	compactor, cerr := runner.NewCompactorFromSpec(spec.GetModels(), provsByName)
+	if cerr != nil {
+		data, _ := json.Marshal(map[string]any{"err": cerr.Error()})
+		_, _ = stream.Append(event.Event{
+			Timestamp: time.Now().UTC(),
+			Source:    event.SourceSystem,
+			Kind:      event.KindNote,
+			Type:      "compactor_setup_error",
+			Data:      data,
+		})
+		_ = s.repo.UpdateStatus(ctx, sessionID, "stopped")
+		return nil, status.Errorf(codes.InvalidArgument, "compactor setup: %v", cerr)
+	}
+	loop.Compactor = compactor
 
 	// Register the loop pointer so RequestCompact / PostHint RPCs can
 	// stage actions for the next iteration boundary. Cleared in the

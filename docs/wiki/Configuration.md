@@ -4,27 +4,94 @@ Provider / AGENTS.md / autonomy / cost — 모든 설정 통합.
 
 ## Provider Setup
 
-| Provider | 강점 | 비용/1M | 등록 |
+`gil auth login` (no args) 은 **multi-step wizard** — provider 선택 → API 키 → default 모델 → optional connection test. 일반 사용자가 docs를 안 봐도 끝까지 통과 가능하도록 설계.
+
+### Supported providers
+
+| Provider | 강점 | 비용/1M | 추천 default |
 |---|---|---|---|
-| anthropic | 가장 강한 instruction-following + native tool use | haiku $1, sonnet $3, opus $15 | `gil auth login anthropic` |
-| openai | gpt-4o tool use 좋음 | $2.5 (gpt-4o-mini) | `gil auth login openai` |
-| openrouter | 다양한 모델 (Claude proxy, Llama, DeepSeek, Qwen) | varies | `gil auth login openrouter` |
-| vllm/local | 로컬 GPU 무료 | $0 (HW 비용 별도) | `gil auth login vllm --base-url http://...` |
+| `anthropic` | 가장 강한 instruction-following + native tool use | haiku $1, sonnet $3, opus $15 | `claude-haiku-4-5` |
+| `openai` | gpt-4o tool use 좋음 | $2.5 (gpt-4o-mini) | `gpt-4o-mini` |
+| `openrouter` | 100+ 모델 proxy (Claude, Llama, Qwen, Gemini, …) | varies | `anthropic/claude-haiku-4-5` |
+| `vllm` (self-hosted) | 로컬 GPU 무료 | $0 (HW 비용 별도) | (사용자가 endpoint 모델 입력) |
+
+### Interactive wizard
+
+```text
+$ gil auth login
+
+  G I L  ─  Provider Setup
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  1. Pick a provider:
+
+     [1]  Anthropic                 claude-opus / sonnet / haiku  ·  best tool use
+     [2]  OpenAI                    gpt-4o / gpt-4o-mini / o1
+     [3]  OpenRouter                proxy for 100+ models (anthropic, llama, qwen, …)
+     [4]  vLLM (self-hosted, OpenAI-compatible)   your endpoint  ·  any open-weights model
+     [c]  cancel
+
+  Your choice [1-4]: 3
+
+  2. OpenRouter API key:
+
+     Get one at  https://openrouter.ai/keys
+     Looks like  sk-or-v1-…
+
+  API key (input hidden): ••••••••••••••••
+
+  3. Default model:
+
+     Recommended for openrouter:
+
+     [1]  anthropic/claude-haiku-4-5     cheap, fast — default
+     [2]  anthropic/claude-sonnet-4-6    strong, balanced
+     [3]  meta-llama/llama-3.3-70b       open
+     [4]  google/gemini-2.5-flash        cheap
+     [5]  qwen/qwen3-32b                 open + capable
+     [6]  Other (type model id)
+
+  Your choice [1-6, default 1]:
+
+  ✓ Saved to: ~/.config/gil/auth.json (mode 0600)
+
+  Test connection? [Y/n]: y
+  ⠋ testing…
+  ✓ Connection OK · ok · model anthropic/claude-haiku-4-5 · 412ms (in:7 out:1)
+
+  Next:  gil  (start chat)
+         gil auth list / edit / test / logout
+```
+
+### Non-interactive (scripts / CI)
+
+기존 one-shot flag 들은 그대로 동작 — wizard 안 띄우고 바로 저장:
 
 ```bash
-gil auth login <provider>   # 키 입력 (echo off)
-gil auth list               # 등록된 provider + masked key
-gil auth logout <provider>
+gil auth login anthropic --api-key sk-ant-... --model claude-haiku-4-5 --no-test
+gil auth login vllm --base-url http://localhost:8000/v1 --api-key local --model qwen3-32b --no-test
 ```
+
+### Subcommands
+
+| Command | Purpose |
+|---|---|
+| `gil auth login [provider]` | wizard (or non-interactive when --api-key set) |
+| `gil auth list` | 등록된 provider + masked key + model |
+| `gil auth edit <provider>` | 키/base-url/model 변경 (existing 값 유지 가능) |
+| `gil auth test <provider>` | 저장된 자격증명으로 1-token smoke test |
+| `gil auth status` | credstore + env-var fallback 동시 표시 |
+| `gil auth logout <provider>` | 자격증명 제거 |
 
 저장: `$XDG_CONFIG_HOME/gil/auth.json` (mode 0600). env var fallback (`ANTHROPIC_API_KEY` 등) 도 지원.
 
-CLI flag으로 명시:
+### CLI flag으로 명시
+
 ```bash
 gil run <id> --provider anthropic --model claude-haiku-4-5
 ```
 
-또는 spec.yaml `models.main`.
+또는 spec.yaml `models.main`. **resolution order**: `--model` flag > `credstore.Credential.Model` (wizard에서 저장됨) > 환경변수 (`GIL_VLLM_MODEL`) > provider별 hardcoded default (vllm은 default 없음 — wizard 강제).
 
 ## AGENTS.md (영구 instructions)
 

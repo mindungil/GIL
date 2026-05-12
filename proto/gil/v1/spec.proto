@@ -23,6 +23,35 @@ message FrozenSpec {
   repeated Microagent microagents = 18;
   Setup setup = 20;
   RunOptions run = 21;
+  // Subagent delegation policy. Empty = inherit-everything with per-
+  // subagent ⅓ budget defaults applied at spawn time. See
+  // docs/design/subagent.md §3.1.
+  SubagentPolicy subagent = 22;
+}
+
+// SubagentPolicy declares what a parent agent's freeze_spec passes
+// down to children when spawn_agent fires. Spec slicing is applied at
+// spawn time (server/internal/service/subagent_slice.go); empty fields
+// default to "inherit everything from the parent."
+//
+// inherit_* booleans gate whole slots. When false the child's
+// corresponding spec slot is left empty and falls back to the
+// daemon's workspace-config defaults the same way a fresh session
+// would.
+//
+// max_*_per_subagent are absolute caps applied to each spawned child
+// independently. 0 means "no per-subagent cap" — children inherit
+// the parent's full budget (which itself caps the whole tree).
+message SubagentPolicy {
+  bool inherit_workspace = 1;
+  bool inherit_models = 2;
+  bool inherit_tools = 3;
+  bool inherit_verification = 4;
+  bool inherit_constraints = 5;
+
+  int64  max_iterations_per_subagent = 10;
+  int64  max_tokens_per_subagent = 11;
+  double max_cost_per_subagent_usd = 12;
 }
 
 // RunOptions carries per-run knobs that don't fit cleanly into the

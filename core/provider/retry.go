@@ -14,6 +14,15 @@ type Retry struct {
 	Wrapped     Provider
 	MaxAttempts int           // total attempts (1 = no retry); default 4
 	BaseDelay   time.Duration // initial backoff; default 500ms; doubles each attempt
+	// OnRetry, when non-nil, is invoked once per retryable failure
+	// (after attempt N fails and before sleeping `wait` to retry as
+	// attempt N+1). The chat surface wires this to a `provider.retry_attempt`
+	// run-stream event so the user sees backoff is happening; without
+	// it a flaky upstream looks indistinguishable from a hang.
+	//
+	// Keep the callback fast — it runs on the request goroutine and
+	// blocks the next attempt. Allocation-free is ideal.
+	OnRetry func(attempt, maxAttempts int, err error, wait time.Duration)
 }
 
 // NewRetry returns a Retry around inner with sensible defaults
@@ -70,6 +79,9 @@ func (r *Retry) Complete(ctx context.Context, req Request) (Response, error) {
 		wait := delay
 		if hint := retryAfterHint(err); hint > wait {
 			wait = hint
+		}
+		if r.OnRetry != nil {
+			r.OnRetry(attempt, max, err, wait)
 		}
 		select {
 		case <-time.After(wait):

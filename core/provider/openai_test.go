@@ -79,6 +79,66 @@ func TestOpenAI_Complete_TextOnly(t *testing.T) {
 	require.Equal(t, "say hi", *sent.Messages[1].Content)
 }
 
+func TestOpenAI_Complete_PopulatesReasoning_VllmShape(t *testing.T) {
+	// vLLM returns the chain-of-thought in a `reasoning` sibling
+	// field. The provider must surface it on Response.Reasoning so
+	// the engine can skip its defensive heuristic strip.
+	h := &scriptedHandler{
+		respBody: `{
+            "choices":[{"index":0,"message":{"role":"assistant","content":"4","reasoning":"2+2 is basic arithmetic..."},"finish_reason":"stop"}],
+            "usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}
+        }`,
+	}
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+	o := NewOpenAI("k", srv.URL)
+	resp, err := o.Complete(context.Background(), Request{
+		Model: "qwen3-thinking", Messages: []Message{{Role: RoleUser, Content: "2+2?"}},
+	})
+	require.NoError(t, err)
+	require.Equal(t, "4", resp.Text)
+	require.Equal(t, "2+2 is basic arithmetic...", resp.Reasoning)
+}
+
+func TestOpenAI_Complete_PopulatesReasoning_DeepSeekShape(t *testing.T) {
+	// DeepSeek-R1 uses `reasoning_content` instead of `reasoning`.
+	// Both shapes must populate the same Response field.
+	h := &scriptedHandler{
+		respBody: `{
+            "choices":[{"index":0,"message":{"role":"assistant","content":"final answer","reasoning_content":"chain of thought here"},"finish_reason":"stop"}],
+            "usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}
+        }`,
+	}
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+	o := NewOpenAI("k", srv.URL)
+	resp, err := o.Complete(context.Background(), Request{
+		Model: "deepseek-r1", Messages: []Message{{Role: RoleUser, Content: "x"}},
+	})
+	require.NoError(t, err)
+	require.Equal(t, "final answer", resp.Text)
+	require.Equal(t, "chain of thought here", resp.Reasoning)
+}
+
+func TestOpenAI_Complete_NoReasoning_LeavesFieldEmpty(t *testing.T) {
+	// Conventional models that don't separate reasoning must leave
+	// Response.Reasoning empty so the engine knows to fall back to
+	// the heuristic strip.
+	h := &scriptedHandler{
+		respBody: `{
+            "choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],
+            "usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}
+        }`,
+	}
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+	o := NewOpenAI("k", srv.URL)
+	resp, err := o.Complete(context.Background(), Request{Model: "gpt-4o-mini", Messages: []Message{{Role: RoleUser, Content: "x"}}})
+	require.NoError(t, err)
+	require.Equal(t, "hi", resp.Text)
+	require.Equal(t, "", resp.Reasoning)
+}
+
 func TestOpenAI_Complete_NoAPIKey_OmitsAuthHeader(t *testing.T) {
 	h := &scriptedHandler{
 		respBody: `{"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,

@@ -75,6 +75,91 @@ func TestPersistAcrossInstances(t *testing.T) {
 	}
 }
 
+// TestModelField_Roundtrip is the Phase 25 schema-bump check: writing a
+// credential with a Model set round-trips through the on-disk JSON. We
+// also assert the field is omitempty (a pure key-only credential should
+// not carry a "model":"" entry on disk) so older auth.json files stay
+// byte-identical when the wizard isn't used.
+func TestModelField_Roundtrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "auth.json")
+	store := NewFileStore(path)
+	ctx := context.Background()
+
+	// 1. With a Model set — must round-trip.
+	in := Credential{
+		Type:    CredAPI,
+		APIKey:  "sk-or-v1-test1234567890ab",
+		BaseURL: "https://openrouter.ai/api/v1",
+		Model:   "anthropic/claude-haiku-4-5",
+	}
+	if err := store.Set(ctx, OpenRouter, in); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	got, err := store.Get(ctx, OpenRouter)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got == nil || got.Model != in.Model {
+		t.Fatalf("Model: got %+v want %q", got, in.Model)
+	}
+	// Re-read with a fresh store to prove we actually hit disk.
+	other := NewFileStore(path)
+	got2, _ := other.Get(ctx, OpenRouter)
+	if got2 == nil || got2.Model != in.Model {
+		t.Fatalf("fresh-store Model: got %+v want %q", got2, in.Model)
+	}
+
+	// 2. Without a Model — must omit the field so older readers don't
+	// trip on an empty string.
+	if err := store.Set(ctx, Anthropic, Credential{Type: CredAPI, APIKey: "sk-ant-aaaabbbbccccdddd"}); err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), `"model": ""`) {
+		t.Errorf("empty Model leaked an explicit \"\": file contents: %s", string(body))
+	}
+}
+
+// TestLoadOlderFile_NoModel covers the backwards-compat path: an
+// auth.json written before the Model field existed must still load and
+// the loaded Credential.Model must be empty (zero value).
+func TestLoadOlderFile_NoModel(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "auth.json")
+	// Hand-roll a v1 file with the pre-Model shape — no "model" key.
+	const legacy = `{
+  "version": 1,
+  "providers": {
+    "anthropic": {
+      "type": "api",
+      "api_key": "sk-ant-legacy123456789",
+      "updated": "2024-01-01T00:00:00Z"
+    }
+  }
+}`
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := NewFileStore(path)
+	cred, err := store.Get(context.Background(), Anthropic)
+	if err != nil {
+		t.Fatalf("Get on legacy file: %v", err)
+	}
+	if cred == nil {
+		t.Fatal("expected a credential, got nil")
+	}
+	if cred.Model != "" {
+		t.Errorf("expected empty Model on legacy file, got %q", cred.Model)
+	}
+	if cred.APIKey != "sk-ant-legacy123456789" {
+		t.Errorf("APIKey didn't load: %q", cred.APIKey)
+	}
+}
+
 // TestList returns every provider that's been Set and stays in sync with
 // Remove.
 func TestList(t *testing.T) {

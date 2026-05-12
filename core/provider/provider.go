@@ -61,12 +61,22 @@ type Request struct {
 }
 
 // Response carries the LLM output and usage metrics.
+//
+// Reasoning is populated when the upstream cleanly separates the
+// chain-of-thought from the final answer (vLLM's `reasoning` field,
+// DeepSeek-R1's `reasoning_content`, Anthropic extended-thinking
+// blocks). When it is non-empty, callers can trust Text as the actual
+// answer and skip the defensive preamble-stripping heuristics in
+// core/interview/jsonextract.go. When empty, the upstream either
+// inlined reasoning into Text or didn't reason at all — the caller
+// must apply its own normalisation.
 type Response struct {
 	Text         string
+	Reasoning    string
 	InputTokens  int64
 	OutputTokens int64
 	ToolCalls    []ToolCall // populated when LLM wants to call tools
-	StopReason   string      // "end_turn" | "tool_use" | ...
+	StopReason   string     // "end_turn" | "tool_use" | ...
 }
 
 // Provider is the LLM abstraction. Concrete implementations live in this

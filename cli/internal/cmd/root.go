@@ -5,6 +5,7 @@ import (
 
 	"github.com/mindungil/gil/core/paths"
 	"github.com/mindungil/gil/core/version"
+	tuirun "github.com/mindungil/gil/tui/run"
 )
 
 // outputFormat is the value of the persistent `--output` flag wired in
@@ -121,9 +122,22 @@ func Root() *cobra.Command {
 		// switch; --no-chat (and the explicit `gil chat` subcommand)
 		// override it for power users who want one form regardless of
 		// where stdout points.
+		//
+		// G4 NOTE — followup §2.6 violations #42 / #44 flag this branch
+		// as "two surfaces, not one." It is a known compromise: bare
+		// `gil | grep ...` scripts depend on the summary output and
+		// removing it would break headless workflows. Resolution path
+		// (TBD): expose JSON-only `gil --output json` summary equivalents
+		// in non-TTY mode while keeping chat as the only visible surface.
+		// Until that lands, leave the branch with explicit comments
+		// rather than pretending it isn't there.
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if !noChat && stdoutIsTTY() {
-				return runChat(cmd, defaultSocket(), "", "")
+				// Phase 26.6: TTY chat surface lives in the tui module —
+				// a persistent panel layout with a magenta-bordered prompt
+				// panel as the visual focal point. Non-TTY and --no-chat
+				// continue to fall through to the line-based summary.
+				return tuirun.Chat(cmd.Context(), defaultSocket())
 			}
 			return runSummary(cmd.OutOrStdout(), defaultSocket(), defaultBase(), asciiMode)
 		},
@@ -156,29 +170,57 @@ func Root() *cobra.Command {
 	// Off by default so the conversational surface ships as the new
 	// front door.
 	root.PersistentFlags().BoolVar(&noChat, "no-chat", false, "skip the chat REPL on bare gil; always render the summary")
-	root.AddCommand(daemonCmd())
-	root.AddCommand(authCmd())
-	root.AddCommand(initCmd())
-	root.AddCommand(doctorCmd())
-	root.AddCommand(newCmd())
-	root.AddCommand(statusCmd())
-	root.AddCommand(sessionCmd())
-	root.AddCommand(interviewCmd())
-	root.AddCommand(resumeCmd())
-	root.AddCommand(specCmd())
-	root.AddCommand(runCmd())
-	root.AddCommand(eventsCmd())
-	root.AddCommand(watchCmd())
-	root.AddCommand(exportCmd())
-	root.AddCommand(importCmd())
-	root.AddCommand(restoreCmd())
-	root.AddCommand(costCmd())
-	root.AddCommand(statsCmd())
-	root.AddCommand(mcpCmd())
-	root.AddCommand(permissionsCmd())
-	root.AddCommand(clarifyCmd())
-	root.AddCommand(updateCmd())
-	root.AddCommand(chatCmd())
-	root.AddCommand(newCompletionCmd(root))
+	// --no-intent-router: bypass the §2.6(b) natural-language verb router
+	// in the chat REPL, forwarding every prompt directly to the daemon.
+	// Useful for debugging / regression-testing the pre-26.6 behavior.
+	root.PersistentFlags().BoolVar(&noIntentRouter, "no-intent-router", false, "disable natural-language verb routing (always forward prompts)")
+	// Phase 25 A2 — surface a stage-based grouping in `gil --help` so
+	// the dump-of-25-commands maps onto the user's mental model: setup
+	// once, then run sessions, then diagnose / maintain. Cobra renders
+	// each group as a header in the help output (commands without a
+	// GroupID fall under "Additional Commands").
+	// Phase 26 T14 — add "advanced" group for verb-mode (headless) commands.
+	root.AddGroup(
+		&cobra.Group{ID: "setup", Title: "Setup:"},
+		&cobra.Group{ID: "session", Title: "Sessions & runs:"},
+		&cobra.Group{ID: "diag", Title: "Diagnostics & history:"},
+		&cobra.Group{ID: "tools", Title: "Tools & integration:"},
+		&cobra.Group{ID: "maint", Title: "Maintenance:"},
+		&cobra.Group{ID: "advanced", Title: "Advanced (headless / scripting):"},
+	)
+	addCmd := func(c *cobra.Command, group string) {
+		c.GroupID = group
+		root.AddCommand(c)
+	}
+	addCmd(initCmd(), "setup")
+	addCmd(authCmd(), "setup")
+	addCmd(doctorCmd(), "setup")
+
+	addCmd(chatCmd(), "session")
+	addCmd(newCmd(), "session")
+	// `gil interview` / `gil resume` / `gil spec` / `gil clarify`
+	// removed in M3 — those were thin wrappers over InterviewService
+	// which is gone. Spec inspection moves into the chat agent's
+	// show_spec tool.
+	addCmd(runCmd(), "advanced")
+	addCmd(watchCmd(), "advanced")
+	addCmd(eventsCmd(), "advanced")
+	// specCmd removed (see comment above interview/resume).
+	// clarifyCmd removed in M3 (interview engine deletion).
+	addCmd(sessionCmd(), "session")
+
+	addCmd(statusCmd(), "diag")
+	addCmd(costCmd(), "diag")
+	addCmd(statsCmd(), "advanced")
+	addCmd(restoreCmd(), "diag")
+	addCmd(exportCmd(), "advanced")
+	addCmd(importCmd(), "advanced")
+
+	addCmd(mcpCmd(), "tools")
+	addCmd(permissionsCmd(), "tools")
+
+	addCmd(daemonCmd(), "maint")
+	addCmd(updateCmd(), "maint")
+	root.AddCommand(newCompletionCmd(root)) // cobra owns this group
 	return root
 }

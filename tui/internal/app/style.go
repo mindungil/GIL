@@ -25,6 +25,7 @@ type Palette struct {
 	Alert    lipgloss.Color // coral — verify fail, stuck unrecovered
 	Emphasis lipgloss.Color // lavender — "now active" selection
 	BgFill   lipgloss.Color // subtle dark fill for selected row
+	Magenta  lipgloss.Color // bright magenta — prompt panel border (single-purpose)
 }
 
 // truecolorPalette is the canonical palette per spec §1. Used whenever
@@ -42,6 +43,7 @@ func truecolorPalette() Palette {
 		Alert:    lipgloss.Color("#fb7185"),
 		Emphasis: lipgloss.Color("#a5b4fc"),
 		BgFill:   lipgloss.Color("#1a1a1a"),
+		Magenta:  lipgloss.Color("#d946ef"),
 	}
 }
 
@@ -159,6 +161,26 @@ func styleSelectedBg(s string) string {
 		return s
 	}
 	return lipgloss.NewStyle().Background(pal.BgFill).Foreground(pal.Surface).Render(s)
+}
+
+// stylePromptBorder returns text rendered in the magenta accent reserved
+// for the chat prompt panel border. Per spec §4.1 this is the single
+// magenta moment on screen — no other element calls this helper.
+func stylePromptBorder(s string) string {
+	if noColor {
+		return s
+	}
+	return lipgloss.NewStyle().Foreground(pal.Magenta).Render(s)
+}
+
+// stylePromptBorderDim returns the prompt-panel border in dim/frame
+// color, used when the input is temporarily disabled (agent turn in
+// flight). The geometry stays identical so the panel doesn't jump.
+func stylePromptBorderDim(s string) string {
+	if noColor {
+		return s
+	}
+	return lipgloss.NewStyle().Foreground(pal.Frame).Render(s)
 }
 
 // paneFrame returns a lipgloss.Style configured as a rounded light

@@ -68,6 +68,9 @@ func newServer(dbPath, sockPath, sessionsBase, authFile string, authMW *auth.Mid
 		_ = db.Close()
 		return nil, err
 	}
+	// G3 — plan_steps SQLite persistence. Daemon-wide store writes
+	// through to the same DB session.Migrate just prepared.
+	service.SetGlobalPlanDB(db)
 	lis, err := uds.Listen(sockPath)
 	if err != nil {
 		_ = db.Close()
@@ -442,10 +445,22 @@ func newServer(dbPath, sockPath, sessionsBase, authFile string, authMW *auth.Mid
 					},
 				}), "mock-model", nil
 			default:
-				// Text-only Mock for InterviewService scenarios
-				return provider.NewMock([]string{
+				// Text-only Mock for InterviewService scenarios. Uses
+				// the cycling variant so an open-ended chat session
+				// (`gil chat --provider mock`) doesn't crash on turn 3 —
+				// the previous 2-entry list exhausted the moment the
+				// user typed a reply, making mock unusable for dogfood.
+				// The list still leads with the sensing-engine domain
+				// JSON, then rotates clarifying questions and a confirm.
+				return provider.NewMockLoop([]string{
 					`{"domain":"unknown","domain_confidence":0.5,"tech_hints":[],"scale_hint":"unknown","ambiguity":"none"}`,
 					"What's your project goal?",
+					"Got it. What success looks like to you for this run?",
+					"Are there constraints (language, framework, deadlines) I should respect?",
+					"Any files or modules I should focus on first?",
+					"Should the agent stop and ask before destructive actions?",
+					"Tell me one example output you'd accept as 'done'.",
+					"Anything else I should know before we kick off?",
 				}), "mock-model", nil
 			}
 		case "anthropic", "":
@@ -533,8 +548,14 @@ func newServer(dbPath, sockPath, sessionsBase, authFile string, authMW *auth.Mid
 	g := grpc.NewServer(grpcOpts...)
 	repo := session.NewRepo(db)
 	runSvc := service.NewRunService(repo, sessionsBase, factory)
-	gilv1.RegisterSessionServiceServer(g, service.NewSessionService(repo, runSvc).WithSessionsBase(sessionsBase).WithBudgetGetter(runSvc))
-	gilv1.RegisterInterviewServiceServer(g, service.NewInterviewService(repo, sessionsBase, factory))
+	gilv1.RegisterSessionServiceServer(g, service.
+		NewSessionService(repo, runSvc).
+		WithSessionsBase(sessionsBase).
+		WithBudgetGetter(runSvc).
+		WithProviderFactory(factory))
+	// InterviewService deleted in M3 — chat surface routes through
+	// SessionService.Prompt with the agent's tool registry handling
+	// what sensing/slot-fill/audit used to do.
 	gilv1.RegisterRunServiceServer(g, runSvc)
 
 	return &server{grpc: g, lis: lis, db: db}, nil
@@ -893,9 +914,7 @@ func runHTTPGateway(addr, sockPath string) error {
 	if err := gilv1.RegisterRunServiceHandlerFromEndpoint(ctx, mux, target, opts); err != nil {
 		return err
 	}
-	if err := gilv1.RegisterInterviewServiceHandlerFromEndpoint(ctx, mux, target, opts); err != nil {
-		return err
-	}
+	// InterviewService gateway removed in M3.
 	slog.Info("http gateway listening", "addr", addr)
 	return http.ListenAndServe(addr, mux)
 }

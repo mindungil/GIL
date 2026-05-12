@@ -171,10 +171,20 @@ type chatChoice struct {
 // chatRespMsg is the assistant message inside a choice. content can be a
 // JSON string OR null when the model only emitted tool_calls; we declare
 // it as *string so the unmarshal preserves the null/empty distinction.
+//
+// Reasoning-model deployments (vLLM with --reasoning-parser, DeepSeek-R1,
+// Qwen3-thinking) put the chain-of-thought in a sibling field on the
+// assistant message — vLLM uses `reasoning`, DeepSeek uses
+// `reasoning_content`. We accept both and discard the value: callers
+// that want the answer want only `content`. This avoids the
+// reasoning-leakage failure mode where the entire CoT shows up in the
+// next-question stream and breaks JSON parsers further down.
 type chatRespMsg struct {
-	Role      string             `json:"role"`
-	Content   *string            `json:"content"`
-	ToolCalls []chatRespToolCall `json:"tool_calls"`
+	Role             string             `json:"role"`
+	Content          *string            `json:"content"`
+	Reasoning        string             `json:"reasoning"`
+	ReasoningContent string             `json:"reasoning_content"`
+	ToolCalls        []chatRespToolCall `json:"tool_calls"`
 }
 
 type chatRespToolCall struct {
@@ -271,6 +281,16 @@ func (o *OpenAI) Complete(ctx context.Context, req Request) (Response, error) {
 	}
 	if choice.Message.Content != nil {
 		out.Text = *choice.Message.Content
+	}
+	// Surface the reasoning trace in its dedicated field. vLLM uses
+	// `reasoning`, DeepSeek-R1 uses `reasoning_content`; we accept
+	// either and report whichever was populated. Callers that don't
+	// care can ignore it; callers that do (interview engine) use it
+	// to skip defensive heuristics on Text.
+	if choice.Message.Reasoning != "" {
+		out.Reasoning = choice.Message.Reasoning
+	} else if choice.Message.ReasoningContent != "" {
+		out.Reasoning = choice.Message.ReasoningContent
 	}
 	for _, tc := range choice.Message.ToolCalls {
 		// arguments is a JSON string per the OpenAI spec. Wrap it as

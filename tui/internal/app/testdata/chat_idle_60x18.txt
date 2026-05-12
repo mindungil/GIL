@@ -1,0 +1,18 @@
+   ▏  G  I  L      ────          /snap/cwd   qwen3.6-27b  ·… 
+                                                             
+                                                             
+   ╴╴  no past sessions                                      
+                                                             
+         describe a task to begin                            
+                                                             
+   ╴╴  examples                                              
+                                                             
+         · "refactor my auth middleware for the new oidc s…  
+         · "build a CLI that scans go files for TODO comme…  
+         · "port the Python date-parser to TypeScript"       
+                                                             
+                                       [ idle  ·  ready ]    
+   ╭────────────────────────────────────────────────────╮    
+   │ ›                                                  │    
+   ╰────────────────────────────────────────────────────╯    
+      describe a task, resume by slug, or ask what's running 
