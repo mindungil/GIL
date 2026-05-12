@@ -357,16 +357,41 @@ func (s *RunService) Start(ctx context.Context, req *gilv1.StartRunRequest) (*gi
 // event (so TUI subscribers can display a modal), then blocks for up to 60s
 // waiting for an AnswerPermission RPC. Timeout = deny, matching Phase 7
 // semantics.
+//
+// S9 — when sessionID is a subagent, the ask is routed to the root
+// session: pendingAsk is keyed under root's id so AnswerPermission
+// against the root unblocks the child, and the permission_ask event
+// emits on the root's event stream so the user watching the root
+// surface sees it. The event payload includes from_session_id +
+// from_subagent_label so the user knows which child is asking.
 func (s *RunService) makeAskCallback(sessionID string, stream *event.Stream, evaluator *permission.EvaluatorWithStore) func(context.Context, runner.AskRequest) bool {
+	// Resolve ask routing target once at callback construction. Subagent
+	// linkage doesn't change during a single run, so a snapshot is
+	// correct for the lifetime of this loop.
+	askRouteID := sessionID
+	askRouteStream := stream
+	fromLabel := ""
+	if sess, err := s.repo.Get(context.Background(), sessionID); err == nil && sess.ParentSessionID != "" {
+		if rootID, rerr := resolveRootSessionID(context.Background(), s.repo, sess); rerr == nil {
+			askRouteID = rootID
+			fromLabel = sess.SubagentLabel
+			s.mu.Lock()
+			if rs, ok := s.runStreams[rootID]; ok {
+				askRouteStream = rs
+			}
+			s.mu.Unlock()
+		}
+	}
+
 	return func(ctx context.Context, req runner.AskRequest) bool {
 		reqID := ulid.Make().String()
 		ch := make(chan bool, 1)
 
 		s.mu.Lock()
-		if s.pendingAsks[sessionID] == nil {
-			s.pendingAsks[sessionID] = make(map[string]*pendingAsk)
+		if s.pendingAsks[askRouteID] == nil {
+			s.pendingAsks[askRouteID] = make(map[string]*pendingAsk)
 		}
-		s.pendingAsks[sessionID][reqID] = &pendingAsk{
+		s.pendingAsks[askRouteID][reqID] = &pendingAsk{
 			ch:        ch,
 			tool:      req.Tool,
 			key:       req.Key,
@@ -375,22 +400,29 @@ func (s *RunService) makeAskCallback(sessionID string, stream *event.Stream, eva
 		s.mu.Unlock()
 
 		// Emit permission_ask event so TUI subscribers see it.
-		data, _ := json.Marshal(map[string]any{
+		payload := map[string]any{
 			"request_id": reqID,
 			"tool":       req.Tool,
 			"key":        req.Key,
-		})
-		_, _ = stream.Append(event.Event{
-			Timestamp: time.Now().UTC(),
-			Source:    event.SourceSystem,
-			Kind:      event.KindNote,
-			Type:      "permission_ask",
-			Data:      data,
-		})
+		}
+		if fromLabel != "" {
+			payload["from_session_id"] = sessionID
+			payload["from_subagent_label"] = fromLabel
+		}
+		data, _ := json.Marshal(payload)
+		if askRouteStream != nil {
+			_, _ = askRouteStream.Append(event.Event{
+				Timestamp: time.Now().UTC(),
+				Source:    event.SourceSystem,
+				Kind:      event.KindNote,
+				Type:      "permission_ask",
+				Data:      data,
+			})
+		}
 
 		defer func() {
 			s.mu.Lock()
-			delete(s.pendingAsks[sessionID], reqID)
+			delete(s.pendingAsks[askRouteID], reqID)
 			s.mu.Unlock()
 		}()
 
