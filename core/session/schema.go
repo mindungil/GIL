@@ -8,7 +8,7 @@ import (
 
 // currentSchemaVersion is the latest schema version. When new migrations
 // are added, this constant must be incremented to match the new version.
-const currentSchemaVersion = 2
+const currentSchemaVersion = 3
 
 // migrations is a slice of SQL migration strings, indexed by version-1.
 // For example, migrations[0] is the SQL for version 1, migrations[1] is for
@@ -50,6 +50,19 @@ var migrations = []string{
 	);
 
 	CREATE INDEX IF NOT EXISTS idx_plan_steps_session ON plan_steps(session_id);
+	`,
+	// v3 — subagent parent-child columns (G5). Flat sessions become a
+	// tree via parent_session_id; subagent_depth caps recursion;
+	// subagent_label is the parent-chosen nickname used in wait_agent.
+	// SQLite tolerates ALTER TABLE ADD COLUMN with a default, which is
+	// what we need for backfill — existing rows get parent_session_id=""
+	// (root), subagent_depth=0, subagent_label="".
+	`
+	ALTER TABLE sessions ADD COLUMN parent_session_id TEXT NOT NULL DEFAULT '';
+	ALTER TABLE sessions ADD COLUMN subagent_depth INTEGER NOT NULL DEFAULT 0;
+	ALTER TABLE sessions ADD COLUMN subagent_label TEXT NOT NULL DEFAULT '';
+
+	CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
 	`,
 }
 

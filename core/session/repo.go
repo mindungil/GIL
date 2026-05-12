@@ -26,12 +26,24 @@ type Session struct {
 	GoalHint     string
 	TotalTokens  int64
 	TotalCostUSD float64
+	// Subagent linkage (schema v3, G5).
+	// ParentSessionID = "" → root session (the user-initiated one).
+	// SubagentDepth   = 0 for root, parent.depth+1 for spawned children.
+	// SubagentLabel   = parent-chosen nickname used by wait_agent. "" for root.
+	ParentSessionID string
+	SubagentDepth   int32
+	SubagentLabel   string
 }
 
 // CreateInput captures the fields the caller supplies for a new session.
 type CreateInput struct {
 	WorkingDir string
 	GoalHint   string
+	// Subagent fields — set only when spawn_agent creates a child. Empty
+	// values keep the session as a root (parent="" depth=0 label="").
+	ParentSessionID string
+	SubagentDepth   int32
+	SubagentLabel   string
 }
 
 // ListOptions controls pagination and filtering for List.
@@ -55,30 +67,40 @@ func (r *Repo) Create(ctx context.Context, in CreateInput) (Session, error) {
 	id := ulid.Make().String()
 	now := time.Now().UTC()
 	_, err := r.db.ExecContext(ctx, `
-		INSERT INTO sessions (id, status, created_at, updated_at, working_dir, goal_hint)
-		VALUES (?, ?, ?, ?, ?, ?)
-	`, id, statusCreated, now, now, in.WorkingDir, in.GoalHint)
+		INSERT INTO sessions
+		(id, status, created_at, updated_at, working_dir, goal_hint,
+		 parent_session_id, subagent_depth, subagent_label)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, id, statusCreated, now, now, in.WorkingDir, in.GoalHint,
+		in.ParentSessionID, in.SubagentDepth, in.SubagentLabel)
 	if err != nil {
 		return Session{}, fmt.Errorf("session.Create: %w", err)
 	}
 	return Session{
-		ID:         id,
-		Status:     statusCreated,
-		CreatedAt:  now,
-		UpdatedAt:  now,
-		WorkingDir: in.WorkingDir,
-		GoalHint:   in.GoalHint,
+		ID:              id,
+		Status:          statusCreated,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+		WorkingDir:      in.WorkingDir,
+		GoalHint:        in.GoalHint,
+		ParentSessionID: in.ParentSessionID,
+		SubagentDepth:   in.SubagentDepth,
+		SubagentLabel:   in.SubagentLabel,
 	}, nil
 }
 
 // Get returns the session by id, or ErrNotFound.
 func (r *Repo) Get(ctx context.Context, id string) (Session, error) {
 	row := r.db.QueryRowContext(ctx, `
-		SELECT id, status, created_at, updated_at, spec_id, working_dir, goal_hint, total_tokens, total_cost_usd
+		SELECT id, status, created_at, updated_at, spec_id, working_dir, goal_hint,
+		       total_tokens, total_cost_usd,
+		       parent_session_id, subagent_depth, subagent_label
 		FROM sessions WHERE id = ?
 	`, id)
 	var s Session
-	err := row.Scan(&s.ID, &s.Status, &s.CreatedAt, &s.UpdatedAt, &s.SpecID, &s.WorkingDir, &s.GoalHint, &s.TotalTokens, &s.TotalCostUSD)
+	err := row.Scan(&s.ID, &s.Status, &s.CreatedAt, &s.UpdatedAt, &s.SpecID, &s.WorkingDir, &s.GoalHint,
+		&s.TotalTokens, &s.TotalCostUSD,
+		&s.ParentSessionID, &s.SubagentDepth, &s.SubagentLabel)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Session{}, ErrNotFound
 	}
@@ -94,7 +116,9 @@ func (r *Repo) List(ctx context.Context, opts ListOptions) ([]Session, error) {
 	if limit <= 0 {
 		limit = 100
 	}
-	q := `SELECT id, status, created_at, updated_at, spec_id, working_dir, goal_hint, total_tokens, total_cost_usd
+	q := `SELECT id, status, created_at, updated_at, spec_id, working_dir, goal_hint,
+	             total_tokens, total_cost_usd,
+	             parent_session_id, subagent_depth, subagent_label
 	      FROM sessions`
 	args := []any{}
 	if opts.StatusFilter != "" {
@@ -113,7 +137,9 @@ func (r *Repo) List(ctx context.Context, opts ListOptions) ([]Session, error) {
 	var out []Session
 	for rows.Next() {
 		var s Session
-		if err := rows.Scan(&s.ID, &s.Status, &s.CreatedAt, &s.UpdatedAt, &s.SpecID, &s.WorkingDir, &s.GoalHint, &s.TotalTokens, &s.TotalCostUSD); err != nil {
+		if err := rows.Scan(&s.ID, &s.Status, &s.CreatedAt, &s.UpdatedAt, &s.SpecID, &s.WorkingDir, &s.GoalHint,
+			&s.TotalTokens, &s.TotalCostUSD,
+			&s.ParentSessionID, &s.SubagentDepth, &s.SubagentLabel); err != nil {
 			return nil, fmt.Errorf("session.List scan: %w", err)
 		}
 		out = append(out, s)
@@ -161,4 +187,40 @@ func (r *Repo) UpdateStatus(ctx context.Context, id, status string) error {
 		return ErrNotFound
 	}
 	return nil
+}
+
+// ListChildren returns sessions whose parent_session_id matches parentID.
+// Order is created_at ascending — earliest spawned first, which matches
+// how a parent agent reasons about its child fleet ("first the explorer,
+// then the awaiter"). Empty parentID lists root-only sessions; pass a
+// real id to get only spawned subagents.
+//
+// Returned slice is empty (not nil-pointing-to-err) on zero matches.
+// Used by agent_status, wait_agent (label lookup), and the subagent
+// registry's depth/count checks.
+func (r *Repo) ListChildren(ctx context.Context, parentID string) ([]Session, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT id, status, created_at, updated_at, spec_id, working_dir, goal_hint,
+		       total_tokens, total_cost_usd,
+		       parent_session_id, subagent_depth, subagent_label
+		FROM sessions
+		WHERE parent_session_id = ?
+		ORDER BY created_at ASC
+	`, parentID)
+	if err != nil {
+		return nil, fmt.Errorf("session.ListChildren query: %w", err)
+	}
+	defer rows.Close()
+
+	var out []Session
+	for rows.Next() {
+		var s Session
+		if err := rows.Scan(&s.ID, &s.Status, &s.CreatedAt, &s.UpdatedAt, &s.SpecID, &s.WorkingDir, &s.GoalHint,
+			&s.TotalTokens, &s.TotalCostUSD,
+			&s.ParentSessionID, &s.SubagentDepth, &s.SubagentLabel); err != nil {
+			return nil, fmt.Errorf("session.ListChildren scan: %w", err)
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
 }
