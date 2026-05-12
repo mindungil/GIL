@@ -61,6 +61,23 @@ type Model struct {
 	// state. Constructed by New(); nil-safe in unit tests that build a
 	// Model literal without dialing gild.
 	slash *slashState
+
+	// chatTree (M6 Option A) — agent tool-call tree built from
+	// tool_call / tool_result events bridged through the per-session
+	// event stream. Surfaced in the activity column when non-empty so
+	// the user sees chat agent activity inside giltui's mission-
+	// control layout. Reset on session change; lazy-allocated on
+	// first event arrival.
+	chatTree *AgentTree
+}
+
+// chatTreeOrNew returns the model's chat tree, allocating once. Lets
+// eventMsg handlers stay terse: m.chatTreeOrNew().OnToolCall(...).
+func (m *Model) chatTreeOrNew() *AgentTree {
+	if m.chatTree == nil {
+		m.chatTree = NewAgentTree()
+	}
+	return m.chatTree
 }
 
 // startTailingSelected cancels any existing tail subscription and starts a new
@@ -76,15 +93,24 @@ func (m *Model) startTailingSelected() tea.Cmd {
 	m.progress = ProgressData{}
 	m.checkpoints.Entries = nil
 	m.checkpoints.Selected = 0
+	// M6 Option A — reset the chat-tree view when the active session
+	// changes so we never render tool calls from a prior session.
+	m.chatTree = nil
 	m.refreshMemoryFromSelection()
 	if len(m.sessions) == 0 || m.selectedIdx >= len(m.sessions) {
 		return nil
 	}
 	s := m.sessions[m.selectedIdx]
-	if s.Status != "RUNNING" {
-		return nil
+	// M6 Option A — also tail FROZEN sessions: chat-mode prompts emit
+	// tool_call / tool_result events on the same per-session stream
+	// as run-mode, so giltui can render agent activity even when no
+	// formal Run is in flight. Sessions in a terminal state still
+	// skip the subscription (they will not produce new events).
+	switch s.Status {
+	case "RUNNING", "FROZEN", "frozen", "running", "":
+		return startTail(m.client, s.ID)
 	}
-	return startTail(m.client, s.ID)
+	return nil
 }
 
 // refreshMemoryFromSelection reads progress.md for the currently

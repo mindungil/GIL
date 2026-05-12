@@ -142,10 +142,22 @@ func (m *Model) renderMainColumn(width, height int) string {
 	progress := paneBox("Spec & Progress", width, progressH,
 		renderProgressPane(width-4, pd))
 
-	rows := activityFromEvents(m.rawEvents, m.activityFilter, max(activityH-2, 1))
-	activityTitle := fmt.Sprintf("Activity (%s)", m.activityFilter.String())
-	activity := paneBox(activityTitle, width, activityH,
-		renderActivityPane(width-4, activityH-2, rows, m.spinFrame))
+	// M6 Option A — when the per-session event stream carried chat-
+	// mode tool_call / tool_result events, the AgentTree is populated.
+	// Render it as the activity pane content so giltui shows what the
+	// chat agent did inside its own mission-control view. Falls back
+	// to the legacy activity-row renderer when the tree is empty
+	// (run-only sessions and idle chats).
+	var activity string
+	if m.chatTree != nil && len(m.chatTree.Turns) > 0 {
+		body := renderChatTreePane(width-4, m.chatTree, max(activityH-2, 1))
+		activity = paneBox("Agent Tree", width, activityH, body)
+	} else {
+		rows := activityFromEvents(m.rawEvents, m.activityFilter, max(activityH-2, 1))
+		activityTitle := fmt.Sprintf("Activity (%s)", m.activityFilter.String())
+		activity = paneBox(activityTitle, width, activityH,
+			renderActivityPane(width-4, activityH-2, rows, m.spinFrame))
+	}
 
 	planExists := !m.plan.NotFound && len(m.plan.Items) > 0
 	memoryExists := !m.memory.NotFound && len(m.memory.Lines) > 0

@@ -41,6 +41,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if len(m.rawEvents) > eventBufferSize {
 				m.rawEvents = m.rawEvents[len(m.rawEvents)-eventBufferSize:]
 			}
+			// M6 Option A — mirror tool_call / tool_result events into
+			// the AgentTree so the activity column can render the
+			// chat agent's tool timeline next to (or in place of) the
+			// raw event list. Provider events (provider_request,
+			// iteration_start) start a fresh turn root.
+			applyEventToChatTree(m.chatTreeOrNew(), msg.ev)
 			m.rebuildProgressFromEvents()
 			// Refresh memory excerpt opportunistically — progress.md is
 			// touched at iteration boundaries / milestones; rereading on
