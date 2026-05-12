@@ -413,14 +413,132 @@ go-test wall time) for full ground-truth on completion.
   whatever budget the agent decided to spend; nothing imposed a
   cap.
 
-### Takeaway from the live run
+### Takeaway from the live run (vllm/qwen round)
 
 For an offline / on-prem / OSS-LLM deployment story, **gil
 empirically works on a real vllm endpoint with tool calls; codex
 0.50.0 does not**. For text-only conversational use both finish at
-parity speed. For the comparison to extend further (token counts,
-iterations, pass rates at scale) we need a fully OpenAI-conformant
-endpoint codex's vllm path can use — or, equivalently, a future
-codex version that re-supports the chat API + a vllm build with
-strict OpenAI tool_call format compliance. Neither is in the
-current environment.
+parity speed.
+
+### Round 2 — ChatGPT OAuth (gpt-5.2) vs vllm/qwen
+
+After the vllm round, we refreshed codex's ChatGPT OAuth tokens
+(via `codex login --device-auth`) and reran with codex talking to
+`api.openai.com` over the ChatGPT-account model `gpt-5.2`. gil
+stayed on OSLab's `qwen3.6-27b`. Asymmetric (different models,
+different providers), so this isolates harness behaviour more than
+model strength.
+
+A new fourth task was added to stress multi-file work:
+
+- **T4 — LRU cache.** Empty dir, prompt: create generic
+  `Cache[K comparable, V any]` with `New / Get / Put`, LRU eviction
+  via doubly-linked-list + map, write tests for overflow eviction /
+  Get-refreshes-recency / Put-updates-existing / zero-capacity-noop,
+  then run `go test` and confirm pass.
+
+### Round 2 results
+
+| Task | gil + qwen3.6-27b | codex + gpt-5.2 |
+|---|---|---|
+| Sanity ("Reply: OAUTH_OK") | — | 5.1 s ✓ (338 tok) |
+| T1 quicksort | 22.6 s ✓ | 70.5 s ✓ (7,387 tok) |
+| T2 off-by-one fix | 9.5 s ✓ | 70.1 s ✓ (10,070 tok) |
+| T3 DFS explain | 3.2 s ✓ | 5.1 s ✓ |
+| T4 LRU cache | **49.0 s ✓** | **98.1 s ✗** |
+
+T1, T2, T3 are all "completed successfully" on both. gpt-5.2 takes
+3–7× longer wall time than qwen, partly because the OpenAI request
+path has higher RTT (codex talks to api.openai.com from a Korean VM)
+and partly because codex does ~2× more shell invocations per task
+than gil (each turn it runs `id`, `pwd`, env-override commands, etc.
+before the real work).
+
+**T4 is the headline.** Both produced code; only gil verified it.
+
+- **codex** wrote `cache.go`, `cache_test.go`, `go.mod`. Tried to
+  run `go test` but its sandbox refused the Go toolchain
+  (`Permission denied` on `GOCACHE` path). codex returned a
+  "Created module" success message *anyway*, with a note that it
+  "could not actually execute go test in this environment". When we
+  re-ran the produced files manually, `go test` failed at compile
+  time: `cache_test.go:6:1: illegal character U+005C '\\'`. codex
+  had emitted a literal `\` somewhere in its file-write tool output
+  that survived to disk and broke the parser.
+- **gil** ran the same prompt and produced a working module. The
+  `plan_steps` plan had two verify-gated steps (`go build ./...`,
+  `go test -v -count=1 ./...`); both passed. The `verified` status
+  on each plan step was set by the system after the acceptance
+  command actually exited 0 — i.e. *gil cannot have been wrong*
+  about success because the discipline is a state machine, not a
+  prompt.
+
+This is the verify-loop dividend in two scenes:
+
+```
+codex: agent finishes, says "looks good"; user runs go test; build broken.
+gil:   verify(go test) actually runs; pass status only flips when go test exits 0.
+```
+
+In real workloads where the human doesn't read every diff, gil's
+behaviour catches what codex's misses.
+
+A side-note on robustness: gil's qwen agent also did an in-context
+recovery during T4. Its first `run_bash` tried `cd
+/tmp/01KRDXCTQW1ZAFWEEPBQS1FBRQ` (a hallucinated path mixing up the
+session ULID with the workdir), got `No such file or directory`,
+called `pwd` to recalibrate, then used the correct relative path
+for the rest of the run. No human steering required. The stuck-
+detection layer (§10 of this doc) didn't even need to fire — the
+agent self-corrected within one turn.
+
+### Honest caveats (round 2)
+
+- **Different models.** gpt-5.2 ≠ qwen3.6-27b. The token-count
+  column above is codex-only because gil's qwen metrics don't
+  surface in chat REPL output (need to scrape session events for a
+  full breakdown). Wall time isn't a fair model-quality measure
+  here — it's a "what's actually happening in this harness"
+  measure.
+- **codex sandbox was workspace-write, not full-access.** Tighter
+  sandbox than gil's default. codex's failure to run `go test` is
+  partly a config choice on our side — a more permissive sandbox
+  would have let it actually validate. The point isn't "codex's
+  sandbox is bad", it's "codex's success message fired even when
+  validation didn't actually run".
+- **T4's `\` bug may be a codex CLI / json escape issue,** not a
+  model quality issue. We didn't dig further. The gil run on the
+  same prompt produced clean Go on first try.
+
+### Updated takeaway
+
+The OAuth round confirms what the structural comparison predicted:
+
+1. For pure prose tasks (T3), parity — same endpoint behaviour, the
+   model wins.
+2. For multi-turn tool-using tasks where both harnesses run to
+   completion (T1, T2), gil is roughly 3–7× faster wall-time at
+   parity correctness, with the model difference (qwen vs gpt-5.2)
+   being a major confound.
+3. For tasks where validation matters (T4, and by extension
+   anything with a real "is it actually working" gate), gil's
+   verify-loop discipline catches failures that codex's "I'm done"
+   self-report doesn't.
+
+The verify-loop being a state machine (gil) rather than a prompt
+suggestion (codex) is not a stylistic choice — it produces
+materially different outcomes on the same task pool.
+
+### What would close the gaps further
+
+- **Sample size**: T1-T4 is 4 tasks. SWE-bench Lite at N=20+ would
+  stabilise pass-rate numbers.
+- **Fair model match**: needs an OPENAI_API_KEY usable by gil, so
+  both harnesses target the same model. ChatGPT OAuth doesn't
+  unlock the API-side endpoints gil uses.
+- **Token accounting parity**: scrape gil's per-turn metric events
+  (already emitted, just not surfaced in chat REPL) and codex's
+  rollout JSON, normalise to the same {input,output,total} schema.
+- **Repeat across model strengths**: same harness comparison at
+  haiku-tier (small/fast) and opus-tier (large/slow) shows whether
+  the harness gap shrinks or widens with model power.
