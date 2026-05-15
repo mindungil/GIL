@@ -360,6 +360,10 @@ const (
 // weakVerifyLeadingCommands lists shell commands whose primary action
 // only inspects state (no behavior assertion, no build/test/lint).
 // See spec C4 Layer A for the rationale.
+//
+// Add a command here only if it cannot produce a non-zero exit on
+// logic failure (e.g. plain `grep` without -q can still exit 1 on
+// no-match, so it stays off this list).
 var weakVerifyLeadingCommands = map[string]struct{}{
 	"cat": {}, "ls": {}, "pwd": {}, "echo": {}, "true": {},
 	"stat": {}, "head": {}, "tail": {}, "file": {},
@@ -372,8 +376,9 @@ var weakVerifyLeadingCommands = map[string]struct{}{
 // or redirect. Compound commands (`cat foo.go && go build`) pass.
 //
 // Trade-offs:
-//   - false-positive: `cat > foo.txt` (write via redirect) is detected
-//     because of the `>` check below, so it passes — accepted.
+//   - near-miss: `cat > foo.txt` looks like a weak `cat` but is actually
+//     a write; the `>` check passes it through correctly — no false-
+//     positive here.
 //   - false-negative: agent could disguise weak verify as `bash -c "cat"`.
 //     We don't try to defeat adversarial agents; this is a quality
 //     scaffold, not a sandbox.
@@ -389,7 +394,7 @@ func isWeakVerifyCommand(cmd string) bool {
 		}
 	}
 	// Redirects mean the command is writing state — not weak.
-	if strings.ContainsAny(trimmed, ">") {
+	if strings.Contains(trimmed, ">") {
 		return false
 	}
 	fields := strings.Fields(trimmed)
