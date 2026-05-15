@@ -391,15 +391,18 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 	var totalTokensIn, totalTokensOut int64
 	var totalLatency time.Duration
 
-	// C1 verify-enforcement tracker. Set when a code-changing tool fires;
-	// cleared when verify fires successfully. If write fired but verify
-	// didn't at the "model ended turn" boundary, the system injects a
-	// reminder and loops the agent for up to maxVerifyRetries more turns.
+	// C1 verify-enforcement tracker. `needsVerify` flips true on each
+	// code-changing tool call (write_file / edit_file / apply_patch)
+	// and back to false on a successful verify call (IsError=false).
+	// If true at the "model ended turn" boundary, the system injects a
+	// reminder and loops the agent for up to maxVerifyRetries more
+	// iterations of this Prompt RPC. This correctly handles multi-phase
+	// turns where the agent writes, verifies, then writes again — the
+	// second write re-arms the gate even if a prior verify passed.
 	codeChangingTools := map[string]bool{
 		"write_file": true, "edit_file": true, "apply_patch": true,
 	}
-	writeFired := false
-	verifyFired := false
+	needsVerify := false
 	verifyRetries := 0
 	const maxVerifyRetries = 2
 
@@ -440,7 +443,7 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 			s.chatHistory().append(sessionID,
 				provider.Message{Role: provider.RoleAssistant, Content: resp.Text})
 
-			if !writeFired || verifyFired {
+			if !needsVerify {
 				break
 			}
 			if verifyRetries >= maxVerifyRetries {
@@ -517,10 +520,10 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 			toolResults = append(toolResults, result)
 			// C1: track which tool categories fired this turn.
 			if codeChangingTools[call.Name] {
-				writeFired = true
+				needsVerify = true
 			}
 			if call.Name == "verify" && !result.IsError {
-				verifyFired = true
+				needsVerify = false
 			}
 			if err := stream.Send(&gilv1.Part{
 				Body: &gilv1.Part_ToolResult{ToolResult: &gilv1.ToolResultPart{

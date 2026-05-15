@@ -129,3 +129,26 @@ func TestPrompt_WriteThenVerify_TurnEndsCleanly(t *testing.T) {
 		}
 	}
 }
+
+// TestPrompt_WriteVerifyWriteNoVerify_RetriesThenErrors covers the
+// regression where a successful verify mid-turn shouldn't satisfy a
+// subsequent write's verify obligation.
+func TestPrompt_WriteVerifyWriteNoVerify_RetriesThenErrors(t *testing.T) {
+	turns := []provider.MockTurn{
+		{ToolCalls: []provider.ToolCall{{ID: "c1", Name: "write_file",
+			Input: []byte(`{"path":"a.go","content":"package main\n"}`)}}},
+		{ToolCalls: []provider.ToolCall{{ID: "c2", Name: "verify",
+			Input: []byte(`{"description":"build","command":"go version"}`)}}},
+		{ToolCalls: []provider.ToolCall{{ID: "c3", Name: "write_file",
+			Input: []byte(`{"path":"b.go","content":"package main\nvar B = 1\n"}`)}}},
+		{Text: "done"},
+		{Text: "still done"},
+		{Text: "really done"},
+	}
+	svc, sid := newTestSessionServiceWithMockTurns(t, turns)
+	stream := &fakePromptStream{ctx: context.Background()}
+	err := svc.Prompt(promptReq(sid, "write a then verify then write b"), stream)
+	if err == nil {
+		t.Fatalf("expected verify_missing error after unverified second write; got nil")
+	}
+}
