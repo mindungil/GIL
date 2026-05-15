@@ -81,8 +81,16 @@ If absent, append `.gocache/` as a new line at the end of `.gitignore`.
 
 - [ ] **Step 5: Confirm workspace still builds**
 
-Run: `cd /home/ubuntu/gil && go build ./...`
-Expected: clean exit (no output, exit 0).
+The repo root is a Go *workspace*, not a module — so `go build ./...` from
+root fails with "directory prefix . does not contain modules listed in
+go.work". Build each module instead:
+
+```bash
+cd /home/ubuntu/gil && for m in cli core server mcp proto runtime sdk tui; do
+  (cd $m && go build ./...) || { echo "FAIL: $m"; exit 1; }
+done && echo "all modules ok"
+```
+Expected: prints `all modules ok` and exits 0.
 
 - [ ] **Step 6: Commit**
 
