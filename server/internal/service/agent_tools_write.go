@@ -86,6 +86,34 @@ func sessionWD(ctx context.Context, repo *session.Repo, sessionID string) (strin
 	return s.WorkingDir, nil
 }
 
+// rejectReadonlyTarget returns a non-nil error when abs points at an
+// existing file whose owner-write bit (0o200) is unset. Missing files
+// pass (creation is allowed via writable parent dir, not gated here).
+// Directories pass (callers should resolve to files before calling).
+//
+// Rationale: C3 in docs/design/chat-mode-enforcement.md. write_file /
+// edit_file / apply_patch must not silently chmod through a user-marked
+// readonly file — that erases the user's sandbox intent. Agent can
+// still chmod explicitly via run_bash; this only blocks silent bypass.
+func rejectReadonlyTarget(abs string) error {
+	info, err := os.Stat(abs)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("stat target: %w", err)
+	}
+	if info.IsDir() {
+		return nil
+	}
+	if info.Mode().Perm()&0o200 == 0 {
+		return fmt.Errorf("target file %s is read-only (mode 0%o); the user has marked it as protected. "+
+			"If modification is genuinely required, surface the intent to the user — do not chmod to bypass",
+			filepath.Base(abs), info.Mode().Perm())
+	}
+	return nil
+}
+
 // --- read_file -------------------------------------------------------
 
 type toolReadFile struct {
@@ -192,6 +220,9 @@ func (t *toolWriteFile) run(ctx context.Context, sessionID string, argsJSON json
 	}
 	abs, err := resolveInWD(wd, args.Path)
 	if err != nil {
+		return provider.ToolResult{Content: err.Error(), IsError: true}, nil
+	}
+	if err := rejectReadonlyTarget(abs); err != nil {
 		return provider.ToolResult{Content: err.Error(), IsError: true}, nil
 	}
 	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {

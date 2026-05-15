@@ -428,6 +428,17 @@ func (t *toolApplyPatch) run(ctx context.Context, sessionID string, argsJSON jso
 		return provider.ToolResult{Content: "patch contains no file ops", IsError: true}, nil
 	}
 
+	// C3: reject patches that would silently chmod through a user-protected file.
+	for _, op := range ops {
+		abs, rerr := resolveInWD(wd, op.path)
+		if rerr != nil {
+			continue // hunk-mismatch errors are caught by applyPatch itself; we only gate readonly here
+		}
+		if err := rejectReadonlyTarget(abs); err != nil {
+			return provider.ToolResult{Content: err.Error(), IsError: true}, nil
+		}
+	}
+
 	// Capture pre-write snapshots BEFORE applying so the tracker has
 	// the originals.  applyPatch reads files itself for hunk validation
 	// but doesn't surface that content to us; we re-read here to keep

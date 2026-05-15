@@ -198,3 +198,62 @@ func TestToolGlob_BasicAndRecursive(t *testing.T) {
 	require.Contains(t, res2.Content, "sub/b.go")
 	require.NotContains(t, res2.Content, "c.txt")
 }
+
+// --- C3 readonly target tests ----------------------------------------
+
+func TestRejectReadonlyTarget_FileWritable_OK(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "writable.txt")
+	if err := os.WriteFile(p, []byte("ok"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := rejectReadonlyTarget(p); err != nil {
+		t.Fatalf("writable file rejected: %v", err)
+	}
+}
+
+func TestRejectReadonlyTarget_FileReadonly_Reject(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "ro.txt")
+	if err := os.WriteFile(p, []byte("ok"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(p, 0o444); err != nil {
+		t.Fatal(err)
+	}
+	if err := rejectReadonlyTarget(p); err == nil {
+		t.Fatalf("expected reject, got nil")
+	}
+}
+
+func TestRejectReadonlyTarget_FileMissing_OK(t *testing.T) {
+	// Creating a new file under a writable parent is fine.
+	dir := t.TempDir()
+	p := filepath.Join(dir, "new.txt")
+	if err := rejectReadonlyTarget(p); err != nil {
+		t.Fatalf("missing file (create case) rejected: %v", err)
+	}
+}
+
+func TestToolWriteFile_ReadonlyTarget_Rejects(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "locked.go")
+	if err := os.WriteFile(target, []byte("package x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(target, 0o444); err != nil {
+		t.Fatal(err)
+	}
+	repo := newTestRepo(t)
+	sid := newTestSession(t, repo, dir)
+	tool := &toolWriteFile{repo: repo}
+	res, _ := tool.run(context.Background(), sid, json.RawMessage(`{"path":"locked.go","content":"package x\nvar X = 1\n"}`))
+	if !res.IsError {
+		t.Fatalf("expected IsError, got result %+v", res)
+	}
+	// File content unchanged.
+	body, _ := os.ReadFile(target)
+	if string(body) != "package x\n" {
+		t.Fatalf("file mutated despite readonly: %q", body)
+	}
+}

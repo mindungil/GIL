@@ -87,6 +87,9 @@ func (t *toolEditFile) run(ctx context.Context, sessionID string, argsJSON json.
 	if err != nil {
 		return provider.ToolResult{Content: err.Error(), IsError: true}, nil
 	}
+	if err := rejectReadonlyTarget(abs); err != nil {
+		return provider.ToolResult{Content: err.Error(), IsError: true}, nil
+	}
 	body, err := os.ReadFile(abs)
 	if err != nil {
 		return provider.ToolResult{Content: "read: " + err.Error(), IsError: true}, nil
