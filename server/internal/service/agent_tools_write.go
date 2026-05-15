@@ -108,8 +108,9 @@ func rejectReadonlyTarget(abs string) error {
 	}
 	if info.Mode().Perm()&0o200 == 0 {
 		return fmt.Errorf("target file %s is read-only (mode 0%o); the user has marked it as protected. "+
-			"If modification is genuinely required, surface the intent to the user — do not chmod to bypass",
-			filepath.Base(abs), info.Mode().Perm())
+			"If modification is genuinely required, surface the intent to the user — do not chmod to bypass. "+
+			"If the user explicitly consents to modification, use run_bash to chmod +w first.",
+			abs, info.Mode().Perm())
 	}
 	return nil
 }

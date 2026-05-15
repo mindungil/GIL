@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -221,8 +222,12 @@ func TestRejectReadonlyTarget_FileReadonly_Reject(t *testing.T) {
 	if err := os.Chmod(p, 0o444); err != nil {
 		t.Fatal(err)
 	}
-	if err := rejectReadonlyTarget(p); err == nil {
+	err := rejectReadonlyTarget(p)
+	if err == nil {
 		t.Fatalf("expected reject, got nil")
+	}
+	if !strings.Contains(err.Error(), "read-only") {
+		t.Fatalf("error message missing 'read-only': %v", err)
 	}
 }
 
@@ -252,6 +257,52 @@ func TestToolWriteFile_ReadonlyTarget_Rejects(t *testing.T) {
 		t.Fatalf("expected IsError, got result %+v", res)
 	}
 	// File content unchanged.
+	body, _ := os.ReadFile(target)
+	if string(body) != "package x\n" {
+		t.Fatalf("file mutated despite readonly: %q", body)
+	}
+}
+
+func TestToolEditFile_ReadonlyTarget_Rejects(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "locked.go")
+	if err := os.WriteFile(target, []byte("package x\nvar A = 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(target, 0o444); err != nil {
+		t.Fatal(err)
+	}
+	repo := newTestRepo(t)
+	sid := newTestSession(t, repo, dir)
+	tool := &toolEditFile{repo: repo}
+	res, _ := tool.run(t.Context(), sid, json.RawMessage(`{"path":"locked.go","old_text":"var A = 1","new_text":"var A = 2"}`))
+	if !res.IsError {
+		t.Fatalf("expected IsError, got %+v", res)
+	}
+	body, _ := os.ReadFile(target)
+	if string(body) != "package x\nvar A = 1\n" {
+		t.Fatalf("file mutated despite readonly: %q", body)
+	}
+}
+
+func TestToolApplyPatch_ReadonlyTarget_Rejects(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "locked.go")
+	if err := os.WriteFile(target, []byte("package x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(target, 0o444); err != nil {
+		t.Fatal(err)
+	}
+	repo := newTestRepo(t)
+	sid := newTestSession(t, repo, dir)
+	tool := &toolApplyPatch{repo: repo}
+	// Simple Update File patch attempting to add a line.
+	patch := "*** Begin Patch\n*** Update File: locked.go\n@@\n package x\n+var Z = 1\n*** End Patch\n"
+	res, _ := tool.run(t.Context(), sid, json.RawMessage(`{"patch":`+strconv.Quote(patch)+`}`))
+	if !res.IsError {
+		t.Fatalf("expected IsError, got %+v", res)
+	}
 	body, _ := os.ReadFile(target)
 	if string(body) != "package x\n" {
 		t.Fatalf("file mutated despite readonly: %q", body)
