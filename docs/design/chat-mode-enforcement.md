@@ -106,14 +106,18 @@ plan_steps 결합과 무관하게:
   하고 한 사이클 더 돌린다. 최대 2 사이클까지 시도, 그래도 verify 없으면
   turn은 error로 종료 + event 발행.
 
-### 3.3 구현 위치 추정
+### 3.3 구현 위치 (확정)
 
-- `server/internal/service/session_prompt.go` — Prompt RPC handler 안의
-  agent loop. tool dispatch 후 turn-종료 직전에 enforcement check.
-- 새 helper: `turnVerifyTracker` — 한 turn 동안 어떤 tool이 불렸는지 set
-  유지. 기존 `turnDiffTracker` (agent_tools_plan_verify.go:362) 옆에 둠.
-- agent_tools_plan_verify의 `verifyToolNames` set을 export하거나 같은
-  파일에 turn enforcement 함수 추가.
+구현은 단순화되어 별도 helper 없이 inline로 들어갔다:
+
+- `server/internal/service/session_prompt.go` — Prompt RPC handler 의
+  agent loop 안에 `needsVerify bool` + `verifyRetries int` local 변수.
+  매 tool dispatch 후 update: write_file/edit_file/apply_patch → set true,
+  `verify` 성공 (`!result.IsError`) → set false. 모델이 `end_turn` 시 (`len(resp.ToolCalls) == 0`)
+  `needsVerify`가 true면 reminder inject + retry, retries 소진 시 `DonePart{StopReason: "verify_missing"}` + `FailedPrecondition`.
+- 초기 design은 별도 `turnVerifyTracker` 구조체를 상정했지만, 단일 boolean +
+  retry counter로 충분해서 helper 신설 안 함. 이 코드는 multi-phase turn
+  (write → verify pass → write → end_turn) 도 올바르게 처리한다.
 
 ### 3.4 §2.3 (시스템 안전망) 부합
 
@@ -236,14 +240,16 @@ Layer A는 deterministic, Layer B는 가이드. 둘 다 있어야 강함.
 각 change에 대한 server-level integration test (`server/internal/service/*_test.go`)
 + end-to-end probe via `gil chat`:
 
-- C1: `TestSessionPrompt_WriteWithoutVerify_TurnNotClosed` — write_file 후
-  verify 없이 model이 end_turn 시그널 → system이 추가 사이클 inject.
-- C2: `TestSessionPrompt_FrozenSpecWithMCP_LaunchesMCP` — frozen spec에
-  mcp_servers allowlist 있는 session에 prompt 보내면 launchMCPServers 호출됨.
-- C3: `TestEditFile_ReadonlyTarget_IsError` — chmod 444 후 edit_file 호출 →
-  IsError + 변경 없음.
-- C4: `TestVerify_CatCommand_Reject` — verify("cat foo.go") → IsError.
-  Plus `TestVerify_CompoundBuild_OK` — verify("cat foo.go && go build") OK.
+- C1: `TestPrompt_WriteWithoutVerify_RetriesThenErrors`,
+  `TestPrompt_WriteThenVerify_TurnEndsCleanly`,
+  `TestPrompt_WriteVerifyWriteNoVerify_RetriesThenErrors` (multi-phase regression).
+- C2: dropped (§2.1) — no test needed.
+- C3: `TestRejectReadonlyTarget_*` (3 unit tests) +
+  `TestToolWriteFile_ReadonlyTarget_Rejects` /
+  `TestToolEditFile_ReadonlyTarget_Rejects` /
+  `TestToolApplyPatch_ReadonlyTarget_Rejects` (3 integration).
+- C4 Layer A: `TestIsWeakVerifyCommand` (18 cases),
+  `TestToolVerify_WeakCommand_Rejects`, `TestToolVerify_CompoundCommand_OK`.
 - C5: file/dir 삭제, gitignore update — 별도 test 불필요, git status로 검증.
 
 추가로 failure-floor stress 8 task를 재실행해서 regression 확인 — pre-change
