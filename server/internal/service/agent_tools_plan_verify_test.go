@@ -3,6 +3,9 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -79,7 +82,7 @@ func TestToolVerify_PassTransitionsStep(t *testing.T) {
 
 	tool := &toolVerify{repo: repo}
 	res, err := tool.run(context.Background(), sid,
-		json.RawMessage(`{"description":"smoke","command":"true","step_id":1}`))
+		json.RawMessage(`{"description":"smoke","command":"sh -c 'exit 0'","step_id":1}`))
 	require.NoError(t, err)
 	require.False(t, res.IsError, res.Content)
 	require.Contains(t, res.Content, "[PASS]")
@@ -117,7 +120,7 @@ func TestToolVerify_NoStepIDStillRuns(t *testing.T) {
 
 	tool := &toolVerify{repo: repo}
 	res, err := tool.run(context.Background(), sid,
-		json.RawMessage(`{"description":"adhoc","command":"true"}`))
+		json.RawMessage(`{"description":"adhoc","command":"sh -c 'exit 0'"}`))
 	require.NoError(t, err)
 	require.False(t, res.IsError)
 	require.NotContains(t, res.Content, "step ", "no step_id means no transition message")
@@ -135,6 +138,71 @@ something else`
 	require.Contains(t, failures, "go: TestFoo")
 	require.Contains(t, failures, "pytest: tests/auth_test.py::test_login")
 	require.Contains(t, failures, "jest: user can sign up")
+}
+
+func TestIsWeakVerifyCommand(t *testing.T) {
+	tests := []struct {
+		name    string
+		cmd     string
+		wantBad bool
+	}{
+		{"bare cat", "cat foo.go", true},
+		{"bare ls", "ls -la", true},
+		{"bare echo", "echo hi", true},
+		{"bare pwd", "pwd", true},
+		{"bare true", "true", true},
+		{"bare stat", "stat foo.go", true},
+		{"bare head", "head -10 foo.go", true},
+		{"bare tail", "tail -20 foo.log", true},
+		{"bare file", "file foo.go", true},
+		{"leading whitespace", "   cat foo.go", true},
+		{"build is fine", "go build ./...", false},
+		{"test is fine", "go test ./...", false},
+		{"compound — cat then build", "cat foo.go && go build ./...", false},
+		{"compound — head then test", "head foo.go && go test", false},
+		{"pipe to test runner", "find . -name '*.go' | xargs go vet", false},
+		{"explicit assertion script", "./scripts/check.sh", false},
+		{"cat alone with redirect", "cat > foo.txt", false}, // it's writing, not just inspecting
+		{"empty after trim", "   ", true},                    // already rejected upstream but be conservative
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := isWeakVerifyCommand(tc.cmd)
+			if got != tc.wantBad {
+				t.Fatalf("isWeakVerifyCommand(%q) = %v, want %v", tc.cmd, got, tc.wantBad)
+			}
+		})
+	}
+}
+
+func TestToolVerify_WeakCommand_Rejects(t *testing.T) {
+	repo := newTestRepo(t)
+	wd := t.TempDir()
+	sid := newTestSession(t, repo, wd)
+	tool := &toolVerify{repo: repo}
+	res, _ := tool.run(t.Context(), sid, json.RawMessage(`{"description":"check","command":"cat main.go"}`))
+	if !res.IsError {
+		t.Fatalf("expected IsError, got %+v", res)
+	}
+	if !strings.Contains(res.Content, "too weak") {
+		t.Fatalf("error message missing 'too weak': %s", res.Content)
+	}
+}
+
+func TestToolVerify_CompoundCommand_OK(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	repo := newTestRepo(t)
+	sid := newTestSession(t, repo, dir)
+	tool := &toolVerify{repo: repo}
+	res, _ := tool.run(t.Context(), sid, json.RawMessage(`{"description":"build","command":"cat main.go && go build ./..."}`))
+	// We don't care whether `go build` succeeds (no go.mod in tempdir).
+	// We only care that the schema guard didn't reject before exec.
+	if res.IsError && strings.Contains(res.Content, "too weak") {
+		t.Fatalf("compound command rejected as weak: %+v", res)
+	}
 }
 
 func TestPlanStepsThenAgentCannotMarkVerified(t *testing.T) {

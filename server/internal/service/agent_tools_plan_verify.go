@@ -357,6 +357,49 @@ const (
 	verifyTailLineCount = 20
 )
 
+// weakVerifyLeadingCommands lists shell commands whose primary action
+// only inspects state (no behavior assertion, no build/test/lint).
+// See spec C4 Layer A for the rationale.
+var weakVerifyLeadingCommands = map[string]struct{}{
+	"cat": {}, "ls": {}, "pwd": {}, "echo": {}, "true": {},
+	"stat": {}, "head": {}, "tail": {}, "file": {},
+}
+
+// isWeakVerifyCommand reports whether cmd is a single inspect-only
+// command with no behavior-checking chain. Conservative by design:
+// fires only when the leading command (before any &&, ||, ;, or |)
+// is in weakVerifyLeadingCommands AND there is no trailing chain
+// or redirect. Compound commands (`cat foo.go && go build`) pass.
+//
+// Trade-offs:
+//   - false-positive: `cat > foo.txt` (write via redirect) is detected
+//     because of the `>` check below, so it passes — accepted.
+//   - false-negative: agent could disguise weak verify as `bash -c "cat"`.
+//     We don't try to defeat adversarial agents; this is a quality
+//     scaffold, not a sandbox.
+func isWeakVerifyCommand(cmd string) bool {
+	trimmed := strings.TrimSpace(cmd)
+	if trimmed == "" {
+		return true
+	}
+	// Compound commands (chain or pipe) pass.
+	for _, sep := range []string{"&&", "||", ";", "|"} {
+		if strings.Contains(trimmed, sep) {
+			return false
+		}
+	}
+	// Redirects mean the command is writing state — not weak.
+	if strings.ContainsAny(trimmed, ">") {
+		return false
+	}
+	fields := strings.Fields(trimmed)
+	if len(fields) == 0 {
+		return true
+	}
+	_, weak := weakVerifyLeadingCommands[fields[0]]
+	return weak
+}
+
 type toolVerify struct {
 	repo    *session.Repo
 	tracker *turnDiffTracker
@@ -395,6 +438,15 @@ func (t *toolVerify) run(ctx context.Context, sessionID string, argsJSON json.Ra
 	}
 	if strings.TrimSpace(args.Command) == "" {
 		return provider.ToolResult{Content: "command is empty", IsError: true}, nil
+	}
+	if isWeakVerifyCommand(args.Command) {
+		return provider.ToolResult{
+			Content: "verify command is too weak — `cat`/`ls`/`echo` only inspect state, " +
+				"they don't verify behavior. Use build, test, lint, type-check, or a custom " +
+				"assertion script. Chain to a real check (e.g. `cat foo.go && go build`) if " +
+				"you must inspect first.",
+			IsError: true,
+		}, nil
 	}
 	wd, err := sessionWD(ctx, t.repo, sessionID)
 	if err != nil {
