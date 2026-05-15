@@ -31,16 +31,35 @@ PASS한 게 아니다. 사용자 입장에서 보면 "gil의 가장 큰 가치 m
 
 ## 2. Scope
 
-4 changes + 1 cleanup. 모두 단일 wave에 묶인다 — 함께 가야 chat-run 격차가
-일관성 있게 닫힌다.
+3 changes + 1 cleanup. 단일 wave에 묶인다.
 
 | # | Change | 영역 | Severity |
 |---|--------|------|----------|
 | C1 | chat 경로 turn-내 verify 강제 | server agent loop | high |
-| C2 | MCP launch를 SessionService.Prompt에서도 | server bootstrap | high |
-| C3 | edit_file / write_file의 readonly target reject | server tools | medium |
+| C3 | write_file / edit_file / apply_patch의 readonly target reject | server tools | medium |
 | C4 | verify tool의 약한 command schema reject | server tools | medium |
 | C5 | 5/12 부산물 cleanup | repo hygiene | low |
+
+### 2.1 C2 drop — 정정
+
+원래 spec 초안에 있던 "MCP launch를 chat 경로에서도" change는 **잘못된 진단이었다.**
+`grep launchMCPServers`만 했을 때는 호출 위치가 `run.go`뿐으로 보였지만,
+실제로는 `RunService.ensureSessionMCPTools` (`server/internal/service/run.go:158`)가
+chat-mode bridge로 wire되어 있다:
+
+- `appendChatMCPTools` (`session_prompt.go:554`)가 매 Prompt마다 호출
+- 그 안에서 `ensureSessionMCPTools` → `launchMCPServers` (run.go:203)
+- per-session cache로 chat ↔ run handoff에서 재사용
+
+즉 chat MCP는 production-wired다. 다만 `ensureSessionMCPTools`는 spec이
+frozen이고 `Tools.McpServers` allowlist 있을 때만 작동 (run.go:173). 이건
+의도된 design — MCP allowlist는 spec의 일부, freeze가 prerequisite. failure-floor
+stress가 spec freeze 없는 chat session으로만 돌았기 때문에 MCP 발동을
+못 본 것.
+
+따라서 C2는 drop. 만약 *pre-freeze* chat에서도 MCP 필요한 use case가
+나오면 그건 별도 spec (config 신설 — §2.1 가지치기 금지 검토 필요)으로
+다룬다.
 
 ## 3. C1 — chat 경로 turn-내 verify 강제
 
@@ -97,49 +116,6 @@ agent가 "어떤 verify를 짤지"는 그대로 agent decision (C4 schema 가드
 이 자유의 일부를 줄이지만 *내용*은 여전히 agent가 결정). 시스템은 "verify
 없이 진행 못함"이라는 **객관적 종료 조건**만 강제 — 정확히 §2.3이 시스템에
 허락한 책임 영역이다.
-
-## 4. C2 — MCP launch를 chat 경로에서도
-
-### 4.1 현 상태
-
-`grep launchMCPServers` 결과: `server/internal/service/run.go:203, 1183` 만
-호출한다. SessionService.Prompt는 호출하지 않는다.
-
-결과: spec.Tools.McpServers를 정의해도 chat에서는 MCP tool이 활성 안 된다.
-사용자가 chat surface에서 작업하면 MCP가 unreachable.
-
-### 4.2 제안
-
-SessionService.Prompt 핸들러 안, agent loop 진입 직전에 다음 조건을 만족하면
-`launchMCPServers` 호출:
-
-- session 상태가 `frozen` 이고
-- frozen spec의 `Tools.McpServers` allowlist 비어있지 않음
-- MCP 프로세스가 이번 prompt 처리 중 아직 launch되지 않음 (per-session
-  cache)
-
-session 상태가 `frozen`이 아닐 때 (= spec 안 frozen인 chat session) MCP는
-사용 불가. 이건 의도된 제약 — MCP allowlist는 spec의 일부이므로 spec
-freeze가 prerequisite. config 신설 (chat-default-mcp 같은 separate path)은
-새 surface 추가라 §2.1 가지치기 금지에 어긋날 위험.
-
-### 4.3 lifecycle
-
-MCP server 프로세스는 prompt 동안 살아있다가, prompt 종료 시 graceful
-shutdown. 이는 run mode와 다른 점 — run은 executeRun 전체에 대해 단일
-launch이지만 chat은 prompt 단위로 launch / shutdown. 비용은 있지만 chat의
-short-lived 특성과 일치.
-
-대안 (per-session persistent MCP cache)은 follow-up으로 남긴다. 본 wave는
-"chat에서 MCP가 작동한다"의 최소 wiring만.
-
-### 4.4 구현 위치
-
-- `server/internal/service/session_prompt.go` — agent loop 시작 시
-  conditional launchMCPServers, defer close.
-- `run_mcp.go`의 `launchMCPServers`는 그대로 재사용. signature 변경 없음.
-- chat-side event stream도 동일 events (`mcp_server_launched`,
-  `mcp_server_launch_failed`) 발행.
 
 ## 5. C3 — readonly target file reject
 
@@ -207,14 +183,15 @@ ToolResult{
 있으면 통과. 정규식 휴리스틱이라 false positive 위험 있지만 — schema에서
 *명백히* 약한 케이스만 잡는 게 목표. 미묘한 케이스는 다음 layer가 처리.
 
-**Layer B — agent system prompt 가이드**: chat agent의 system prompt에 한
-줄 추가:
+**Layer B — agent system prompt 가이드**: `defaultChatSystemPrompt`
+(`session_prompt.go:101`) line 143-146에 이미 "After every code-changing
+tool call ... you MUST run verify before progressing" 한 줄이 있다. 거기에
+verify *내용*에 대한 한 줄 더 추가:
 
 ```
 verify commands must exercise behavior, not just inspect state. Prefer
-`go build`, `go test`, `npm test`, linters, or scripts that assert
-specific properties. `cat`, `ls`, `echo` alone are not valid verify
-checks.
+build, test, lint, type-check, or assertion scripts. Standalone `cat`,
+`ls`, `echo`, `pwd` are not valid verify checks.
 ```
 
 Layer A는 deterministic, Layer B는 가이드. 둘 다 있어야 강함.
@@ -223,10 +200,10 @@ Layer A는 deterministic, Layer B는 가이드. 둘 다 있어야 강함.
 
 - `server/internal/service/agent_tools_plan_verify.go` — `toolVerify.run`
   앞에 헬퍼 함수 `isWeakVerifyCommand(cmd string) bool`.
-- 시스템 프롬프트는 `server/internal/service/agent.go` (`defaultChatSystemPrompt`
-  / `exploreChatSystemPrompt` / `planChatSystemPrompt` 상수). chat agent의
-  기본 모드는 `defaultChatSystemPrompt` 라 거기에 verify quality 가이드 한
-  줄 추가.
+- 시스템 프롬프트 상수 `defaultChatSystemPrompt`는 실제로는
+  `server/internal/service/session_prompt.go:101` 에 있다 (`agent.go`에는
+  `exploreChatSystemPrompt` / `planChatSystemPrompt` 만). 거기 verify
+  quality 한 줄 추가.
 
 ## 7. C5 — repo root cleanup
 
