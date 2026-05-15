@@ -391,6 +391,18 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 	var totalTokensIn, totalTokensOut int64
 	var totalLatency time.Duration
 
+	// C1 verify-enforcement tracker. Set when a code-changing tool fires;
+	// cleared when verify fires successfully. If write fired but verify
+	// didn't at the "model ended turn" boundary, the system injects a
+	// reminder and loops the agent for up to maxVerifyRetries more turns.
+	codeChangingTools := map[string]bool{
+		"write_file": true, "edit_file": true, "apply_patch": true,
+	}
+	writeFired := false
+	verifyFired := false
+	verifyRetries := 0
+	const maxVerifyRetries = 2
+
 	for turn := 0; turn < maxAgentTurns; turn++ {
 		t0 := time.Now()
 		resp, err := prov.Complete(ctx, provider.Request{
@@ -422,11 +434,40 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 			}
 		}
 
-		// If no tool calls, the LLM is done.
+		// If no tool calls, the LLM thinks it's done. Apply the C1
+		// verify-gate before letting the turn close.
 		if len(resp.ToolCalls) == 0 {
 			s.chatHistory().append(sessionID,
 				provider.Message{Role: provider.RoleAssistant, Content: resp.Text})
-			break
+
+			if !writeFired || verifyFired {
+				break
+			}
+			if verifyRetries >= maxVerifyRetries {
+				// Stubborn agent. Surface an error done so callers know
+				// the work isn't actually verified.
+				msg := "code-changing tools were called but verify was never run; turn aborted"
+				_ = stream.Send(&gilv1.Part{
+					Body: &gilv1.Part_Done{
+						Done: &gilv1.DonePart{StopReason: "verify_missing", ErrorMessage: msg},
+					},
+				})
+				return status.Errorf(codes.FailedPrecondition, "%s", msg)
+			}
+
+			// Inject a synthetic user message reminding the agent.
+			reminder := "Reminder: you called write_file/edit_file/apply_patch " +
+				"but did not call verify yet. Call verify with a real " +
+				"behavior check (build, test, lint) before finishing this turn."
+			reminderMsg := provider.Message{Role: provider.RoleUser, Content: reminder}
+			msgs = append(msgs, reminderMsg)
+			s.chatHistory().append(sessionID, reminderMsg)
+			// Echo the reminder to the stream so observers see the gate fire.
+			_ = stream.Send(&gilv1.Part{
+				Body: &gilv1.Part_Text{Text: &gilv1.TextDelta{Content: "[system] " + reminder}},
+			})
+			verifyRetries++
+			continue
 		}
 
 		// Append the assistant turn (with tool calls) to messages so
@@ -468,6 +509,13 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 				}
 			}
 			toolResults = append(toolResults, result)
+			// C1: track which tool categories fired this turn.
+			if codeChangingTools[call.Name] {
+				writeFired = true
+			}
+			if call.Name == "verify" && !result.IsError {
+				verifyFired = true
+			}
 			if err := stream.Send(&gilv1.Part{
 				Body: &gilv1.Part_ToolResult{ToolResult: &gilv1.ToolResultPart{
 					CallId:  call.ID,
