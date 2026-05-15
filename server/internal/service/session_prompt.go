@@ -144,6 +144,10 @@ Tools — code I/O (scoped to the session working dir):
   transitions the matching plan_step on success/failure. After every
   code-changing tool call (write_file, edit_file, apply_patch) you
   MUST run verify before progressing or declaring the work done.
+  verify commands must exercise behavior, not just inspect state.
+  Prefer build, test, lint, type-check, or assertion scripts. Standalone
+  cat / ls / echo / pwd are not valid verify checks — chain them to a
+  real check (e.g. cat foo.go && go build) if you must inspect first.
 - webfetch: GET an http(s) URL, capped at 256 KB / 15s. Use for docs,
   issue links, public web content.
 
