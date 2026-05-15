@@ -10,6 +10,7 @@ coverage.html
 # Go workspace local state
 go.work.sum
 vendor/
+.gocache/
 
 # IDE
 .vscode/
