@@ -455,10 +455,16 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 				return status.Errorf(codes.FailedPrecondition, "%s", msg)
 			}
 
-			// Inject a synthetic user message reminding the agent.
+			// Inject a synthetic user message reminding the agent. Covers
+			// both "verify not called" and "verify called but failed/rejected"
+			// — toolVerify sets IsError=true on !pass (real failure) and on
+			// weak-command schema reject. The agent must either fix the
+			// underlying issue and re-run verify, or call a real verify if
+			// none was made.
 			reminder := "Reminder: you called write_file/edit_file/apply_patch " +
-				"but did not call verify yet. Call verify with a real " +
-				"behavior check (build, test, lint) before finishing this turn."
+				"but verify has not reported success this turn. Call verify " +
+				"with a real behavior check (build, test, lint) — and if a " +
+				"prior verify failed, fix the underlying issue first."
 			reminderMsg := provider.Message{Role: provider.RoleUser, Content: reminder}
 			msgs = append(msgs, reminderMsg)
 			s.chatHistory().append(sessionID, reminderMsg)

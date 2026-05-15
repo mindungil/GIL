@@ -93,8 +93,13 @@ plan_steps 결합과 무관하게:
 - code-changing tool 호출 직후 `read_file` / `list_files` / `run_bash`
   같은 inspection tool은 허용 — 이게 자연스러운 verification 워크플로다
   (write → 다시 읽어보기 → verify).
-- verify가 실패하면 turn은 종료될 수 있다 — 강제하는 건 "verify를 했다",
-  성공이 아니다. 실패 자체는 agent의 다음 turn에서 다룬다.
+- 강제하는 건 "verify가 성공으로 보고했다" 이다 — `toolVerify`는 schema
+  reject (weak command) 와 실제 verify fail (pass=false) 둘 다 `IsError=true`로
+  돌려준다 (`agent_tools_plan_verify.go:555` 의 `IsError: !pass`). 따라서
+  agent가 write 후 verify 호출했지만 verify가 fail 했다면, 그 turn에 declared
+  done은 시스템적으로 의심된다 — agent는 fail 원인을 고치고 verify가
+  pass할 때까지 계속해야 한다. 이는 spec §2.3 "객관적 종료 신호" 의 직접
+  적용.
 - verify가 한 번도 안 호출되었다면 system은 turn을 종료하지 않고
   대신 ephemeral system message를 inject ("Code-changing tools were
   called but no verify was run. Call verify before completing this turn.")
