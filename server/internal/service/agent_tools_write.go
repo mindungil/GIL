@@ -47,6 +47,16 @@ const (
 // returns the cleaned absolute path, requiring it lie inside the
 // session's working_dir. Empty workingDir is treated as a hard error
 // rather than a silent escape.
+//
+// iter58a: also follows symlinks via EvalSymlinks and verifies the
+// resolved target is still inside the working dir. Without this, a
+// symlink inside the working dir pointing to /etc/passwd, ~/.config/
+// gil/auth.json, or any other host file would let the agent read /
+// write it via read_file / edit_file (write_file replaces the symlink
+// with a regular file, so it was safe by accident — but edit_file
+// reads through the symlink first, then writes back via .tmp+rename
+// which DOES replace, so it's a confused mix). EvalSymlinks closes
+// the read path entirely.
 func resolveInWD(workingDir, p string) (string, error) {
 	if workingDir == "" {
 		return "", errors.New("session has no working directory configured")
@@ -66,6 +76,31 @@ func resolveInWD(workingDir, p string) (string, error) {
 	rel, err := filepath.Rel(wd, abs)
 	if err != nil || strings.HasPrefix(rel, "..") || rel == ".." {
 		return "", fmt.Errorf("path %q escapes working directory", p)
+	}
+	// Symlink check. Walk up to the first existing ancestor and
+	// EvalSymlinks it — handles both "file exists (read path)" and
+	// "file will be created (write path), but its parent must be a
+	// real dir inside wd". TOCTOU is intentionally not addressed:
+	// gil's threat model is honest-but-confused agents under prompt
+	// injection, not racy attackers swapping symlinks mid-call.
+	probe := abs
+	for {
+		if _, err := os.Lstat(probe); err == nil {
+			real, evalErr := filepath.EvalSymlinks(probe)
+			if evalErr == nil {
+				realRel, relErr := filepath.Rel(wd, real)
+				if relErr != nil || strings.HasPrefix(realRel, "..") || realRel == ".." {
+					return "", fmt.Errorf("path %q follows symlink to %q outside working directory", p, real)
+				}
+			}
+			break
+		}
+		// Walk up to parent.
+		parent := filepath.Dir(probe)
+		if parent == probe {
+			break // hit root, give up
+		}
+		probe = parent
 	}
 	return abs, nil
 }
