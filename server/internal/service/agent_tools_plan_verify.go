@@ -378,8 +378,29 @@ var verifyRedirectDevTargets = map[string]struct{}{
 	"/dev/stdout": {},
 }
 
+// interpreterInlineScript pairs an interpreter binary with the flag
+// it uses to take a script argument inline. `python3 -c "print('ok')"`
+// is a verify no-op even though the leading word isn't in
+// weakVerifyLeadingCommands. iter52a caught this pattern.
+var interpreterInlineScript = map[string]string{
+	"python":  "-c",
+	"python2": "-c",
+	"python3": "-c",
+	"bash":    "-c",
+	"sh":      "-c",
+	"zsh":     "-c",
+	"dash":    "-c",
+	"node":    "-e",
+	"deno":    "eval",
+	"ruby":    "-e",
+	"perl":    "-e",
+	"php":     "-r",
+	"Rscript": "-e",
+	"awk":     "BEGIN", // awk 'BEGIN{print}' is the no-op idiom
+}
+
 // isWeakVerifyCommand reports whether cmd is unsuitable for verifying
-// behavior. Four checks, ordered cheap-first:
+// behavior. Five checks, ordered cheap-first:
 //
 //  1. Compound (chain or pipe) → not weak; agent threaded a real check.
 //  2. Heredoc (`<<` / `<<-`) → weak; the command is writing content,
@@ -387,19 +408,40 @@ var verifyRedirectDevTargets = map[string]struct{}{
 //  3. Top-level redirect (`>` or `>>`) to a non-`/dev/{null,stderr,stdout}`
 //     target → weak; the command is writing a file, not checking.
 //     Carve-out preserves `go build ./... > /dev/null` style usage.
-//  4. Leading command in weakVerifyLeadingCommands → weak.
+//  4. Interpreter-with-inline-script (iter52a): `python3 -c "..."`,
+//     `bash -c "..."`, `node -e "..."` etc. The script body is opaque
+//     and trivially "exit 0", which would otherwise bypass C4.
+//  5. Leading command in weakVerifyLeadingCommands → weak.
 //
-// Conservative by design: false-negatives possible (e.g. `bash -c`
-// disguise) — this is a quality scaffold, not a sandbox.
+// Conservative by design: false-negatives still possible (e.g. an
+// agent writing `mybuild` as a wrapper that always exit 0) — this is
+// a quality scaffold, not a sandbox.
 func isWeakVerifyCommand(cmd string) bool {
 	trimmed := strings.TrimSpace(cmd)
 	if trimmed == "" {
 		return true
 	}
-	// Compound commands (chain or pipe) pass.
-	for _, sep := range []string{"&&", "||", ";", "|"} {
-		if strings.Contains(trimmed, sep) {
-			return false
+	fields := strings.Fields(trimmed)
+	if len(fields) == 0 {
+		return true
+	}
+	// Compound commands (chain or pipe) pass — but only when the
+	// separator is OUTSIDE quoted regions. iter52a: `python -c "import
+	// sys; sys.exit(0)"` has a `;` inside the script body that must
+	// NOT count as a shell chain.
+	if hasUnquotedSeparator(trimmed) {
+		return false
+	}
+	// Interpreter + inline script (iter52a) → weak.
+	if flag, ok := interpreterInlineScript[fields[0]]; ok && len(fields) >= 2 {
+		if fields[1] == flag {
+			return true
+		}
+		// awk's canonical no-op idiom: `awk 'BEGIN{...}'`. The single-
+		// quoted body is one shell field; trim leading quote before
+		// matching.
+		if fields[0] == "awk" && strings.HasPrefix(strings.TrimLeft(fields[1], "'\""), "BEGIN") {
+			return true
 		}
 	}
 	// Heredoc → write-shaped, weak.
@@ -411,12 +453,51 @@ func isWeakVerifyCommand(cmd string) bool {
 	if redirectsToFile(trimmed) {
 		return true
 	}
-	fields := strings.Fields(trimmed)
-	if len(fields) == 0 {
-		return true
-	}
 	_, weak := weakVerifyLeadingCommands[fields[0]]
 	return weak
+}
+
+// hasUnquotedSeparator reports whether s contains a shell chain
+// operator (&&, ||, ;, |) outside any single- or double-quoted region.
+// Backslash-escape is honored. This is intentionally a tiny scanner
+// rather than a real parser — gil's threat model is C4 quality
+// scaffold, not a sandbox.
+func hasUnquotedSeparator(s string) bool {
+	var inSingle, inDouble, escape bool
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if escape {
+			escape = false
+			continue
+		}
+		switch c {
+		case '\\':
+			if !inSingle {
+				escape = true
+			}
+		case '\'':
+			if !inDouble {
+				inSingle = !inSingle
+			}
+		case '"':
+			if !inSingle {
+				inDouble = !inDouble
+			}
+		case '&':
+			if !inSingle && !inDouble && i+1 < len(s) && s[i+1] == '&' {
+				return true
+			}
+		case '|':
+			if !inSingle && !inDouble {
+				return true
+			}
+		case ';':
+			if !inSingle && !inDouble {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // redirectsToFile reports whether trimmed contains an output redirect

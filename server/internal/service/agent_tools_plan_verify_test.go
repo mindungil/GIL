@@ -81,8 +81,10 @@ func TestToolVerify_PassTransitionsStep(t *testing.T) {
 		json.RawMessage(`{"items":[{"description":"echo","acceptance_check":"true"}]}`))
 
 	tool := &toolVerify{repo: repo}
+	// iter52a: `sh -c 'exit 0'` is now flagged weak. Use `test` instead —
+	// real shell builtin assertion returning 0 for true conditions.
 	res, err := tool.run(context.Background(), sid,
-		json.RawMessage(`{"description":"smoke","command":"sh -c 'exit 0'","step_id":1}`))
+		json.RawMessage(`{"description":"smoke","command":"test -d .","step_id":1}`))
 	require.NoError(t, err)
 	require.False(t, res.IsError, res.Content)
 	require.Contains(t, res.Content, "[PASS]")
@@ -119,8 +121,12 @@ func TestToolVerify_NoStepIDStillRuns(t *testing.T) {
 	sid := newTestSession(t, repo, wd)
 
 	tool := &toolVerify{repo: repo}
+	// iter52a: `sh -c 'exit 0'` is now classified as weak (interpreter
+	// inline-script no-op). Use a real behavior check instead — `test`
+	// is a shell builtin that returns 0 for non-empty strings, which
+	// is a legitimate (if minimal) assertion.
 	res, err := tool.run(context.Background(), sid,
-		json.RawMessage(`{"description":"adhoc","command":"sh -c 'exit 0'"}`))
+		json.RawMessage(`{"description":"adhoc","command":"test -d ."}`))
 	require.NoError(t, err)
 	require.False(t, res.IsError)
 	require.NotContains(t, res.Content, "step ", "no step_id means no transition message")
@@ -175,6 +181,17 @@ func TestIsWeakVerifyCommand(t *testing.T) {
 		// Compound writes still pass (chain short-circuits before redirect).
 		{"write then check", "cat <<EOF > t.go\npackage x\nEOF\n && go build", false},
 		{"empty after trim", "   ", true},
+		// iter52a: interpreter-with-inline-script no-op bypass.
+		{"python3 -c noop", `python3 -c "print('PASS')"`, true},
+		{"python -c noop", `python -c "import sys; sys.exit(0)"`, true},
+		{"bash -c noop", `bash -c "true"`, true},
+		{"sh -c noop", `sh -c "exit 0"`, true},
+		{"node -e noop", `node -e "console.log('ok')"`, true},
+		{"ruby -e noop", `ruby -e "puts 'ok'"`, true},
+		{"awk BEGIN noop", `awk 'BEGIN{print "ok"}'`, true},
+		// But chained interpreter calls pass (real check after).
+		{"python -c then test", `python3 -c "print('start')" && go test`, false},
+		{"python without -c is fine (running a script)", "python3 ./check.py", false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
