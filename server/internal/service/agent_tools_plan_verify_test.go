@@ -162,8 +162,19 @@ func TestIsWeakVerifyCommand(t *testing.T) {
 		{"compound — head then test", "head foo.go && go test", false},
 		{"pipe to test runner", "find . -name '*.go' | xargs go vet", false},
 		{"explicit assertion script", "./scripts/check.sh", false},
-		{"cat alone with redirect", "cat > foo.txt", false}, // it's writing, not just inspecting
-		{"empty after trim", "   ", true},                    // already rejected upstream but be conservative
+		// P29: write-shaped verify is now weak (bug fix — was false).
+		{"cat redirect to file", "cat > foo.txt", true},
+		{"echo redirect to file", "echo hi > foo.txt", true},
+		{"heredoc cat to file", "cat <<EOF > foo.go\npackage x\nEOF", true},
+		{"heredoc indented", "cat <<-EOF > foo.go\npackage x\nEOF", true},
+		{"append redirect to file", "echo hi >> foo.txt", true},
+		// /dev/null carve-out: silenced output is fine if leading cmd is real.
+		{"build silenced to devnull", "go build ./... > /dev/null", false},
+		{"test stderr to devnull", "go test ./... 2>/dev/null", false},
+		{"stderr merge to stdout", "go vet ./... 2>&1", false},
+		// Compound writes still pass (chain short-circuits before redirect).
+		{"write then check", "cat <<EOF > t.go\npackage x\nEOF\n && go build", false},
+		{"empty after trim", "   ", true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
