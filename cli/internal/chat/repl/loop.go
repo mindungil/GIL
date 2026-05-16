@@ -460,13 +460,18 @@ func emitWelcomeDisclosure(ctx context.Context, cfg Config) {
 	if len(shown) > topN {
 		shown = shown[:topN]
 	}
+	// iter61: M3 removed client-side session resume dispatch, so the
+	// previous "pick one below" / "resume one" copy was misleading —
+	// users had no actual way to resume from chat. Banner is now
+	// purely informational ("recent work for context"); a new task
+	// always starts a fresh session.
 	var lead string
 	if len(list) == 1 {
-		lead = "1 past session — pick it below or describe a new task"
+		lead = "1 past session — context only; describe a new task"
 	} else if len(list) <= topN {
-		lead = fmt.Sprintf("%d past sessions — pick one below or describe a new task", len(list))
+		lead = fmt.Sprintf("%d past sessions — context only; describe a new task", len(list))
 	} else {
-		lead = fmt.Sprintf("%d past sessions — most recent %d below, describe a new task or resume one",
+		lead = fmt.Sprintf("%d past sessions — most recent %d below (context only); describe a new task",
 			len(list), topN)
 	}
 	cfg.Renderer.SystemNote(render.NoteSystem, lead)
