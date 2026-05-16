@@ -2,8 +2,10 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"google.golang.org/grpc/metadata"
 
@@ -195,4 +197,46 @@ func TestPrompt_LoopCapHitWithUnverifiedWrite_BackstopFires(t *testing.T) {
 	if !sawDone {
 		t.Fatalf("no Done part in stream")
 	}
+}
+
+// iter18a: dispatchTool sanitizes tool result Content so non-UTF-8
+// bytes (e.g. from read_file on a file truncated mid-multibyte, or
+// run_bash on a binary) don't crash the gRPC stream with "marshaling:
+// string field contains invalid UTF-8". Replacement char preserves
+// the agent's ability to reason about surrounding context.
+func TestDispatchTool_SanitizesInvalidUTF8Content(t *testing.T) {
+	// Build a fake tool that returns a partial multibyte sequence — the
+	// exact shape L18's gil.log had after display-layer truncation
+	// inserted "…" (U+2026) mid-character.
+	ft := &fakeContentTool{
+		out: provider.ToolResult{
+			// "abc" + lone-continuation 0xea + "def" — 0xea is the
+			// first byte of a 3-byte sequence but no continuation
+			// bytes follow, so the string is invalid UTF-8.
+			Content: "abc\xeadef",
+		},
+	}
+	reg := &chatToolRegistry{tools: []chatTool{ft}}
+	res, err := dispatchTool(context.Background(), reg, "sid",
+		provider.ToolCall{ID: "tc1", Name: "fakecontent", Input: []byte("{}")})
+	if err != nil {
+		t.Fatalf("dispatchTool: %v", err)
+	}
+	if !utf8.ValidString(res.Content) {
+		t.Fatalf("dispatchTool must produce valid UTF-8; got %q", res.Content)
+	}
+	// Original byte 0xea should be replaced by U+FFFD; "abc" and "def"
+	// must survive intact.
+	if !strings.Contains(res.Content, "abc") || !strings.Contains(res.Content, "def") {
+		t.Fatalf("surrounding text must survive sanitization; got %q", res.Content)
+	}
+}
+
+type fakeContentTool struct{ out provider.ToolResult }
+
+func (f *fakeContentTool) name() string            { return "fakecontent" }
+func (f *fakeContentTool) description() string     { return "" }
+func (f *fakeContentTool) schema() json.RawMessage { return json.RawMessage(`{}`) }
+func (f *fakeContentTool) run(_ context.Context, _ string, _ json.RawMessage) (provider.ToolResult, error) {
+	return f.out, nil
 }

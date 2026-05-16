@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -616,6 +618,16 @@ func dispatchTool(ctx context.Context, registry *chatToolRegistry, sessionID str
 	}
 	r, err := tool.run(ctx, sessionID, call.Input)
 	r.ToolUseID = call.ID
+	// iter18a (L18): tool Content goes onto the gRPC stream as a proto
+	// `string` field, which protobuf rejects with "marshaling: string
+	// field contains invalid UTF-8" if any tool returned bytes that
+	// aren't valid UTF-8 (read_file on a file truncated mid-multibyte,
+	// run_bash on a binary). Sanitize once at the dispatch boundary so
+	// every tool inherits the protection. Replacement chars preserve
+	// the agent's ability to reason about the rest of the content.
+	if !utf8.ValidString(r.Content) {
+		r.Content = strings.ToValidUTF8(r.Content, "�")
+	}
 	return r, err
 }
 
