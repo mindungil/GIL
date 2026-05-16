@@ -349,7 +349,7 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 	}
 	// 5. Build the tool registry for this turn, filtered by the
 	//    agent's tool whitelist (empty whitelist = full registry).
-	registry := s.buildChatToolRegistry(s.runService()).filterByName(agent.Tools)
+	registry := s.buildChatToolRegistry(s.runService(), provName, modelID).filterByName(agent.Tools)
 
 	// MCP surface in chat-mode (chat-mode parity with run-mode).
 	// When the session has a frozen spec naming MCP servers, lazy-

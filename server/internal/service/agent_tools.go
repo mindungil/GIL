@@ -114,7 +114,7 @@ func (r *chatToolRegistry) filterByName(allow []string) *chatToolRegistry {
 // call. Returns the FULL registry; agent profiles' tool whitelists are
 // applied separately via filterByName so we have one canonical list of
 // what the daemon supports.
-func (s *SessionService) buildChatToolRegistry(runSvc *RunService) *chatToolRegistry {
+func (s *SessionService) buildChatToolRegistry(runSvc *RunService, parentProvider, parentModel string) *chatToolRegistry {
 	return &chatToolRegistry{
 		tools: []chatTool{
 			// Read-only meta tools (V1 baseline).
@@ -161,7 +161,10 @@ func (s *SessionService) buildChatToolRegistry(runSvc *RunService) *chatToolRegi
 			// spawn_agent creates a child session with a sliced spec
 			// and detached run; wait_agent blocks until terminal;
 			// agent_status peeks without blocking.
-			&toolSpawnAgent{sess: s, rs: runSvc, registry: s.subagentRegistry, base: s.sessionsBase},
+			&toolSpawnAgent{
+				sess: s, rs: runSvc, registry: s.subagentRegistry, base: s.sessionsBase,
+				parentProvider: parentProvider, parentModel: parentModel,
+			},
 			&toolWaitAgent{sess: s},
 			&toolAgentStatus{sess: s},
 			// §2.6 verb-tool wave — see agent_tools_verbs.go.

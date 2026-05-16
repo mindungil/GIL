@@ -33,6 +33,12 @@ type toolSpawnAgent struct {
 	rs       *RunService
 	registry *subagentRegistry
 	base     string // sessionsBase
+	// iter39a: parent's provider/model so the subagent inherits the
+	// same backend instead of falling back to the daemon's "anthropic"
+	// default. Without this, a chat session running on vllm would spawn
+	// a child that immediately fails with "no credentials for anthropic".
+	parentProvider string
+	parentModel    string
 }
 
 func (t *toolSpawnAgent) name() string { return "spawn_agent" }
@@ -223,6 +229,8 @@ func (t *toolSpawnAgent) run(ctx context.Context, parentSessionID string, argsJS
 	// session.Status.
 	startResp, startErr := t.rs.Start(ctx, &gilv1.StartRunRequest{
 		SessionId: childSess.ID,
+		Provider:  t.parentProvider,
+		Model:     t.parentModel,
 		Detach:    true,
 	})
 	if startErr != nil {
