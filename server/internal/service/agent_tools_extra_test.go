@@ -89,6 +89,11 @@ func TestToolTodoWrite_RejectsBadStatus(t *testing.T) {
 }
 
 func TestToolWebFetch_Success(t *testing.T) {
+	// iter34a: SSRF defense rejects loopback by default. httptest.Server
+	// binds 127.0.0.1, so this test must opt into the dev-mode override
+	// (env var documented in webfetchAllowInternal).
+	t.Setenv("GIL_WEBFETCH_ALLOW_INTERNAL", "1")
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
 		_, _ = w.Write([]byte("hello from gil-test"))
@@ -115,6 +120,7 @@ func TestToolWebFetch_RejectsNonHTTPScheme(t *testing.T) {
 }
 
 func TestToolWebFetch_404IsErr(t *testing.T) {
+	t.Setenv("GIL_WEBFETCH_ALLOW_INTERNAL", "1")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "nope", http.StatusNotFound)
 	}))
@@ -165,4 +171,33 @@ func TestRegistry_FilterByName(t *testing.T) {
 	odd := full.filterByName([]string{"read_file", "no_such_tool"})
 	require.Len(t, odd.tools, 1, "unknown tool names should be dropped, not error")
 	require.Equal(t, strings.ToLower("read_file"), odd.tools[0].name())
+}
+
+// iter34a regression: webfetch must reject internal IPs by default.
+// Power users can override with GIL_WEBFETCH_ALLOW_INTERNAL=1; these
+// tests assert the *default* (no env) refuses.
+func TestToolWebFetch_RejectsLoopback(t *testing.T) {
+	tool := &toolWebFetch{}
+	res, _ := tool.run(context.Background(), "",
+		json.RawMessage(`{"url":"http://localhost:1234/x"}`))
+	require.True(t, res.IsError, res.Content)
+	require.Contains(t, res.Content, "loopback")
+}
+
+func TestToolWebFetch_RejectsLinkLocalMetadata(t *testing.T) {
+	// 169.254.169.254 — AWS / GCP / Azure instance metadata. The most
+	// dangerous SSRF target in cloud environments.
+	tool := &toolWebFetch{}
+	res, _ := tool.run(context.Background(), "",
+		json.RawMessage(`{"url":"http://169.254.169.254/latest/meta-data/"}`))
+	require.True(t, res.IsError, res.Content)
+	require.Contains(t, res.Content, "internal")
+}
+
+func TestToolWebFetch_RejectsRFC1918(t *testing.T) {
+	tool := &toolWebFetch{}
+	res, _ := tool.run(context.Background(), "",
+		json.RawMessage(`{"url":"http://10.0.0.1/admin"}`))
+	require.True(t, res.IsError, res.Content)
+	require.Contains(t, res.Content, "internal")
 }

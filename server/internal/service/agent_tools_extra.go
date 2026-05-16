@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -254,6 +256,93 @@ func (t *toolTodoWrite) run(ctx context.Context, sessionID string, argsJSON json
 
 // --- webfetch --------------------------------------------------------
 
+// webfetchSafeDial is the http.Transport.DialContext used by webfetch.
+// Resolves the target host, rejects internal IPs, then dials the first
+// public IP. Env GIL_WEBFETCH_ALLOW_INTERNAL=1 disables the check for
+// dev workflows that legitimately need localhost.
+func webfetchSafeDial(ctx context.Context, network, address string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, err
+	}
+	if rejection := webfetchValidateHost(host); rejection != "" {
+		return nil, errors.New(rejection)
+	}
+	// Resolve and dial the first allowed IP. We do the resolve again
+	// here even though webfetchValidateHost did one (TOCTOU mitigation:
+	// reuse the same lookup result).
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	var dialErr error
+	for _, ipa := range ips {
+		if !webfetchAllowInternal() && webfetchIPInternal(ipa.IP) {
+			dialErr = errors.New("resolved IP is internal/loopback/link-local: " + ipa.IP.String())
+			continue
+		}
+		var d net.Dialer
+		conn, derr := d.DialContext(ctx, network, net.JoinHostPort(ipa.IP.String(), port))
+		if derr == nil {
+			return conn, nil
+		}
+		dialErr = derr
+	}
+	if dialErr == nil {
+		dialErr = errors.New("no usable address for " + host)
+	}
+	return nil, dialErr
+}
+
+// webfetchValidateHost returns "" if the host is OK to fetch, or a
+// rejection reason string otherwise. Performs DNS resolution.
+func webfetchValidateHost(host string) string {
+	if webfetchAllowInternal() {
+		return ""
+	}
+	host = strings.ToLower(strings.TrimSpace(host))
+	// Cheap string checks for common loopback hostnames before resolving.
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") || strings.HasSuffix(host, ".local") {
+		return "host '" + host + "' is loopback/local; refusing to fetch"
+	}
+	// Resolve and inspect each address.
+	ips, err := net.DefaultResolver.LookupIPAddr(context.Background(), host)
+	if err != nil {
+		// Unresolvable hosts will fail the dial anyway; pass through so
+		// the caller sees a normal DNS error rather than an SSRF reject.
+		return ""
+	}
+	for _, ipa := range ips {
+		if webfetchIPInternal(ipa.IP) {
+			return "host '" + host + "' resolves to internal IP " + ipa.IP.String()
+		}
+	}
+	return ""
+}
+
+// webfetchIPInternal reports whether ip is loopback, link-local, or a
+// private RFC1918/ULA range. Link-local 169.254.0.0/16 covers cloud
+// instance metadata (AWS/GCP/Azure all use 169.254.169.254).
+func webfetchIPInternal(ip net.IP) bool {
+	if ip == nil {
+		return true
+	}
+	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+		return true
+	}
+	if ip.IsPrivate() {
+		return true
+	}
+	if ip.IsUnspecified() {
+		return true
+	}
+	return false
+}
+
+func webfetchAllowInternal() bool {
+	return os.Getenv("GIL_WEBFETCH_ALLOW_INTERNAL") == "1"
+}
+
 type toolWebFetch struct{}
 
 func (t *toolWebFetch) name() string { return "webfetch" }
@@ -282,14 +371,14 @@ func (t *toolWebFetch) run(ctx context.Context, _ string, argsJSON json.RawMessa
 	if err := json.Unmarshal(argsJSON, &args); err != nil {
 		return provider.ToolResult{Content: "invalid args: " + err.Error(), IsError: true}, nil
 	}
-	url := strings.TrimSpace(args.URL)
-	if !(strings.HasPrefix(url, "http://") || strings.HasPrefix(url, "https://")) {
+	rawURL := strings.TrimSpace(args.URL)
+	if !(strings.HasPrefix(rawURL, "http://") || strings.HasPrefix(rawURL, "https://")) {
 		return provider.ToolResult{Content: "url must be http(s)://", IsError: true}, nil
 	}
 
 	cctx, cancel := context.WithTimeout(ctx, fetchTimeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(cctx, "GET", url, nil)
+	req, err := http.NewRequestWithContext(cctx, "GET", rawURL, nil)
 	if err != nil {
 		return provider.ToolResult{Content: "request: " + err.Error(), IsError: true}, nil
 	}
@@ -297,9 +386,31 @@ func (t *toolWebFetch) run(ctx context.Context, _ string, argsJSON json.RawMessa
 
 	client := &http.Client{
 		Timeout: fetchTimeout,
+		// iter34a: SSRF defense. The bare http.Client happily resolves
+		// and connects to internal IPs — eval-loop iter34 confirmed
+		// localhost/127.0.0.1 + RFC1918 + 169.254.169.254 (cloud
+		// instance metadata) all reachable. A prompt-injected URL in
+		// fetched content (issue body, docs page) could chain to leak
+		// credentials via the metadata service.
+		//
+		// Custom Dialer resolves AND inspects the resolved IP before
+		// connecting. Rejects loopback / link-local / private. Power
+		// users can re-enable via env (legitimate dev workflows fetching
+		// a local server — those should usually go through run_bash curl
+		// anyway).
+		Transport: &http.Transport{
+			DialContext: webfetchSafeDial,
+		},
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= fetchMaxRedirect {
 				return errors.New("too many redirects")
+			}
+			// iter34a: re-validate redirect target host (CheckRedirect
+			// is the only place to catch redirects to internal IPs).
+			if u, perr := url.Parse(req.URL.String()); perr == nil {
+				if rejection := webfetchValidateHost(u.Hostname()); rejection != "" {
+					return errors.New("redirect rejected: " + rejection)
+				}
 			}
 			return nil
 		},
