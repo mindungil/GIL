@@ -308,3 +308,150 @@ func TestToolApplyPatch_ReadonlyTarget_Rejects(t *testing.T) {
 		t.Fatalf("file mutated despite readonly: %q", body)
 	}
 }
+
+// --- C3 P32 amendment: chmod via run_bash also gated -----------------
+
+func TestRejectRunBashChmodOnReadonly_AddsWriteSymbolic_Reject(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "locked.go")
+	require.NoError(t, os.WriteFile(target, []byte("ok"), 0o644))
+	require.NoError(t, os.Chmod(target, 0o444))
+
+	cases := []string{
+		"chmod +w locked.go",
+		"chmod u+w locked.go",
+		"chmod a+w locked.go",
+		"chmod ug+w locked.go",
+		"chmod +rw locked.go",
+		"chmod +wx locked.go",
+		"chmod +w locked.go && grep foo locked.go",
+		"chmod 644 locked.go",
+		"chmod 0664 locked.go",
+		"chmod 755 locked.go",
+		"chmod -R +w locked.go",
+	}
+	for _, c := range cases {
+		t.Run(c, func(t *testing.T) {
+			err := rejectRunBashChmodOnReadonly(c, dir)
+			require.Error(t, err, "should reject: %s", c)
+			require.Contains(t, err.Error(), "read-only")
+		})
+	}
+}
+
+func TestRejectRunBashChmodOnReadonly_AbsolutePath_Reject(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "locked.go")
+	require.NoError(t, os.WriteFile(target, []byte("ok"), 0o644))
+	require.NoError(t, os.Chmod(target, 0o444))
+
+	cmd := "chmod +w " + target
+	err := rejectRunBashChmodOnReadonly(cmd, dir)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "read-only")
+}
+
+func TestRejectRunBashChmodOnReadonly_NonChmodPasses(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "locked.go")
+	require.NoError(t, os.WriteFile(target, []byte("ok"), 0o644))
+	require.NoError(t, os.Chmod(target, 0o444))
+
+	cases := []string{
+		"ls -la",
+		"go build ./...",
+		"cat locked.go",
+		"grep foo locked.go",
+		"echo chmod +w fake.go", // chmod is just an arg, not the leading cmd
+	}
+	for _, c := range cases {
+		t.Run(c, func(t *testing.T) {
+			err := rejectRunBashChmodOnReadonly(c, dir)
+			require.NoError(t, err, "non-chmod cmd should pass: %s", c)
+		})
+	}
+}
+
+func TestRejectRunBashChmodOnReadonly_RemoveWritePasses(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "writable.go")
+	require.NoError(t, os.WriteFile(target, []byte("ok"), 0o644))
+	// Target is writable; chmod -w shouldn't trip this gate either way,
+	// but specifically: removing-write modes should pass since they
+	// don't grant write.
+	cases := []string{
+		"chmod -w writable.go",
+		"chmod 444 writable.go",
+		"chmod 0444 writable.go",
+		"chmod 555 writable.go",
+		"chmod a-w writable.go",
+		"chmod u-w writable.go",
+	}
+	for _, c := range cases {
+		t.Run(c, func(t *testing.T) {
+			err := rejectRunBashChmodOnReadonly(c, dir)
+			require.NoError(t, err, "non-write-adding chmod should pass: %s", c)
+		})
+	}
+}
+
+func TestRejectRunBashChmodOnReadonly_WritableTargetPasses(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "writable.go")
+	require.NoError(t, os.WriteFile(target, []byte("ok"), 0o644))
+	// Target writable; chmod +w on it is a no-op but we don't reject
+	// since the user hasn't marked it readonly.
+	err := rejectRunBashChmodOnReadonly("chmod +w writable.go", dir)
+	require.NoError(t, err)
+}
+
+func TestToolRunBash_ChmodOnReadonly_Rejects(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "locked.go")
+	require.NoError(t, os.WriteFile(target, []byte("package x\n"), 0o644))
+	require.NoError(t, os.Chmod(target, 0o444))
+
+	repo := newTestRepo(t)
+	sid := newTestSession(t, repo, dir)
+	tool := &toolRunBash{repo: repo}
+	res, _ := tool.run(context.Background(), sid,
+		json.RawMessage(`{"cmd":"chmod +w locked.go && grep foo locked.go"}`))
+	require.True(t, res.IsError, "should be IsError, got %+v", res)
+	require.Contains(t, res.Content, "read-only")
+
+	// File mode should be unchanged.
+	info, err := os.Stat(target)
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0o444), info.Mode().Perm(),
+		"chmod must NOT have run despite the run_bash call")
+}
+
+func TestIsNumericModeAddsOwnerWrite(t *testing.T) {
+	cases := []struct {
+		tok    string
+		wantOK bool
+	}{
+		{"644", true},
+		{"755", true},
+		{"0644", true},
+		{"0755", true},
+		{"666", true},
+		{"777", true},
+		{"764", true},
+		{"444", false},
+		{"555", false},
+		{"0444", false},
+		{"0555", false},
+		{"445", false},
+		{"abc", false},
+		{"12", false},
+		{"12345", false},
+		{"858", false}, // 8 isn't octal
+	}
+	for _, tc := range cases {
+		t.Run(tc.tok, func(t *testing.T) {
+			got := isNumericModeAddsOwnerWrite(tc.tok)
+			require.Equal(t, tc.wantOK, got, "isNumericModeAddsOwnerWrite(%q)", tc.tok)
+		})
+	}
+}
