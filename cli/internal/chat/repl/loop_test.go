@@ -123,3 +123,47 @@ func TestLoop_ContextCancelled_ReturnsErr(t *testing.T) {
 	err := Run(ctx, Config{In: strings.NewReader("hello\n"), Renderer: mock, Client: fc})
 	require.True(t, errors.Is(err, context.Canceled))
 }
+
+// L2 inline-drain regression: tool.call / tool.result events arrive
+// on a sibling channel but must render INTERLEAVED with the assistant
+// text, not batched at end-of-turn. Pre-fix, the streaming loop
+// drained chunks first and only handled events between turns.
+func TestLoop_ToolEventsInterleaveWithAssistantText(t *testing.T) {
+	mock := render.NewMockRenderer()
+	// fakeClient pulls both queues round-robin per loop iteration:
+	// drainPendingEvents fires first, then NextAssistantChunk.
+	// So with assistantChunks=[A, B, C] and events=[e1, e2], the
+	// rendered sequence is: e1, e2, A, B, C (events are returned
+	// before any chunk asked for).
+	fc := &fakeClient{
+		assistantChunks: []string{"hello ", "world"},
+		events: []TrackerInput{
+			{Kind: "tool.call", ToolName: "read_file", ToolInput: `{"path":"x"}`},
+			{Kind: "tool.result", ToolContent: "ok"},
+		},
+	}
+	in := strings.NewReader("hi\nquit\n")
+	err := Run(context.Background(), Config{In: in, Renderer: mock, Client: fc})
+	require.NoError(t, err)
+	seq := mock.MethodSequence()
+	// Find the indices of the first SystemNote (from event drain) and
+	// the first AssistantText. SystemNote should come BEFORE
+	// AssistantText now that drainPendingEvents runs at the top of
+	// each streaming iteration.
+	firstSystemNote := indexOf(seq, "SystemNote")
+	firstAssistant := indexOf(seq, "AssistantText")
+	require.NotEqual(t, -1, firstSystemNote, "expected at least one SystemNote from tool event")
+	require.NotEqual(t, -1, firstAssistant, "expected at least one AssistantText")
+	require.Less(t, firstSystemNote, firstAssistant,
+		"tool events must render BEFORE assistant text when they arrive first; "+
+			"got sequence %v", seq)
+}
+
+func indexOf(s []string, needle string) int {
+	for i, v := range s {
+		if v == needle {
+			return i
+		}
+	}
+	return -1
+}

@@ -139,11 +139,43 @@ func Run(ctx context.Context, cfg Config) error {
 			// A 30s watchdog converts a silent hang (gild waiting on a
 			// dead provider, no events ever) into a visible note so the
 			// user knows to ctrl+c rather than staring at an idle prompt.
+			//
+			// L2 inline-drain: tool.call / tool.result events arrive on
+			// a sibling channel (eventCh) but the daemon's producer
+			// (drainPromptStream) preserves wire order across both
+			// channels. To render tool events inline with the text
+			// instead of batched at end-of-turn, we drain pending
+			// events between every text chunk and once more after
+			// chunkDone closes. inlineNoteSeparator emits a "\n" if
+			// the text was mid-line so [system] doesn't glue onto the
+			// previous chunk.
 			gotAnyChunk := false
 			streamErrored := false
 			turnStart := time.Now()
 			warned := false
+			lastEndedWithNewline := true
+			drainPendingEvents := func() {
+				for {
+					in, ok, err := cfg.Client.NextEvent(ctx)
+					if err != nil {
+						cfg.Renderer.SystemNote(render.NoteSystem,
+							"event stream error: "+errmap.FormatForChat(err))
+						return
+					}
+					if !ok {
+						return
+					}
+					if !lastEndedWithNewline {
+						cfg.Renderer.AssistantText("\n")
+						lastEndedWithNewline = true
+					}
+					prev := tr.State()
+					tr.Apply(in)
+					emitDeltaNotes(cfg.Renderer, prev, tr.State(), in)
+				}
+			}
 			for {
+				drainPendingEvents()
 				chunk, more, err := cfg.Client.NextAssistantChunk(ctx)
 				if err != nil {
 					cfg.Renderer.SystemNote(render.NoteSystem,
@@ -157,6 +189,7 @@ func Run(ctx context.Context, cfg Config) error {
 				if chunk != "" {
 					cfg.Renderer.AssistantText(chunk)
 					gotAnyChunk = true
+					lastEndedWithNewline = strings.HasSuffix(chunk, "\n")
 				}
 				if !more {
 					break
@@ -167,6 +200,9 @@ func Run(ctx context.Context, cfg Config) error {
 					warned = true
 				}
 			}
+			// Final drain — events that arrived after the last text
+			// chunk but before chunkDone closed.
+			drainPendingEvents()
 			if !gotAnyChunk && !streamErrored {
 				// Clean stream close with no events — daemon path
 				// completed silently. Surface so the user knows their
