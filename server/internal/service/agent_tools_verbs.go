@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"path/filepath"
@@ -39,15 +40,37 @@ import (
 type workingSet struct {
 	mu      sync.Mutex
 	entries map[string]map[string]struct{}
+	// db is the optional durable backing. When nil the store behaves
+	// as the pre-P30 in-memory version — tests that don't care about
+	// persistence keep working untouched.
+	db *sql.DB
+	// loaded tracks which session IDs have been hydrated from DB so
+	// add/drop/list skip the SELECT after the first hit. Presence-only.
+	loaded map[string]struct{}
 }
 
 func newWorkingSet() *workingSet {
-	return &workingSet{entries: map[string]map[string]struct{}{}}
+	return &workingSet{
+		entries: map[string]map[string]struct{}{},
+		loaded:  map[string]struct{}{},
+	}
+}
+
+// SetDB attaches a *sql.DB to the store. Pass nil to detach (tests).
+// Safe to call multiple times.
+func (w *workingSet) SetDB(db *sql.DB) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.db = db
+	// Reset loaded set so the next access rehydrates against the
+	// new backing.
+	w.loaded = map[string]struct{}{}
 }
 
 func (w *workingSet) add(sid string, paths []string) (added, alreadyPresent []string) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	w.ensureLoadedLocked(sid)
 	bag, ok := w.entries[sid]
 	if !ok {
 		bag = map[string]struct{}{}
@@ -65,12 +88,16 @@ func (w *workingSet) add(sid string, paths []string) (added, alreadyPresent []st
 		bag[p] = struct{}{}
 		added = append(added, p)
 	}
+	if len(added) > 0 {
+		w.persistAddLocked(sid, added)
+	}
 	return added, alreadyPresent
 }
 
 func (w *workingSet) drop(sid string, paths []string) (dropped, notPresent []string) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	w.ensureLoadedLocked(sid)
 	bag := w.entries[sid]
 	for _, p := range paths {
 		p = strings.TrimSpace(p)
@@ -84,12 +111,16 @@ func (w *workingSet) drop(sid string, paths []string) (dropped, notPresent []str
 			notPresent = append(notPresent, p)
 		}
 	}
+	if len(dropped) > 0 {
+		w.persistDropLocked(sid, dropped)
+	}
 	return dropped, notPresent
 }
 
 func (w *workingSet) list(sid string) []string {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	w.ensureLoadedLocked(sid)
 	bag := w.entries[sid]
 	out := make([]string, 0, len(bag))
 	for p := range bag {
@@ -97,6 +128,84 @@ func (w *workingSet) list(sid string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// ensureLoadedLocked hydrates w.entries[sid] from DB on first hit
+// after a SetDB call. Caller holds w.mu. When db is nil this is a
+// no-op.
+func (w *workingSet) ensureLoadedLocked(sid string) {
+	if w.loaded == nil {
+		w.loaded = map[string]struct{}{}
+	}
+	if w.db == nil {
+		return
+	}
+	if _, done := w.loaded[sid]; done {
+		return
+	}
+	rows, err := w.db.Query(`SELECT path FROM workingset_entries
+        WHERE session_id = ? ORDER BY path ASC`, sid)
+	if err != nil {
+		// Silent failure — pre-restart state is unrecoverable for
+		// this session, but the in-memory store stays consistent.
+		return
+	}
+	defer rows.Close()
+	bag, ok := w.entries[sid]
+	if !ok {
+		bag = map[string]struct{}{}
+		w.entries[sid] = bag
+	}
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return
+		}
+		bag[p] = struct{}{}
+	}
+	w.loaded[sid] = struct{}{}
+}
+
+// persistAddLocked inserts the new paths. Caller holds w.mu. Failures
+// are silent — durability is best-effort and the in-memory store
+// remains authoritative within the daemon's lifetime. Uses INSERT OR
+// IGNORE so a stale duplicate row can't fail the whole batch.
+func (w *workingSet) persistAddLocked(sid string, paths []string) {
+	if w.db == nil {
+		return
+	}
+	tx, err := w.db.Begin()
+	if err != nil {
+		return
+	}
+	defer func() { _ = tx.Rollback() }()
+	for _, p := range paths {
+		if _, err := tx.Exec(`INSERT OR IGNORE INTO workingset_entries
+            (session_id, path) VALUES (?, ?)`, sid, p); err != nil {
+			return
+		}
+	}
+	_ = tx.Commit()
+}
+
+// persistDropLocked deletes the given paths for sid. Caller holds w.mu.
+// Silent failure (same rationale as persistAddLocked).
+func (w *workingSet) persistDropLocked(sid string, paths []string) {
+	if w.db == nil {
+		return
+	}
+	tx, err := w.db.Begin()
+	if err != nil {
+		return
+	}
+	defer func() { _ = tx.Rollback() }()
+	for _, p := range paths {
+		if _, err := tx.Exec(`DELETE FROM workingset_entries
+            WHERE session_id = ? AND path = ?`, sid, p); err != nil {
+			return
+		}
+	}
+	_ = tx.Commit()
 }
 
 // chatWorkingSet returns the per-service working-set store, allocating
