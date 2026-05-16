@@ -339,10 +339,25 @@ func applyHunks(src string, hunks []patchHunk) (string, int, int, error) {
 		}
 		matches := findContiguousMatches(current, oldSeq)
 		if len(matches) == 0 {
-			return "", 0, 0, fmt.Errorf("hunk %d (%q): pre-image not found in file", hi+1, h.header)
+			// Surface what we expected vs what's there so the agent can
+			// see the whitespace/indentation/typo mismatch causing the miss.
+			expected := strings.Join(oldSeq, "\n")
+			if len(expected) > 400 {
+				expected = expected[:400] + "...(truncated)"
+			}
+			// Try a fuzzy hint: find the closest line in the file that
+			// looks like the first oldSeq line, so the agent can compare.
+			hint := nearestLineHint(current, oldSeq[0])
+			return "", 0, 0, fmt.Errorf(
+				"hunk %d (%q): pre-image not found in file. "+
+					"Expected this exact text (with leading-space context lines):\n%s\n"+
+					"%s"+
+					"Common cause: indentation mismatch (tabs vs spaces), trailing whitespace, "+
+					"or stale read. Re-read the file and copy the lines verbatim, OR fall back to write_file.",
+				hi+1, h.header, expected, hint)
 		}
 		if len(matches) > 1 {
-			return "", 0, 0, fmt.Errorf("hunk %d (%q): pre-image matches %d locations; add more context", hi+1, h.header, len(matches))
+			return "", 0, 0, fmt.Errorf("hunk %d (%q): pre-image matches %d locations; add more context lines around the change to disambiguate", hi+1, h.header, len(matches))
 		}
 		at := matches[0]
 		next := make([]string, 0, len(current)+len(newSeq)-len(oldSeq))
@@ -376,6 +391,24 @@ func findContiguousMatches(haystack, needle []string) []int {
 		}
 	}
 	return hits
+}
+
+// nearestLineHint searches haystack for the line whose trimmed form
+// matches the trimmed form of needle (a typical agent mistake is
+// indentation-only mismatch). Returns a "Closest match in file at
+// line N: <text>" hint, or empty string if no near match found.
+func nearestLineHint(haystack []string, needle string) string {
+	target := strings.TrimSpace(needle)
+	if target == "" {
+		return ""
+	}
+	for i, line := range haystack {
+		if strings.TrimSpace(line) == target {
+			return fmt.Sprintf("Closest match in file at line %d (note the leading whitespace difference): %q\n",
+				i+1, line)
+		}
+	}
+	return ""
 }
 
 func countLines(s string) int {
