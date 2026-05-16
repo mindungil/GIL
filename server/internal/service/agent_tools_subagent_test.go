@@ -33,6 +33,25 @@ func TestToolSpawnAgent_RequiresLabelAndTask(t *testing.T) {
 	require.Contains(t, res.Content, "task")
 }
 
+// iter102a: control chars in args.Label must be stripped before storage.
+// A label of pure control bytes survives TrimSpace (ESC is not unicode
+// whitespace) but becomes empty after sanitizeHintControlChars; the
+// empty-after path is the cleanest observable that the sanitizer ran.
+func TestToolSpawnAgent_RejectsControlCharOnlyLabel(t *testing.T) {
+	sess, base := newTestSessionService(t)
+	rs := NewRunService(sess.repo, base, nil)
+	tool := &toolSpawnAgent{sess: sess, rs: rs, registry: sess.subagentRegistry, base: base}
+
+	wd := t.TempDir()
+	sid := newTestSession(t, sess.repo, wd)
+
+	// Label is only control bytes (ESC + SOH + DEL); sanitizer empties it.
+	res, _ := tool.run(context.Background(), sid,
+		json.RawMessage(`{"label":"\u001b\u0001\u007f","task":"x"}`))
+	require.True(t, res.IsError)
+	require.Contains(t, res.Content, "empty after stripping control chars")
+}
+
 func TestToolSpawnAgent_RejectsUnfrozenParent(t *testing.T) {
 	sess, base := newTestSessionService(t)
 	rs := NewRunService(sess.repo, base, nil)

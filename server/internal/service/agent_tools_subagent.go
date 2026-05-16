@@ -119,6 +119,15 @@ func (t *toolSpawnAgent) run(ctx context.Context, parentSessionID string, argsJS
 	if strings.TrimSpace(args.Task) == "" {
 		return provider.ToolResult{Content: "spawn_agent requires a non-empty task", IsError: true}, nil
 	}
+	// iter102a: strip control chars from Label before it lands in DB,
+	// agent_status, spawn_agent confirmation, and subagentHint. Without
+	// this, an agent (or an upstream prompt-injection vector) could plant
+	// ESC sequences that repaint the terminal anywhere SubagentLabel
+	// surfaces. Same defense as iter71a applied to a different field.
+	args.Label = sanitizeHintControlChars(args.Label)
+	if strings.TrimSpace(args.Label) == "" {
+		return provider.ToolResult{Content: "spawn_agent label became empty after stripping control chars", IsError: true}, nil
+	}
 
 	parentSess, err := t.sess.repo.Get(ctx, parentSessionID)
 	if err != nil {
