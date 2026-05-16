@@ -160,9 +160,14 @@ func Run(ctx context.Context, cfg Config) error {
 				switch msg.Kind {
 				case "text":
 					if msg.Text != "" {
-						cfg.Renderer.AssistantText(msg.Text)
+						// iter118a: an LLM influenced by hostile file content
+						// could echo ESC sequences in its reply. Strip ESC + DEL
+						// + other dangerous control bytes while preserving the
+						// whitespace humans actually want (\n \r \t).
+						clean := sanitizeAssistantChunk(msg.Text)
+						cfg.Renderer.AssistantText(clean)
 						gotAny = true
-						lastEndedWithNewline = strings.HasSuffix(msg.Text, "\n")
+						lastEndedWithNewline = strings.HasSuffix(clean, "\n")
 					}
 				case "event":
 					if !lastEndedWithNewline {
@@ -463,6 +468,28 @@ func sanitizeDisplayString(s string) string {
 			b.WriteByte(' ')
 		case r < 0x20 || r == 0x7f:
 			// drop
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// sanitizeAssistantChunk strips control bytes that drive terminal escape
+// sequences (ESC, DEL, BEL, etc.) while keeping \n \r \t — assistant
+// text is multiline, so collapsing whitespace like sanitizeDisplayString
+// does would mangle every reply. iter118a: same threat as iter71a /
+// iter91a but on the assistant stream itself, in case the model echoes
+// hostile bytes back from a file it just read.
+func sanitizeAssistantChunk(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		switch {
+		case r == '\n' || r == '\r' || r == '\t':
+			b.WriteRune(r)
+		case r < 0x20 || r == 0x7f:
+			// drop ESC, BEL, backspace, DEL, etc.
 		default:
 			b.WriteRune(r)
 		}

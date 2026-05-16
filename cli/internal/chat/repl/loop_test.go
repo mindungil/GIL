@@ -212,6 +212,28 @@ func TestLoop_PreservesWireOrder_TextBetweenEvents(t *testing.T) {
 		"text1 must render before event1; got %v", rendered)
 }
 
+// iter118a regression: assistant text chunks must have ESC + DEL
+// stripped before reaching the renderer. Newlines must survive.
+func TestLoop_AssistantText_StripsEscSequences(t *testing.T) {
+	mock := render.NewMockRenderer()
+	fc := &fakeClient{sessionID: "01TEST"}
+	fc.messages = []Message{
+		{Kind: "text", Text: "line1\x1b[2Kspoofed\nline2\x07ok\n"},
+	}
+	in := strings.NewReader("hi\nquit\n")
+	err := Run(context.Background(), Config{In: in, Renderer: mock, Client: fc})
+	require.NoError(t, err)
+	for _, c := range mock.Calls {
+		if c.Method != "AssistantText" {
+			continue
+		}
+		require.NotContains(t, c.Text, "\x1b",
+			"AssistantText must not carry ESC bytes; got %q", c.Text)
+		require.NotContains(t, c.Text, "\x07",
+			"AssistantText must not carry BEL bytes; got %q", c.Text)
+	}
+}
+
 // iter91a regression: tool.result body and tool.call input must be
 // stripped of control chars before SystemNote. Pre-fix, an attacker-
 // controlled file echoed via read_file's ToolContent could emit raw
