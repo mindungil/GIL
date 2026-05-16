@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -113,9 +114,16 @@ func runChat(cmd *cobra.Command, socket, providerName, model string) error {
 
 	workingDir, _ := cmd.Flags().GetString("working-dir")
 	if workingDir == "" {
-		if cwd, err := os.Getwd(); err == nil {
-			workingDir = cwd
-		}
+		workingDir = "."
+	}
+	// iter28a: relative paths (`.`, `..`, `sub/dir`) must resolve
+	// against the CLIENT's cwd, not the daemon's. The daemon is a
+	// long-running process in a different directory, so any non-
+	// absolute path sent over the wire would land somewhere the user
+	// did not intend (eval-loop iter28 showed the agent globbing the
+	// daemon's repo instead of the user's `.`).
+	if abs, err := filepath.Abs(workingDir); err == nil {
+		workingDir = abs
 	}
 	grpcClient := repl.NewGRPCClient(cli, workingDir)
 	grpcClient.SetProvider(providerName, model)
