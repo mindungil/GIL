@@ -428,17 +428,42 @@ func truncateRetryReason(s string) string {
 // both the entry self-disclosure and /sessions. Single source of truth
 // for the row layout: short ID (10 chars covers full ms-precision ULID
 // timestamp), relative age, phase tag, label.
+//
+// iter71a defense-in-depth: legacy session rows in sessions.db may
+// contain raw control chars (ESC, etc.) from before the write-side
+// sanitization fix. Strip them at display time so even dirty rows
+// can't poison the terminal.
 func formatSessionRow(n int, s SessionSummary) string {
 	short := s.ID
 	if len(short) > 10 {
 		short = short[:10]
 	}
-	label := s.Name
+	label := sanitizeDisplayString(s.Name)
 	if label == "" {
 		label = "—"
 	}
 	return fmt.Sprintf("%d. %-10s  %-6s  [%s]  %s",
 		n, short, formatAge(s.CreatedAt), s.Phase, label)
+}
+
+// sanitizeDisplayString strips control characters from text destined
+// for the terminal. Mirrors truncateHint's filter on the write side;
+// applied at the render boundary as a belt-and-suspenders against
+// legacy data and any path that bypassed the write sanitizer.
+func sanitizeDisplayString(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		switch {
+		case r == '\t':
+			b.WriteByte(' ')
+		case r < 0x20 || r == 0x7f:
+			// drop
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 // emitWelcomeDisclosure prints a one-line lead-in plus up to topN recent
