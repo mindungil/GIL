@@ -19,16 +19,18 @@ import (
 // --- working set --------------------------------------------------
 
 func TestToolAddToWorkingSet_AddsAndReportsDuplicates(t *testing.T) {
+	// iter56a: workingset validates paths via session's working dir.
 	sess, _ := newTestSessionService(t)
+	sid := newTestSession(t, sess.repo, t.TempDir())
 	add := &toolAddToWorkingSet{sess: sess}
-	res, err := add.run(context.Background(), "s1", json.RawMessage(`{"paths":["a.go","b.go"]}`))
+	res, err := add.run(context.Background(), sid, json.RawMessage(`{"paths":["a.go","b.go"]}`))
 	require.NoError(t, err)
 	require.False(t, res.IsError)
 	require.Contains(t, res.Content, "added 2")
 	require.Contains(t, res.Content, "a.go")
 
 	// Re-adding b.go reports duplicate; c.go is new.
-	res2, err := add.run(context.Background(), "s1", json.RawMessage(`{"paths":["b.go","c.go"]}`))
+	res2, err := add.run(context.Background(), sid, json.RawMessage(`{"paths":["b.go","c.go"]}`))
 	require.NoError(t, err)
 	require.Contains(t, res2.Content, "added 1")
 	require.Contains(t, res2.Content, "already present")
@@ -54,11 +56,12 @@ func TestToolAddToWorkingSet_EmptyPathsIsNoOpNotError(t *testing.T) {
 
 func TestToolListWorkingSet_SortedAndStable(t *testing.T) {
 	sess, _ := newTestSessionService(t)
+	sid := newTestSession(t, sess.repo, t.TempDir())
 	add := &toolAddToWorkingSet{sess: sess}
 	list := &toolListWorkingSet{sess: sess}
 
-	_, _ = add.run(context.Background(), "s1", json.RawMessage(`{"paths":["z.go","a.go","m.go"]}`))
-	res, err := list.run(context.Background(), "s1", json.RawMessage(`{}`))
+	_, _ = add.run(context.Background(), sid, json.RawMessage(`{"paths":["z.go","a.go","m.go"]}`))
+	res, err := list.run(context.Background(), sid, json.RawMessage(`{}`))
 	require.NoError(t, err)
 	// Sorted output is the user-facing stability contract.
 	require.Contains(t, res.Content, "a.go\n  m.go\n  z.go")
@@ -74,14 +77,15 @@ func TestToolListWorkingSet_EmptySessionIsEmpty(t *testing.T) {
 
 func TestToolDropFromWorkingSet_RoundtripWithList(t *testing.T) {
 	sess, _ := newTestSessionService(t)
+	sid := newTestSession(t, sess.repo, t.TempDir())
 	add := &toolAddToWorkingSet{sess: sess}
 	drop := &toolDropFromWorkingSet{sess: sess}
 	list := &toolListWorkingSet{sess: sess}
 
-	_, _ = add.run(context.Background(), "s1", json.RawMessage(`{"paths":["a.go","b.go","c.go"]}`))
-	_, _ = drop.run(context.Background(), "s1", json.RawMessage(`{"paths":["b.go","ghost.go"]}`))
+	_, _ = add.run(context.Background(), sid, json.RawMessage(`{"paths":["a.go","b.go","c.go"]}`))
+	_, _ = drop.run(context.Background(), sid, json.RawMessage(`{"paths":["b.go","ghost.go"]}`))
 
-	res, _ := list.run(context.Background(), "s1", json.RawMessage(`{}`))
+	res, _ := list.run(context.Background(), sid, json.RawMessage(`{}`))
 	require.Contains(t, res.Content, "a.go")
 	require.NotContains(t, res.Content, "b.go")
 	require.Contains(t, res.Content, "c.go")
@@ -89,15 +93,21 @@ func TestToolDropFromWorkingSet_RoundtripWithList(t *testing.T) {
 
 func TestWorkingSet_PerSessionIsolation(t *testing.T) {
 	// Two sessions must not see each other's working sets.
+	// iter56a: add_to_workingset now validates paths via the session's
+	// working dir, so the test must register real sessions instead of
+	// passing bare "s1"/"s2" strings.
 	sess, _ := newTestSessionService(t)
+	wd := t.TempDir()
+	s1 := newTestSession(t, sess.repo, wd)
+	s2 := newTestSession(t, sess.repo, wd)
 	add := &toolAddToWorkingSet{sess: sess}
 	list := &toolListWorkingSet{sess: sess}
 
-	_, _ = add.run(context.Background(), "s1", json.RawMessage(`{"paths":["s1-only.go"]}`))
-	_, _ = add.run(context.Background(), "s2", json.RawMessage(`{"paths":["s2-only.go"]}`))
+	_, _ = add.run(context.Background(), s1, json.RawMessage(`{"paths":["s1-only.go"]}`))
+	_, _ = add.run(context.Background(), s2, json.RawMessage(`{"paths":["s2-only.go"]}`))
 
-	r1, _ := list.run(context.Background(), "s1", json.RawMessage(`{}`))
-	r2, _ := list.run(context.Background(), "s2", json.RawMessage(`{}`))
+	r1, _ := list.run(context.Background(), s1, json.RawMessage(`{}`))
+	r2, _ := list.run(context.Background(), s2, json.RawMessage(`{}`))
 	require.Contains(t, r1.Content, "s1-only.go")
 	require.NotContains(t, r1.Content, "s2-only.go")
 	require.Contains(t, r2.Content, "s2-only.go")

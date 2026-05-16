@@ -241,7 +241,7 @@ func (t *toolAddToWorkingSet) description() string {
 func (t *toolAddToWorkingSet) schema() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{"paths":{"type":"array","items":{"type":"string"}}},"required":["paths"]}`)
 }
-func (t *toolAddToWorkingSet) run(_ context.Context, sessionID string, argsJSON json.RawMessage) (provider.ToolResult, error) {
+func (t *toolAddToWorkingSet) run(ctx context.Context, sessionID string, argsJSON json.RawMessage) (provider.ToolResult, error) {
 	var args struct {
 		Paths []string `json:"paths"`
 	}
@@ -251,13 +251,41 @@ func (t *toolAddToWorkingSet) run(_ context.Context, sessionID string, argsJSON 
 	if len(args.Paths) == 0 {
 		return provider.ToolResult{Content: "no paths supplied"}, nil
 	}
-	added, dup := t.sess.chatWorkingSet().add(sessionID, args.Paths)
+	// iter56a: workingset is scope-bound to the session's working dir,
+	// matching read_file / write_file / edit_file behavior. Without
+	// this gate, the agent (or a prompt-injection chain) could pollute
+	// the workingset DB with absolute paths or `../` escapes — the
+	// list itself is harmless, but future tools that READ from the
+	// workingset would inherit the escape.
+	wd, err := sessionWD(ctx, t.sess.repo, sessionID)
+	if err != nil {
+		return provider.ToolResult{Content: err.Error(), IsError: true}, nil
+	}
+	cleaned := make([]string, 0, len(args.Paths))
+	rejected := make([]string, 0)
+	for _, p := range args.Paths {
+		if _, err := resolveInWD(wd, p); err != nil {
+			rejected = append(rejected, fmt.Sprintf("%s (%s)", p, err.Error()))
+			continue
+		}
+		cleaned = append(cleaned, p)
+	}
+	if len(cleaned) == 0 {
+		return provider.ToolResult{
+			Content: "no paths added; all rejected:\n  " + strings.Join(rejected, "\n  "),
+			IsError: true,
+		}, nil
+	}
+	added, dup := t.sess.chatWorkingSet().add(sessionID, cleaned)
 	out := fmt.Sprintf("added %d file(s) to workingset", len(added))
 	if len(added) > 0 {
 		out += ":\n  " + strings.Join(added, "\n  ")
 	}
 	if len(dup) > 0 {
 		out += fmt.Sprintf("\nalready present (%d): %s", len(dup), strings.Join(dup, ", "))
+	}
+	if len(rejected) > 0 {
+		out += fmt.Sprintf("\nrejected (%d):\n  %s", len(rejected), strings.Join(rejected, "\n  "))
 	}
 	return provider.ToolResult{Content: out}, nil
 }
