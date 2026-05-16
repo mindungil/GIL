@@ -266,6 +266,50 @@ Layer A는 deterministic, Layer B는 가이드. 둘 다 있어야 강함.
 
 ---
 
+## 11. P29 amendment — write-shaped verify rejected as weak
+
+### 11.1 Background
+
+[failure-floor §11.4](../research/2026-05-15-gil-failure-floor.md#114-wrap-up)
+flagged a residual loophole: f1's verify call sequence began with
+`cat <<EOF > /tmp/clean_test.go` — a write disguised as a verify.
+The original `isWeakVerifyCommand` short-circuited on `>`, treating
+"contains a redirect" as evidence of being a real check. That premise
+was wrong: the verify tool exec-runs whatever the agent passes, so a
+write-shaped command exits 0, `IsError=false`, `needsVerify` resets,
+and the agent has "verified" without ever building or testing.
+
+### 11.2 Rules (added in `isWeakVerifyCommand`)
+
+After the existing chain/pipe short-circuit:
+
+1. **Heredoc** (`<<` or `<<-` anywhere in the command) → weak. Agent
+   is writing content, not checking it.
+2. **Top-level redirect** (`>` or `>>`) where the target is not
+   `/dev/null`, `/dev/stderr`, or `/dev/stdout`, and not the
+   stderr-merge form `>&N` → weak.
+3. (existing) Leading command in `weakVerifyLeadingCommands` → weak.
+
+Compound commands still pass (chain check fires before write check),
+so `cat <<EOF > t.go` followed by ` && go build` is allowed.
+
+### 11.3 Carve-outs
+
+`go build ./... > /dev/null`, `... 2>/dev/null`, `... 2>&1` all pass —
+they're silencing output, not writing artifact files. Glued forms
+(`>file`, `2>>log.txt`) are also rejected when the target is a
+regular file.
+
+### 11.4 Implementation
+
+`server/internal/service/agent_tools_plan_verify.go` — new helper
+`redirectsToFile` is a cheap shell-token walker (no real parser; we
+don't need to defeat adversarial obfuscation). See
+[`docs/plans/p29-verify-tool-gate.md`](../plans/p29-verify-tool-gate.md)
+for the full task plan.
+
+---
+
 **관련 메모리**:
 - [[feedback_check_production_wiring]] — chat-mode와 run-mode wiring 격차는
   이 가이드의 직접 적용.
