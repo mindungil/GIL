@@ -721,6 +721,37 @@ func walkSecrets(node any, secretKeys []string) {
 	}
 }
 
+// secretValuePrefixes catches credential values whose dotenv KEY does
+// not name a token/secret (e.g. provider-named vars like POLLINATIONS,
+// OPENROUTER). Add real-world prefixes as new providers ship.
+var secretValuePrefixes = []string{
+	"sk-",    // OpenAI, Anthropic, OpenRouter (sk-or-), etc.
+	"sk_",    // Stripe-style, Pollinations
+	"gho_",   // GitHub OAuth
+	"ghp_",   // GitHub personal
+	"ghs_",   // GitHub server
+	"ghu_",   // GitHub user-to-server
+	"glpat-", // GitLab PAT
+	"AIza",   // Google API key
+	"xoxb-",  // Slack bot
+	"xoxp-",  // Slack user
+	"xoxa-",  // Slack app
+	"ya29.",  // Google OAuth
+	"eyJ",    // JWT
+}
+
+func looksLikeSecretValue(val string) bool {
+	if len(val) < 16 {
+		return false
+	}
+	for _, p := range secretValuePrefixes {
+		if strings.HasPrefix(val, p) {
+			return true
+		}
+	}
+	return false
+}
+
 func addSecretsFromDotenv(path string) {
 	body, err := os.ReadFile(path)
 	if err != nil {
@@ -738,11 +769,13 @@ func addSecretsFromDotenv(path string) {
 		key := strings.TrimSpace(line[:eq])
 		val := strings.TrimSpace(line[eq+1:])
 		val = strings.Trim(val, "\"'")
-		// Only redact entries whose key looks credential-ish.
+		// Two-pass: credential-shaped key OR value with a known
+		// secret-prefix. Either match qualifies for redaction.
 		k := strings.ToLower(key)
-		if !(strings.Contains(k, "key") || strings.Contains(k, "token") ||
+		keyMatches := strings.Contains(k, "key") || strings.Contains(k, "token") ||
 			strings.Contains(k, "secret") || strings.Contains(k, "password") ||
-			strings.Contains(k, "credential")) {
+			strings.Contains(k, "credential")
+		if !keyMatches && !looksLikeSecretValue(val) {
 			continue
 		}
 		if len(val) >= 8 {
