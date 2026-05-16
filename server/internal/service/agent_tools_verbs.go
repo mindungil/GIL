@@ -28,8 +28,10 @@ import (
 // dispatch survives.
 //
 // Working-set state is per-session and lives on the SessionService
-// receiver (in-memory). Persistence across daemon restart is a
-// follow-up; the V1 contract is "useful within a single chat".
+// receiver. P30 added durable backing via the workingset_entries
+// table (schema v4): the in-memory bag writes through on add/drop and
+// re-hydrates on first access after a daemon restart, so the user's
+// curated context survives across runs.
 
 // --- working set --------------------------------------------------
 

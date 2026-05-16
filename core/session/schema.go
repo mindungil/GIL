@@ -72,16 +72,16 @@ var migrations = []string{
 	// adds that match the in-memory dedupe; added_at is unused today
 	// but cheap and useful for future LRU policies.
 	`
-    CREATE TABLE IF NOT EXISTS workingset_entries (
-        session_id TEXT NOT NULL,
-        path       TEXT NOT NULL,
-        added_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        PRIMARY KEY (session_id, path)
-    );
+	CREATE TABLE IF NOT EXISTS workingset_entries (
+		session_id TEXT NOT NULL,
+		path       TEXT NOT NULL,
+		added_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		PRIMARY KEY (session_id, path)
+	);
 
-    CREATE INDEX IF NOT EXISTS idx_workingset_entries_session
-        ON workingset_entries(session_id);
-    `,
+	CREATE INDEX IF NOT EXISTS idx_workingset_entries_session
+		ON workingset_entries(session_id);
+	`,
 }
 
 // Migrate applies all pending schema migrations to the database in a transactional manner.
