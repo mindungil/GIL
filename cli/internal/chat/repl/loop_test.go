@@ -212,6 +212,35 @@ func TestLoop_PreservesWireOrder_TextBetweenEvents(t *testing.T) {
 		"text1 must render before event1; got %v", rendered)
 }
 
+// iter91a regression: tool.result body and tool.call input must be
+// stripped of control chars before SystemNote. Pre-fix, an attacker-
+// controlled file echoed via read_file's ToolContent could emit raw
+// ESC sequences that repaint the terminal.
+func TestLoop_ToolEventDisplay_StripsControlChars(t *testing.T) {
+	mock := render.NewMockRenderer()
+	fc := &fakeClient{sessionID: "01TEST"}
+	fc.messages = []Message{
+		{Kind: "event", Event: TrackerInput{
+			Kind: "tool.call", ToolName: "read_file",
+			ToolInput: "{\"path\":\"a\x1b[31mEVIL\x1b[0m\"}",
+		}},
+		{Kind: "event", Event: TrackerInput{
+			Kind:        "tool.result",
+			ToolContent: "ok\x1b[2K\x1b[1Aspoofed",
+		}},
+	}
+	in := strings.NewReader("hi\nquit\n")
+	err := Run(context.Background(), Config{In: in, Renderer: mock, Client: fc})
+	require.NoError(t, err)
+	for _, c := range mock.Calls {
+		if c.Method != "SystemNote" {
+			continue
+		}
+		require.NotContains(t, c.Text, "\x1b",
+			"SystemNote must not carry ESC bytes; got %q", c.Text)
+	}
+}
+
 func indexOf(s []string, needle string) int {
 	for i, v := range s {
 		if v == needle {

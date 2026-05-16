@@ -208,9 +208,9 @@ func emitDeltaNotes(r render.Renderer, prev, cur render.SessionState, ev Tracker
 		if len(input) > 80 {
 			input = input[:80] + "…"
 		}
-		msg := "⚒ " + ev.ToolName
+		msg := "⚒ " + sanitizeDisplayString(ev.ToolName)
 		if input != "" && input != "{}" {
-			msg += "  " + input
+			msg += "  " + sanitizeDisplayString(input)
 		}
 		r.SystemNote(render.NoteSystem, msg)
 	case "tool.result":
@@ -223,6 +223,10 @@ func emitDeltaNotes(r render.Renderer, prev, cur render.SessionState, ev Tracker
 			body = body[:200] + "…"
 		}
 		body = strings.ReplaceAll(body, "\n", " · ")
+		// Strip control chars (incl. ESC) so a tool result echoing
+		// attacker-controlled file content can't poison the terminal.
+		// Same defense as the session-row label sanitizer (iter71a).
+		body = sanitizeDisplayString(body)
 		r.SystemNote(render.NoteSystem, glyph+"  "+body)
 	case "prompt.metrics":
 		// Tokens / latency are reflected in the strip via
