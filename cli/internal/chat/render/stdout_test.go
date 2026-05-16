@@ -178,6 +178,20 @@ func TestStdout_SystemNote_PrefixesByKind(t *testing.T) {
 	require.Equal(t, "[note] agent will see at iter 24\n", buf.String())
 }
 
+// iter118a-dod: SystemNote must strip control bytes so a hostile event
+// field that slips into a system note cannot repaint the terminal.
+func TestStdout_SystemNote_StripsControlBytes(t *testing.T) {
+	r, buf := newStdoutForTest(t)
+	r.SystemNote(NoteSystem, "ok\x1b[2J\x07\x7fbeep\nnewline")
+	got := buf.String()
+	require.NotContains(t, got, "\x1b")
+	require.NotContains(t, got, "\x07")
+	require.NotContains(t, got, "\x7f")
+	// Stripping ESC neutralises the escape sequence even though the
+	// trailing literal `[2J` chars remain (printable, harmless).
+	require.Equal(t, "[system] ok[2Jbeepnewline\n", got)
+}
+
 func TestStdout_Confirm_DefaultYes(t *testing.T) {
 	var out bytes.Buffer
 	in := strings.NewReader("\n") // empty input → default

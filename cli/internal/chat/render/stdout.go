@@ -155,7 +155,30 @@ func formatDoneStrip(s SessionState, ascii bool) string {
 }
 
 func (r *StdoutChatRenderer) SystemNote(kind NoteKind, msg string) {
-	fmt.Fprintf(r.out, "[%s] %s\n", kind, msg)
+	fmt.Fprintf(r.out, "[%s] %s\n", kind, sanitizeNoteForTerminal(msg))
+}
+
+// sanitizeNoteForTerminal strips control bytes (ESC, BEL, backspace,
+// DEL, …) from a single-line system note before it lands on the
+// terminal. iter118a-dod: defence-in-depth — every loop callsite
+// already passes safe text, but a future event-type that surfaces
+// agent-controlled fields shouldn't be able to repaint the screen.
+// Tabs collapse to spaces, embedded newlines drop (system notes are
+// single-line).
+func sanitizeNoteForTerminal(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		switch {
+		case r == '\t':
+			b.WriteByte(' ')
+		case r < 0x20 || r == 0x7f:
+			// drop ESC, BEL, backspace, newline, DEL, etc.
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 func (r *StdoutChatRenderer) Confirm(question string, def bool) (bool, error) {
