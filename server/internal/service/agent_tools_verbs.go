@@ -210,12 +210,17 @@ func (w *workingSet) persistDropLocked(sid string, paths []string) {
 
 // chatWorkingSet returns the per-service working-set store, allocating
 // on first access so existing constructors (NewSessionService) keep
-// compiling without churn.
+// compiling without churn. When the SessionService has a Repo, the
+// store is auto-wired with the underlying *sql.DB on first allocation
+// so add/drop/list survive a daemon restart (P30).
 func (s *SessionService) chatWorkingSet() *workingSet {
 	s.workingSetMu.Lock()
 	defer s.workingSetMu.Unlock()
 	if s.workingSet == nil {
 		s.workingSet = newWorkingSet()
+		if s.repo != nil {
+			s.workingSet.SetDB(s.repo.DB())
+		}
 	}
 	return s.workingSet
 }
