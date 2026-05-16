@@ -527,7 +527,13 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 			}
 			toolResults = append(toolResults, result)
 			// C1: track which tool categories fired this turn.
-			if codeChangingTools[call.Name] {
+			// iter86a: only arm needsVerify on SUCCESSFUL code-changing
+			// calls. A failed write_file/edit_file/apply_patch (path
+			// escape, readonly target, hunk not found, etc.) didn't
+			// actually change any files, so requiring a verify after
+			// it surfaces verify_missing on a turn that did nothing —
+			// false-positive that wastes turns and confuses the agent.
+			if codeChangingTools[call.Name] && !result.IsError {
 				needsVerify = true
 			}
 			if call.Name == "verify" && !result.IsError {
