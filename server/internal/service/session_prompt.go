@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -628,7 +629,120 @@ func dispatchTool(ctx context.Context, registry *chatToolRegistry, sessionID str
 	if !utf8.ValidString(r.Content) {
 		r.Content = strings.ToValidUTF8(r.Content, "�")
 	}
+	// iter36a: redact known credential values from tool output so a
+	// run_bash `cat ~/.config/gil/auth.json` (or any equivalent indirect
+	// read) doesn't leak the api_key into chat history → next provider
+	// turn → user-visible response. read_file is sandboxed to the
+	// session working dir, but run_bash isn't — and the threat model
+	// includes prompt-injection via webfetched content (eval-loop
+	// iter34/iter36). Single chokepoint protection rather than
+	// trying to constrain run_bash, which preserves agent freedom.
+	r.Content = redactKnownSecrets(r.Content)
 	return r, err
+}
+
+// knownSecrets is the daemon-wide set of credential values to redact
+// from tool output. Loaded lazily on first dispatchTool call from the
+// process env (~/.config/gil/auth.json, ~/.env, GIL_*_KEY env vars).
+var (
+	knownSecretsOnce sync.Once
+	knownSecretsList []string
+)
+
+func redactKnownSecrets(s string) string {
+	knownSecretsOnce.Do(loadKnownSecrets)
+	if len(knownSecretsList) == 0 {
+		return s
+	}
+	for _, secret := range knownSecretsList {
+		if secret == "" {
+			continue
+		}
+		s = strings.ReplaceAll(s, secret, "[REDACTED-SECRET]")
+	}
+	return s
+}
+
+func loadKnownSecrets() {
+	// Best-effort. Failures here mean less redaction, not a daemon
+	// crash — secrets just stay on the wire as before this fix.
+	addSecretsFromAuthJSON("/home/ubuntu/.config/gil/auth.json")
+	if home, err := os.UserHomeDir(); err == nil {
+		addSecretsFromAuthJSON(filepath.Join(home, ".config", "gil", "auth.json"))
+		addSecretsFromAuthJSON(filepath.Join(home, ".codex", "auth.json"))
+		addSecretsFromDotenv(filepath.Join(home, ".env"))
+	}
+	for _, k := range []string{
+		"OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GITHUB_TOKEN",
+		"AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
+	} {
+		if v := os.Getenv(k); len(v) >= 8 {
+			knownSecretsList = append(knownSecretsList, v)
+		}
+	}
+}
+
+func addSecretsFromAuthJSON(path string) {
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	// Parse loosely — auth.json schema is "providers": {name: {api_key, ...}}.
+	var doc map[string]any
+	if err := json.Unmarshal(body, &doc); err != nil {
+		return
+	}
+	walkSecrets(doc, []string{"api_key", "apiKey", "token", "secret", "password"})
+}
+
+func walkSecrets(node any, secretKeys []string) {
+	switch n := node.(type) {
+	case map[string]any:
+		for k, v := range n {
+			for _, sk := range secretKeys {
+				if strings.EqualFold(k, sk) {
+					if vs, ok := v.(string); ok && len(vs) >= 8 {
+						knownSecretsList = append(knownSecretsList, vs)
+					}
+				}
+			}
+			walkSecrets(v, secretKeys)
+		}
+	case []any:
+		for _, item := range n {
+			walkSecrets(item, secretKeys)
+		}
+	}
+}
+
+func addSecretsFromDotenv(path string) {
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	for _, line := range strings.Split(string(body), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		eq := strings.IndexByte(line, '=')
+		if eq < 0 {
+			continue
+		}
+		key := strings.TrimSpace(line[:eq])
+		val := strings.TrimSpace(line[eq+1:])
+		val = strings.Trim(val, "\"'")
+		// Only redact entries whose key looks credential-ish.
+		k := strings.ToLower(key)
+		if !(strings.Contains(k, "key") || strings.Contains(k, "token") ||
+			strings.Contains(k, "secret") || strings.Contains(k, "password") ||
+			strings.Contains(k, "credential")) {
+			continue
+		}
+		if len(val) >= 8 {
+			knownSecretsList = append(knownSecretsList, val)
+		}
+	}
 }
 
 // chatHistory lazily allocates the message log map. Stored on the
