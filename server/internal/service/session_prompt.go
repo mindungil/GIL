@@ -448,8 +448,13 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 			}
 			if verifyRetries >= maxVerifyRetries {
 				// Stubborn agent. Surface an error done so callers know
-				// the work isn't actually verified.
+				// the work isn't actually verified. Emit as system text
+				// first so chat clients render it visibly (the Done
+				// part itself is silent unless stop_reason="error").
 				msg := "code-changing tools were called but verify was never run; turn aborted"
+				_ = stream.Send(&gilv1.Part{
+					Body: &gilv1.Part_Text{Text: &gilv1.TextDelta{Content: "[system] verify_missing: " + msg}},
+				})
 				_ = stream.Send(&gilv1.Part{
 					Body: &gilv1.Part_Done{
 						Done: &gilv1.DonePart{StopReason: "verify_missing", ErrorMessage: msg},
@@ -551,6 +556,31 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 		}
 		msgs = append(msgs, toolFeedback)
 		s.chatHistory().append(sessionID, toolFeedback)
+	}
+
+	// P32 iter6: post-loop C1 backstop. The for loop can exit by hitting
+	// `maxAgentTurns` while still iterating with tool calls (i.e.
+	// before the agent ever stopped to let the no-tool-calls C1 gate
+	// run). Eval-loop iter6/L7 surfaced this — agent did 9+ tool calls
+	// including write_file → verify (PASS) → write_file → write_file
+	// without a final verify, but the loop hit turn=8 and exited
+	// silently. needsVerify was true but the gate never fired.
+	//
+	// If we exited the for loop via the turn cap and a code-changing
+	// tool call is still un-verified, surface the same
+	// FailedPrecondition the no-tool-calls path would have.
+	if needsVerify {
+		msg := "agent turn cap reached but a code-changing tool call (write_file/edit_file/apply_patch) " +
+			"was never followed by a successful verify; turn aborted"
+		_ = stream.Send(&gilv1.Part{
+			Body: &gilv1.Part_Text{Text: &gilv1.TextDelta{Content: "[system] verify_missing: " + msg}},
+		})
+		_ = stream.Send(&gilv1.Part{
+			Body: &gilv1.Part_Done{
+				Done: &gilv1.DonePart{StopReason: "verify_missing", ErrorMessage: msg},
+			},
+		})
+		return status.Errorf(codes.FailedPrecondition, "%s", msg)
 	}
 
 	// 6. Metrics + Done.

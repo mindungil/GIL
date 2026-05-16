@@ -70,7 +70,16 @@ func parsePatch(body string) ([]patchOp, error) {
 	lines := strings.Split(strings.TrimSuffix(body, "\n"), "\n")
 
 	if len(lines) == 0 || lines[0] != "*** Begin Patch" {
-		return nil, errors.New("patch must start with '*** Begin Patch'")
+		return nil, errors.New("patch must start with '*** Begin Patch' on its own line. " +
+			"Example envelope:\n" +
+			"*** Begin Patch\n" +
+			"*** Update File: foo.go\n" +
+			"@@\n" +
+			" context line (leading space)\n" +
+			"-old line\n" +
+			"+new line\n" +
+			"*** End Patch\n" +
+			"For tiny edits or full rewrites, write_file is simpler — use apply_patch only for multi-file or multi-hunk changes.")
 	}
 	idx := 1
 
@@ -160,7 +169,9 @@ func parseHunks(lines []string, start int) ([]patchHunk, int, error) {
 			}
 			op := l[0]
 			if op != ' ' && op != '-' && op != '+' {
-				return nil, 0, fmt.Errorf("hunk line %d must start with space/-/+, got %q", idx+1, l)
+				return nil, 0, fmt.Errorf("hunk line %d must start with space (context), '-' (delete), or '+' (add); got %q. "+
+					"Common mistake: context lines (lines that should stay unchanged) need a LEADING SPACE, not just the raw text. "+
+					"If hunk-formatting keeps failing, fall back to write_file for the whole file.", idx+1, l)
 			}
 			hl = append(hl, patchLine{op: op, text: l[1:]})
 			idx++
@@ -392,7 +403,9 @@ func (t *toolApplyPatch) description() string {
 		"with one or more '*** Add File: <path>' (lines prefixed +), '*** Delete File: <path>' (no body), " +
 		"or '*** Update File: <path>' (followed by '@@' hunks containing space/-/+ lines) sections. " +
 		"All hunks must match the current file exactly once; if any hunk fails, NO file is modified. " +
-		"Prefer this over edit_file when changing multiple files or making several edits per file in one call."
+		"Prefer this over edit_file when changing multiple files or making several edits per file in one call. " +
+		"For tiny single-file edits or full rewrites, write_file / edit_file are simpler — apply_patch's hunk format " +
+		"(leading space on context lines, exact whitespace match) is unforgiving."
 }
 
 func (t *toolApplyPatch) schema() json.RawMessage {

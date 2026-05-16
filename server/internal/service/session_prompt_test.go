@@ -152,3 +152,47 @@ func TestPrompt_WriteVerifyWriteNoVerify_RetriesThenErrors(t *testing.T) {
 		t.Fatalf("expected verify_missing error after unverified second write; got nil")
 	}
 }
+
+// TestPrompt_LoopCapHitWithUnverifiedWrite_BackstopFires covers the
+// eval-loop iter6 regression: agent emits 8+ turns of tool calls
+// without ever stopping at a no-tool-calls boundary, so the C1 gate
+// inside the for loop never fires. The post-loop backstop must catch
+// this and emit verify_missing.
+//
+// Sequence: 8 turns each emitting one write_file, never a verify.
+// maxAgentTurns=8 means the for loop exits after turn 7 (0-indexed)
+// without entering the no-tool-calls branch. Backstop must fire.
+func TestPrompt_LoopCapHitWithUnverifiedWrite_BackstopFires(t *testing.T) {
+	var turns []provider.MockTurn
+	for i := 0; i < 9; i++ {
+		turns = append(turns, provider.MockTurn{
+			ToolCalls: []provider.ToolCall{{
+				ID:    "c" + string(rune('0'+i)),
+				Name:  "write_file",
+				Input: []byte(`{"path":"f` + string(rune('0'+i)) + `.go","content":"package x\n"}`),
+			}},
+		})
+	}
+	svc, sid := newTestSessionServiceWithMockTurns(t, turns)
+	stream := &fakePromptStream{ctx: context.Background()}
+	err := svc.Prompt(promptReq(sid, "write 9 files no verify"), stream)
+	if err == nil {
+		t.Fatalf("expected verify_missing error from post-loop backstop; got nil")
+	}
+	if !strings.Contains(err.Error(), "agent turn cap reached") {
+		t.Fatalf("expected backstop error message, got: %v", err)
+	}
+	// Done part should carry verify_missing as stop reason.
+	sawDone := false
+	for _, p := range stream.Parts {
+		if d := p.GetDone(); d != nil {
+			sawDone = true
+			if d.GetStopReason() != "verify_missing" {
+				t.Fatalf("expected stop_reason verify_missing, got %q", d.GetStopReason())
+			}
+		}
+	}
+	if !sawDone {
+		t.Fatalf("no Done part in stream")
+	}
+}
