@@ -369,8 +369,17 @@ var weakVerifyLeadingCommands = map[string]struct{}{
 	"stat": {}, "head": {}, "tail": {}, "file": {},
 }
 
+// verifyRedirectDevTargets lists /dev paths that are legit redirect
+// targets (silence/logging), not file writes. Hoisted to avoid
+// per-call allocation in redirectsToFile.
+var verifyRedirectDevTargets = map[string]struct{}{
+	"/dev/null":   {},
+	"/dev/stderr": {},
+	"/dev/stdout": {},
+}
+
 // isWeakVerifyCommand reports whether cmd is unsuitable for verifying
-// behavior. Three checks, ordered cheap-first:
+// behavior. Four checks, ordered cheap-first:
 //
 //  1. Compound (chain or pipe) → not weak; agent threaded a real check.
 //  2. Heredoc (`<<` / `<<-`) → weak; the command is writing content,
@@ -418,14 +427,10 @@ func isWeakVerifyCommand(cmd string) bool {
 // or `>>` (or ends with one, e.g. `2>`), inspect the next token. The
 // `&` prefix on the target (`>&1`) is the merge form — not a file.
 func redirectsToFile(trimmed string) bool {
-	devTargets := map[string]struct{}{
-		"/dev/null":   {},
-		"/dev/stderr": {},
-		"/dev/stdout": {},
-	}
 	fields := strings.Fields(trimmed)
 	for i, tok := range fields {
 		// Strip a leading FD digit: `2>` → `>`, `1>>` → `>>`.
+		// Only single-digit FDs are handled; multi-digit (e.g. `10>file`) won't trip this check.
 		op := tok
 		if len(op) > 1 && (op[0] >= '0' && op[0] <= '9') {
 			op = op[1:]
@@ -440,7 +445,7 @@ func redirectsToFile(trimmed string) bool {
 				// Merge form: `>&1`, `>&2` — not a file.
 				continue
 			}
-			if _, ok := devTargets[target]; ok {
+			if _, ok := verifyRedirectDevTargets[target]; ok {
 				continue
 			}
 			return true
@@ -451,7 +456,7 @@ func redirectsToFile(trimmed string) bool {
 			if strings.HasPrefix(target, "&") {
 				continue
 			}
-			if _, ok := devTargets[target]; ok {
+			if _, ok := verifyRedirectDevTargets[target]; ok {
 				continue
 			}
 			return true
@@ -461,7 +466,7 @@ func redirectsToFile(trimmed string) bool {
 			if strings.HasPrefix(target, "&") {
 				continue
 			}
-			if _, ok := devTargets[target]; ok {
+			if _, ok := verifyRedirectDevTargets[target]; ok {
 				continue
 			}
 			return true
