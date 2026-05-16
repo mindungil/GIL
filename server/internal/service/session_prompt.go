@@ -808,7 +808,16 @@ func firstTextPart(parts []*gilv1.PromptPart) string {
 // truncateHint helper but lives here so the daemon's session row
 // stays compact regardless of whether the request came from cli or
 // tui.
+//
+// iter71a: strip control characters (anything below 0x20 except
+// printable whitespace) so a prompt containing ANSI escape sequences
+// (`\x1b[2J\x1b[H`) can't poison the welcome-banner display in the
+// next `gil chat` session. Without this, an attacker who can drop a
+// prompt (or a teammate sharing a daemon, or a script writing past
+// session names) could takeover the user's terminal via injected
+// escape codes.
 func truncateGoalHint(s string, max int) string {
+	s = sanitizeHintControlChars(s)
 	if max <= 0 || len(s) <= max {
 		return s
 	}
@@ -817,6 +826,24 @@ func truncateGoalHint(s string, max int) string {
 		return s
 	}
 	return string(r[:max-1]) + "…"
+}
+
+func sanitizeHintControlChars(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		// Keep printable + standard whitespace (space + tab + newline);
+		// collapse newlines to space so the hint stays one line.
+		switch {
+		case r == '\n' || r == '\r' || r == '\t':
+			b.WriteByte(' ')
+		case r < 0x20 || r == 0x7f:
+			// Drop control chars (ESC = 0x1b, etc.).
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 // resolveWorkspaceLLM reads the layered workspace config (global +

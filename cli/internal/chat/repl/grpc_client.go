@@ -109,8 +109,26 @@ func (g *GRPCClient) newSession(ctx context.Context, hint string) error {
 
 // truncateHint trims a free-form prompt to fit a single listing column.
 // Whitespace-collapses then cuts at max runes with an ellipsis when needed.
+//
+// iter71a: strip control characters before any further processing so
+// a prompt containing ANSI escape sequences can't poison the welcome-
+// banner display in subsequent `gil chat` sessions. strings.Fields
+// only splits on Unicode whitespace; ESC (0x1B) is NOT whitespace so
+// it would otherwise survive intact.
 func truncateHint(s string, max int) string {
-	s = strings.Join(strings.Fields(s), " ")
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		switch {
+		case r == '\n' || r == '\r' || r == '\t':
+			b.WriteByte(' ')
+		case r < 0x20 || r == 0x7f:
+			// drop control chars
+		default:
+			b.WriteRune(r)
+		}
+	}
+	s = strings.Join(strings.Fields(b.String()), " ")
 	if max <= 0 || len(s) <= max {
 		return s
 	}
