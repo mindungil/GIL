@@ -198,6 +198,12 @@ func (r *Repo) UpdateStatus(ctx context.Context, id, status string) error {
 // Returned slice is empty (not nil-pointing-to-err) on zero matches.
 // Used by agent_status, wait_agent (label lookup), and the subagent
 // registry's depth/count checks.
+// DB returns the underlying *sql.DB. Used by service-layer stores
+// (planStore, workingSet) that need write-through persistence
+// without forcing every Repo caller through the Repo abstraction
+// for what are essentially per-session caches.
+func (r *Repo) DB() *sql.DB { return r.db }
+
 func (r *Repo) ListChildren(ctx context.Context, parentID string) ([]Session, error) {
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT id, status, created_at, updated_at, spec_id, working_dir, goal_hint,

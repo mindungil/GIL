@@ -8,7 +8,7 @@ import (
 
 // currentSchemaVersion is the latest schema version. When new migrations
 // are added, this constant must be incremented to match the new version.
-const currentSchemaVersion = 3
+const currentSchemaVersion = 4
 
 // migrations is a slice of SQL migration strings, indexed by version-1.
 // For example, migrations[0] is the SQL for version 1, migrations[1] is for
@@ -64,6 +64,24 @@ var migrations = []string{
 
 	CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
 	`,
+	// v4 — workingset_entries persistence (P30). add_to_workingset /
+	// drop_from_workingset previously held in-memory only on the daemon;
+	// restart silently emptied the user's curated context. The table
+	// backs the per-session set with write-through inserts/deletes and
+	// hydrate-on-first-access. PK (session_id, path) gives idempotent
+	// adds that match the in-memory dedupe; added_at is unused today
+	// but cheap and useful for future LRU policies.
+	`
+    CREATE TABLE IF NOT EXISTS workingset_entries (
+        session_id TEXT NOT NULL,
+        path       TEXT NOT NULL,
+        added_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (session_id, path)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_workingset_entries_session
+        ON workingset_entries(session_id);
+    `,
 }
 
 // Migrate applies all pending schema migrations to the database in a transactional manner.
