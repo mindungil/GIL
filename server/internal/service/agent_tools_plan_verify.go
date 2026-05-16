@@ -369,19 +369,19 @@ var weakVerifyLeadingCommands = map[string]struct{}{
 	"stat": {}, "head": {}, "tail": {}, "file": {},
 }
 
-// isWeakVerifyCommand reports whether cmd is a single inspect-only
-// command with no behavior-checking chain. Conservative by design:
-// fires only when the leading command (before any &&, ||, ;, or |)
-// is in weakVerifyLeadingCommands AND there is no trailing chain
-// or redirect. Compound commands (`cat foo.go && go build`) pass.
+// isWeakVerifyCommand reports whether cmd is unsuitable for verifying
+// behavior. Three checks, ordered cheap-first:
 //
-// Trade-offs:
-//   - near-miss: `cat > foo.txt` looks like a weak `cat` but is actually
-//     a write; the `>` check passes it through correctly — no false-
-//     positive here.
-//   - false-negative: agent could disguise weak verify as `bash -c "cat"`.
-//     We don't try to defeat adversarial agents; this is a quality
-//     scaffold, not a sandbox.
+//  1. Compound (chain or pipe) → not weak; agent threaded a real check.
+//  2. Heredoc (`<<` / `<<-`) → weak; the command is writing content,
+//     not checking it. Closes failure-floor §11.4 loophole.
+//  3. Top-level redirect (`>` or `>>`) to a non-`/dev/{null,stderr,stdout}`
+//     target → weak; the command is writing a file, not checking.
+//     Carve-out preserves `go build ./... > /dev/null` style usage.
+//  4. Leading command in weakVerifyLeadingCommands → weak.
+//
+// Conservative by design: false-negatives possible (e.g. `bash -c`
+// disguise) — this is a quality scaffold, not a sandbox.
 func isWeakVerifyCommand(cmd string) bool {
 	trimmed := strings.TrimSpace(cmd)
 	if trimmed == "" {
@@ -393,9 +393,14 @@ func isWeakVerifyCommand(cmd string) bool {
 			return false
 		}
 	}
-	// Redirects mean the command is writing state — not weak.
-	if strings.Contains(trimmed, ">") {
-		return false
+	// Heredoc → write-shaped, weak.
+	if strings.Contains(trimmed, "<<") {
+		return true
+	}
+	// Top-level redirect to file → write-shaped, weak.
+	// Carve out /dev/null, /dev/stderr, /dev/stdout (legit silencing).
+	if redirectsToFile(trimmed) {
+		return true
 	}
 	fields := strings.Fields(trimmed)
 	if len(fields) == 0 {
@@ -403,6 +408,66 @@ func isWeakVerifyCommand(cmd string) bool {
 	}
 	_, weak := weakVerifyLeadingCommands[fields[0]]
 	return weak
+}
+
+// redirectsToFile reports whether trimmed contains an output redirect
+// (`>` or `>>`) whose target is a regular file path (not /dev/null,
+// /dev/stderr, /dev/stdout, and not a stderr-merge like `2>&1`).
+//
+// Cheap parse: split on whitespace, walk tokens, when a token is `>`
+// or `>>` (or ends with one, e.g. `2>`), inspect the next token. The
+// `&` prefix on the target (`>&1`) is the merge form — not a file.
+func redirectsToFile(trimmed string) bool {
+	devTargets := map[string]struct{}{
+		"/dev/null":   {},
+		"/dev/stderr": {},
+		"/dev/stdout": {},
+	}
+	fields := strings.Fields(trimmed)
+	for i, tok := range fields {
+		// Strip a leading FD digit: `2>` → `>`, `1>>` → `>>`.
+		op := tok
+		if len(op) > 1 && (op[0] >= '0' && op[0] <= '9') {
+			op = op[1:]
+		}
+		// Operators where the next token is the target.
+		if op == ">" || op == ">>" {
+			if i+1 >= len(fields) {
+				return false
+			}
+			target := fields[i+1]
+			if strings.HasPrefix(target, "&") {
+				// Merge form: `>&1`, `>&2` — not a file.
+				continue
+			}
+			if _, ok := devTargets[target]; ok {
+				continue
+			}
+			return true
+		}
+		// Glued form: `>file` or `>>file` (uncommon but valid).
+		if strings.HasPrefix(op, ">>") && len(op) > 2 {
+			target := op[2:]
+			if strings.HasPrefix(target, "&") {
+				continue
+			}
+			if _, ok := devTargets[target]; ok {
+				continue
+			}
+			return true
+		}
+		if strings.HasPrefix(op, ">") && len(op) > 1 {
+			target := op[1:]
+			if strings.HasPrefix(target, "&") {
+				continue
+			}
+			if _, ok := devTargets[target]; ok {
+				continue
+			}
+			return true
+		}
+	}
+	return false
 }
 
 type toolVerify struct {
