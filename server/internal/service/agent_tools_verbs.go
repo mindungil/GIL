@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -363,7 +364,18 @@ func (t *toolListCheckpoints) run(ctx context.Context, sessionID string, _ json.
 	if spec, err := specstore.NewStore(specDir).Load(); err == nil && spec != nil && spec.Workspace != nil && spec.Workspace.Path != "" {
 		workspaceDir = spec.Workspace.Path
 	}
-	sg := checkpoint.New(workspaceDir, filepath.Join(specDir, "shadow"))
+	shadowDir := filepath.Join(specDir, "shadow")
+	// iter31a: shadow git isn't initialized until the first checkpoint
+	// is taken (typically when a run starts). If the shadow dir doesn't
+	// exist yet, ListCommits returns a raw "fatal: not a git repository"
+	// error that both leaks the daemon's internal storage path and
+	// surfaces as IsError to the agent. Treat the pre-init state as
+	// "no checkpoints" — same response as a freshly-initialized but
+	// empty shadow.
+	if _, err := os.Stat(filepath.Join(shadowDir, ".git")); os.IsNotExist(err) {
+		return provider.ToolResult{Content: "no checkpoints yet for this session"}, nil
+	}
+	sg := checkpoint.New(workspaceDir, shadowDir)
 	commits, err := sg.ListCommits(ctx)
 	if err != nil {
 		return provider.ToolResult{Content: "list checkpoints failed: " + err.Error(), IsError: true}, nil
