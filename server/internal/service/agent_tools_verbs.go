@@ -446,7 +446,17 @@ func (t *toolRestoreCheckpoint) run(ctx context.Context, sessionID string, argsJ
 	}
 	resp, err := t.rs.Restore(ctx, &gilv1.RestoreRequest{SessionId: sessionID, Step: args.Step})
 	if err != nil {
-		return provider.ToolResult{Content: "restore failed: " + err.Error(), IsError: true}, nil
+		// iter65a: same shape as iter31a's list_checkpoints fix. Shadow
+		// git isn't initialized until the first checkpoint, so a fresh
+		// restore call surfaces "fatal: not a git repository: '/home/
+		// ubuntu/.local/share/gil/...'" which leaks the daemon's internal
+		// session storage path. Translate to a clean agent-actionable
+		// message that doesn't expose the path.
+		es := err.Error()
+		if strings.Contains(es, "not a git repository") || strings.Contains(es, "list checkpoints") {
+			return provider.ToolResult{Content: "no checkpoints exist yet for this session; nothing to restore. Take a checkpoint first (e.g. start_run creates one).", IsError: true}, nil
+		}
+		return provider.ToolResult{Content: "restore failed: " + es, IsError: true}, nil
 	}
 	return provider.ToolResult{Content: fmt.Sprintf(
 		"restored to %s · %q (%d total checkpoints)",
