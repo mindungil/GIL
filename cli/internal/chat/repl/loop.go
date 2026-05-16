@@ -44,10 +44,13 @@ type SessionSummary struct {
 // Verb dispatch (Spec/Status/Diff/Merge/StartRun/Compact/SwitchSession/
 // NewSession) was removed — the agent calls those as tools server-side.
 // ListSessions stays for the pre-first-turn entry disclosure.
+//
+// iter14a: NextAssistantChunk + NextEvent collapsed into NextMessage
+// to enforce wire-order rendering. The dual-channel design raced when
+// text arrived between tool events (eval-loop iter14 L9 / iter15 L15).
 type SessionClient interface {
 	SendPrompt(ctx context.Context, prompt string) error
-	NextAssistantChunk(ctx context.Context) (chunk string, more bool, err error)
-	NextEvent(ctx context.Context) (in TrackerInput, ok bool, err error)
+	NextMessage(ctx context.Context) (msg Message, more bool, err error)
 
 	ActiveSessionID() string
 	ListSessions(ctx context.Context) ([]SessionSummary, error)
@@ -97,11 +100,8 @@ func Run(ctx context.Context, cfg Config) error {
 			return err
 		}
 
-		// Drain any pending events into the tracker before deciding
-		// whether to repaint. This may emit system notes that are
-		// orthogonal to the strip — those still print regardless.
-		drainEvents(ctx, cfg, tr)
-
+		// iter14a: per-turn msgCh resets each turn, so there's nothing
+		// to drain between turns — cross-turn event leakage is gone.
 		state := tr.State()
 		if state.Phase != lastStripPhase {
 			cfg.Renderer.StatusStrip(state)
@@ -135,100 +135,57 @@ func Run(ctx context.Context, cfg Config) error {
 			continue
 		}
 		{
-			// Stream assistant chunks until the client signals done.
+			// iter14a: single ordered NextMessage consumer. Text chunks
+			// and tool events arrive on one channel in wire order, so
+			// the rendered sequence matches what the daemon emitted —
+			// no race, no out-of-order verify_missing mid-tool-sequence.
 			// A 30s watchdog converts a silent hang (gild waiting on a
-			// dead provider, no events ever) into a visible note so the
-			// user knows to ctrl+c rather than staring at an idle prompt.
-			//
-			// L2 inline-drain: tool.call / tool.result events arrive on
-			// a sibling channel (eventCh) but the daemon's producer
-			// (drainPromptStream) preserves wire order across both
-			// channels. To render tool events inline with the text
-			// instead of batched at end-of-turn, we drain pending
-			// events between every text chunk and once more after
-			// chunkDone closes. inlineNoteSeparator emits a "\n" if
-			// the text was mid-line so [system] doesn't glue onto the
-			// previous chunk.
-			gotAnyChunk := false
+			// dead provider) into a visible note.
+			gotAny := false
 			streamErrored := false
 			turnStart := time.Now()
 			warned := false
 			lastEndedWithNewline := true
-			drainPendingEvents := func() {
-				for {
-					in, ok, err := cfg.Client.NextEvent(ctx)
-					if err != nil {
-						cfg.Renderer.SystemNote(render.NoteSystem,
-							"event stream error: "+errmap.FormatForChat(err))
-						return
+			for {
+				msg, more, err := cfg.Client.NextMessage(ctx)
+				if err != nil {
+					cfg.Renderer.SystemNote(render.NoteSystem,
+						"stream error: "+humanizeStreamErr(err))
+					streamErrored = true
+					break
+				}
+				if !more {
+					break
+				}
+				switch msg.Kind {
+				case "text":
+					if msg.Text != "" {
+						cfg.Renderer.AssistantText(msg.Text)
+						gotAny = true
+						lastEndedWithNewline = strings.HasSuffix(msg.Text, "\n")
 					}
-					if !ok {
-						return
-					}
+				case "event":
 					if !lastEndedWithNewline {
 						cfg.Renderer.AssistantText("\n")
 						lastEndedWithNewline = true
 					}
 					prev := tr.State()
-					tr.Apply(in)
-					emitDeltaNotes(cfg.Renderer, prev, tr.State(), in)
+					tr.Apply(msg.Event)
+					emitDeltaNotes(cfg.Renderer, prev, tr.State(), msg.Event)
+					gotAny = true
 				}
-			}
-			for {
-				drainPendingEvents()
-				chunk, more, err := cfg.Client.NextAssistantChunk(ctx)
-				if err != nil {
-					cfg.Renderer.SystemNote(render.NoteSystem,
-						"stream error: "+humanizeStreamErr(err))
-					streamErrored = true
-					// #30: drainInterviewStream captures the error into
-					// streamErr; surface the wrapped form (with Hint when
-					// available) instead of dropping it on the floor.
-					break
-				}
-				if chunk != "" {
-					cfg.Renderer.AssistantText(chunk)
-					gotAnyChunk = true
-					lastEndedWithNewline = strings.HasSuffix(chunk, "\n")
-				}
-				if !more {
-					break
-				}
-				if !warned && !gotAnyChunk && time.Since(turnStart) > 30*time.Second {
+				if !warned && !gotAny && time.Since(turnStart) > 30*time.Second {
 					cfg.Renderer.SystemNote(render.NoteSystem,
 						"no response after 30s — daemon may be hung on a provider call. check `tail /tmp/gild.log`, ctrl+c to abort")
 					warned = true
 				}
 			}
-			// Final drain — events that arrived after the last text
-			// chunk but before chunkDone closed.
-			drainPendingEvents()
-			if !gotAnyChunk && !streamErrored {
-				// Clean stream close with no events — daemon path
-				// completed silently. Surface so the user knows their
-				// turn produced nothing rather than staring at idle.
+			if !gotAny && !streamErrored {
 				cfg.Renderer.SystemNote(render.NoteSystem,
 					"empty stream — interview produced no output (provider misconfigured or auth missing?)")
 			}
 			cfg.Renderer.AssistantText("\n")
 		}
-	}
-}
-
-func drainEvents(ctx context.Context, cfg Config, tr *Tracker) {
-	for {
-		in, ok, err := cfg.Client.NextEvent(ctx)
-		if err != nil {
-			cfg.Renderer.SystemNote(render.NoteSystem,
-				"event stream error: "+errmap.FormatForChat(err))
-			return
-		}
-		if !ok {
-			return
-		}
-		prev := tr.State()
-		tr.Apply(in)
-		emitDeltaNotes(cfg.Renderer, prev, tr.State(), in)
 	}
 }
 
