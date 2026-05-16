@@ -64,6 +64,30 @@ func newServer(dbPath, sockPath, sessionsBase, authFile string, authMW *auth.Mid
 	if err != nil {
 		return nil, err
 	}
+	// iter21a: SQLite defaults serialize all writes and fail immediately
+	// on lock contention. Concurrent Prompt RPCs (each calling
+	// session.Create) surfaced as "database is locked (5) SQLITE_BUSY"
+	// to clients — see eval-loop iter21. Three layered fixes:
+	//   1. WAL mode lets readers run alongside a single writer.
+	//   2. busy_timeout=5000 retries lock-blocked statements internally
+	//      for up to 5s before bubbling the error.
+	//   3. SetMaxOpenConns(1) serializes the write path inside the Go
+	//      driver, so the busy_timeout retry actually has a chance to
+	//      see the lock release instead of multiple pooled connections
+	//      racing each other for the same writer slot.
+	// PRAGMAs are issued via separate Exec calls — modernc.org/sqlite's
+	// driver only honors the first statement when multiple are squashed
+	// into one Exec; that's how iter21's first attempted fix silently
+	// dropped the busy_timeout setting.
+	if _, err := db.Exec(`PRAGMA journal_mode=WAL`); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("set journal_mode=WAL: %w", err)
+	}
+	if _, err := db.Exec(`PRAGMA busy_timeout=5000`); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("set busy_timeout: %w", err)
+	}
+	db.SetMaxOpenConns(1)
 	if err := session.Migrate(db); err != nil {
 		_ = db.Close()
 		return nil, err
