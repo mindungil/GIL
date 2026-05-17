@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -265,6 +266,67 @@ func (s *RunService) Budget(sessionID string) (cost float64, exceeded bool, reas
 
 func (s *RunService) sessionDir(sessionID string) string {
 	return filepath.Join(s.sessionsBase, sessionID)
+}
+
+// ReapOrphanRuns marks any session left in status="running" as
+// "stopped" and appends a `run_orphaned` event to that session's
+// events.jsonl. Called once at daemon startup, after NewRunService
+// has been wired but before grpc serving begins.
+//
+// Why this exists (P36): the in-flight run state — the agent loop
+// goroutine, runProgress counters, in-memory tool registry — lives
+// only on the RunService struct. When gild process exits (intentional
+// stop, OOM kill, host reboot), every session in DB with
+// status="running" is an orphan: the goroutine is gone but the DB
+// status would say "running" forever. Users polling `gil status` or
+// list_sessions would see ghost progress that never advances. Reaping
+// gives the system an explicit, audit-trailed "this run was
+// interrupted" signal in both DB (status flip) and events.jsonl
+// (audit row).
+//
+// Best-effort: errors on individual sessions don't stop the sweep,
+// and a missing events directory just skips the event-append.
+// Returns the number of sessions reaped.
+func (s *RunService) ReapOrphanRuns(ctx context.Context) (int, error) {
+	if s.repo == nil {
+		return 0, nil
+	}
+	runs, err := s.repo.List(ctx, session.ListOptions{
+		StatusFilter: "running",
+		Limit:        1000,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("ReapOrphanRuns list: %w", err)
+	}
+	if len(runs) == 0 {
+		return 0, nil
+	}
+	now := time.Now().UTC()
+	reaped := 0
+	for _, sess := range runs {
+		if uerr := s.repo.UpdateStatus(ctx, sess.ID, "stopped"); uerr != nil {
+			// Best-effort: skip this one, log a warning but keep sweeping.
+			log.Printf("WARN reap orphan run %s: UpdateStatus: %v", sess.ID, uerr)
+			continue
+		}
+		// Append a single run_orphaned event so the surface has an audit
+		// trail (events.jsonl readers, `gil events`, the chat surface's
+		// past-session disclosure). Skip silently if the events dir is
+		// missing — old sessions may pre-date that pattern.
+		if p, perr := event.NewPersister(s.sessionDir(sess.ID)); perr == nil {
+			_ = p.Write(event.Event{
+				Timestamp: now,
+				Source:    event.SourceSystem,
+				Kind:      event.KindNote,
+				Type:      "run_orphaned",
+				Data:      []byte(`{"reason":"daemon_restart","prior_status":"running"}`),
+			})
+			_ = p.Sync()
+			_ = p.Close()
+		}
+		reaped++
+	}
+	return reaped, nil
 }
 
 // ensureSessionStream returns the long-lived event stream associated

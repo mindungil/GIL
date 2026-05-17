@@ -572,6 +572,17 @@ func newServer(dbPath, sockPath, sessionsBase, authFile string, authMW *auth.Mid
 	g := grpc.NewServer(grpcOpts...)
 	repo := session.NewRepo(db)
 	runSvc := service.NewRunService(repo, sessionsBase, factory)
+	// P36: reap any session left in status="running" from the prior
+	// daemon process. The in-flight agent loop goroutine is gone, but
+	// the DB status would otherwise say "running" forever; clients
+	// polling list_sessions / status would see ghost progress. Flip to
+	// "stopped" and append a run_orphaned event for the audit trail.
+	// Best-effort — logs a warning on failure but never blocks startup.
+	if reaped, err := runSvc.ReapOrphanRuns(context.Background()); err != nil {
+		slog.Warn("reap orphan runs", "err", err)
+	} else if reaped > 0 {
+		slog.Info("reaped orphan runs from prior daemon", "count", reaped)
+	}
 	gilv1.RegisterSessionServiceServer(g, service.
 		NewSessionService(repo, runSvc).
 		WithSessionsBase(sessionsBase).
