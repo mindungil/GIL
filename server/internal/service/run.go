@@ -401,11 +401,12 @@ func (s *RunService) Start(ctx context.Context, req *gilv1.StartRunRequest) (*gi
 	}
 
 	// Apply layered workspace defaults BEFORE we resolve provider /
-	// build tools, so that fields the interview left blank (provider,
-	// model, autonomy, backend) inherit from `<workspace>/.gil/config.toml`
-	// or `$XDG_CONFIG_HOME/gil/config.toml`. Spec values that ARE set
-	// always win — the interview is the source of truth, the layered
-	// config is only a backstop for what the user did not pin.
+	// build tools, so that fields the agent's freeze_spec call left
+	// blank (provider, model, autonomy, backend) inherit from
+	// `<workspace>/.gil/config.toml` or `$XDG_CONFIG_HOME/gil/config.toml`.
+	// Spec values that ARE set always win — the frozen spec is the
+	// source of truth, the layered config is only a backstop for what
+	// the agent did not pin.
 	workspaceDir := sess.WorkingDir
 	if spec.Workspace != nil && spec.Workspace.Path != "" {
 		workspaceDir = spec.Workspace.Path

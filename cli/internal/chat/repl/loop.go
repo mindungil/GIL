@@ -64,15 +64,10 @@ type Config struct {
 	In       io.Reader
 	Renderer render.Renderer
 	Client   SessionClient
-	// Router was a §2.6(b) verb classifier on the client; M2 removed
-	// it (see core/intent/router.go header). Field stays here (always
-	// nil) to keep the cobra wiring in cli/internal/cmd/chat.go from
-	// breaking until M3 deletes both sides. Effectively dead.
-	Router *struct{}
 }
 
-// Run executes the chat REPL until the user types /quit, EOF, or an
-// unrecoverable client error.
+// Run executes the chat REPL until the user types a bare exit word
+// (quit / exit / bye), hits EOF, or hits an unrecoverable client error.
 func Run(ctx context.Context, cfg Config) error {
 	if cfg.Renderer == nil {
 		return fmt.Errorf("repl.Run: Renderer required")
@@ -81,7 +76,7 @@ func Run(ctx context.Context, cfg Config) error {
 	cfg.Renderer.Banner(tr.State())
 
 	// §2.6 self-disclose: surface recent sessions inline at entry so the
-	// user doesn't need to know /sessions to find prior work. Soft-fails
+	// user can resume by name without first having to ask. Soft-fails
 	// on errors — the status strip still prints the idle hint.
 	if cfg.Client != nil && cfg.Client.ActiveSessionID() == "" {
 		emitWelcomeDisclosure(ctx, cfg)
