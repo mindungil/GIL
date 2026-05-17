@@ -476,12 +476,24 @@ func (s *RunService) ReapOrphanRuns(ctx context.Context) (int, error) {
 		}
 		reaped++
 		// P37: if the spec opted in, kick off a fresh run for this
-		// session. The Start call uses the same session id so the
-		// existing FrozenSpec is reloaded; detach=true is implicit
-		// because we're in startup context with no grpc client to
-		// stream back to. Errors are logged but don't roll back the
-		// stop status — the user can always re-trigger manually.
+		// session. We just flipped status to "stopped" above for the
+		// P36 audit trail, but Start requires status="frozen" before
+		// it'll accept the request. Briefly flip the row back to
+		// "frozen" (the session has a frozen spec, that's exactly
+		// the right semantic state), then Start moves it to "running"
+		// on success. The audit-trail event has already been written
+		// against the orphan's prior "running" status; the brief
+		// "stopped" gap before re-flip to "frozen" is invisible to
+		// outside readers because no clients are connected yet at
+		// daemon startup (this runs before grpc serving begins).
+		//
+		// Errors from Start are logged but don't roll back — the
+		// user can always re-trigger manually with `gil run`.
 		if autoResume {
+			if uerr := s.repo.UpdateStatus(ctx, sess.ID, "frozen"); uerr != nil {
+				log.Printf("WARN P37 auto-resume %s: pre-Start status restore: %v", sess.ID, uerr)
+				continue
+			}
 			go func(sid string) {
 				_, serr := s.Start(context.Background(), &gilv1.StartRunRequest{
 					SessionId: sid,
