@@ -670,16 +670,84 @@ var (
 
 func redactKnownSecrets(s string) string {
 	knownSecretsOnce.Do(loadKnownSecrets)
-	if len(knownSecretsList) == 0 {
+	if len(knownSecretsList) > 0 {
+		for _, secret := range knownSecretsList {
+			if secret == "" {
+				continue
+			}
+			s = strings.ReplaceAll(s, secret, "[REDACTED-SECRET]")
+		}
+	}
+	// iter156: also catch secret-shape values that aren't in the
+	// daemon-wide registry — projects regularly ship config files with
+	// their own keys, and the registry only sees ~/.env + auth.json.
+	// Same prefix set as iter93a's value-shape fallback. Run the inline
+	// scan after the registry pass so legitimate registry values that
+	// happen to also match a prefix are still replaced with the same
+	// [REDACTED-SECRET] sentinel and don't get a duplicate replacement.
+	return redactInlineSecretShapes(s)
+}
+
+// redactInlineSecretShapes scans the string for tokens matching known
+// provider-key prefixes and replaces them with [REDACTED-SECRET]. Tight
+// shape so the function doesn't gnaw on prose: a "token" is a maximal
+// run of [A-Za-z0-9._-] starting with one of the known prefixes and
+// at least 16 chars long. iter156.
+func redactInlineSecretShapes(s string) string {
+	const minLen = 16
+	const sentinel = "[REDACTED-SECRET]"
+	if s == "" {
 		return s
 	}
-	for _, secret := range knownSecretsList {
-		if secret == "" {
+	var b strings.Builder
+	b.Grow(len(s))
+	i := 0
+	for i < len(s) {
+		// Find the next prefix match.
+		matched := -1
+		var matchPrefix string
+		for _, p := range secretValuePrefixes {
+			if strings.HasPrefix(s[i:], p) {
+				matched = i
+				matchPrefix = p
+				break
+			}
+		}
+		if matched < 0 {
+			b.WriteByte(s[i])
+			i++
 			continue
 		}
-		s = strings.ReplaceAll(s, secret, "[REDACTED-SECRET]")
+		// Extend through the secret-token charset.
+		end := matched + len(matchPrefix)
+		for end < len(s) && isSecretChar(s[end]) {
+			end++
+		}
+		token := s[matched:end]
+		if len(token) >= minLen {
+			b.WriteString(sentinel)
+			i = end
+			continue
+		}
+		// Not long enough — keep verbatim.
+		b.WriteString(token)
+		i = end
 	}
-	return s
+	return b.String()
+}
+
+func isSecretChar(c byte) bool {
+	switch {
+	case c >= 'a' && c <= 'z':
+		return true
+	case c >= 'A' && c <= 'Z':
+		return true
+	case c >= '0' && c <= '9':
+		return true
+	case c == '_' || c == '-' || c == '.':
+		return true
+	}
+	return false
 }
 
 func loadKnownSecrets() {
