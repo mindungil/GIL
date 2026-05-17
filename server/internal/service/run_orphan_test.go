@@ -14,6 +14,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/mindungil/gil/core/session"
+	"github.com/mindungil/gil/core/specstore"
+	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
 )
 
 // P36 — orphan run reaping. After daemon restart, any session left in
@@ -147,4 +149,111 @@ func TestReapOrphanRuns_NilRepo_NoOp(t *testing.T) {
 	count, err := rs.ReapOrphanRuns(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, 0, count)
+}
+
+// P37 — auto_resume flag in the orphan event differentiates spec-opted
+// sessions from default-stopped ones. The actual run-restart goroutine
+// fire is hard to assert here (no provider factory wired), but the
+// event payload is the deterministic record.
+
+func TestReapOrphanRuns_AutoResumeFlagFlowsToEvent(t *testing.T) {
+	rs, db, sessionsBase := newRunSvcForOrphanTest(t)
+	ctx := context.Background()
+
+	repo := session.NewRepo(db)
+	s, err := repo.Create(ctx, session.CreateInput{GoalHint: "task-with-resume"})
+	require.NoError(t, err)
+	require.NoError(t, repo.UpdateStatus(ctx, s.ID, "running"))
+
+	// Persist a frozen spec with Risk.ResumeOnRestart=true.
+	sessDir := filepath.Join(sessionsBase, s.ID)
+	require.NoError(t, os.MkdirAll(sessDir, 0o755))
+	store := specstore.NewStore(sessDir)
+	spec := &gilv1.FrozenSpec{
+		Goal: &gilv1.Goal{OneLiner: "test"},
+		Risk: &gilv1.RiskProfile{
+			Autonomy:        gilv1.AutonomyDial_FULL,
+			ResumeOnRestart: true,
+		},
+	}
+	require.NoError(t, store.Save(spec))
+
+	count, err := rs.ReapOrphanRuns(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, count)
+
+	// The event payload should carry auto_resume:true.
+	eventsPath := filepath.Join(sessDir, "events.jsonl")
+	data, err := os.ReadFile(eventsPath)
+	require.NoError(t, err)
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	require.GreaterOrEqual(t, len(lines), 1)
+
+	var got map[string]any
+	require.NoError(t, json.Unmarshal([]byte(lines[len(lines)-1]), &got))
+	require.Equal(t, "run_orphaned", got["type"])
+	dataField, ok := got["data"].(string)
+	require.True(t, ok)
+	require.Contains(t, dataField, `"auto_resume":true`,
+		"spec opted in via Risk.ResumeOnRestart — event must surface it")
+}
+
+func TestReapOrphanRuns_NoSpec_DefaultsToManualResume(t *testing.T) {
+	// Session has no frozen spec — Reap proceeds with auto_resume:false.
+	rs, db, sessionsBase := newRunSvcForOrphanTest(t)
+	ctx := context.Background()
+
+	repo := session.NewRepo(db)
+	s, err := repo.Create(ctx, session.CreateInput{GoalHint: "task-no-spec"})
+	require.NoError(t, err)
+	require.NoError(t, repo.UpdateStatus(ctx, s.ID, "running"))
+	require.NoError(t, os.MkdirAll(filepath.Join(sessionsBase, s.ID), 0o755))
+
+	count, err := rs.ReapOrphanRuns(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, count)
+
+	eventsPath := filepath.Join(sessionsBase, s.ID, "events.jsonl")
+	data, err := os.ReadFile(eventsPath)
+	require.NoError(t, err)
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	var got map[string]any
+	require.NoError(t, json.Unmarshal([]byte(lines[len(lines)-1]), &got))
+	dataField := got["data"].(string)
+	require.Contains(t, dataField, `"auto_resume":false`,
+		"no spec → default false; user must re-trigger manually")
+}
+
+func TestReapOrphanRuns_SpecResumeFalse_DefaultsToManual(t *testing.T) {
+	// Spec frozen but Risk.ResumeOnRestart=false explicitly — auto_resume:false.
+	rs, db, sessionsBase := newRunSvcForOrphanTest(t)
+	ctx := context.Background()
+
+	repo := session.NewRepo(db)
+	s, err := repo.Create(ctx, session.CreateInput{GoalHint: "task-explicit-no-resume"})
+	require.NoError(t, err)
+	require.NoError(t, repo.UpdateStatus(ctx, s.ID, "running"))
+
+	sessDir := filepath.Join(sessionsBase, s.ID)
+	require.NoError(t, os.MkdirAll(sessDir, 0o755))
+	require.NoError(t, specstore.NewStore(sessDir).Save(&gilv1.FrozenSpec{
+		Goal: &gilv1.Goal{OneLiner: "test"},
+		Risk: &gilv1.RiskProfile{
+			Autonomy:        gilv1.AutonomyDial_FULL,
+			ResumeOnRestart: false, // explicit
+		},
+	}))
+
+	count, err := rs.ReapOrphanRuns(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, count)
+
+	eventsPath := filepath.Join(sessDir, "events.jsonl")
+	data, err := os.ReadFile(eventsPath)
+	require.NoError(t, err)
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	var got map[string]any
+	require.NoError(t, json.Unmarshal([]byte(lines[len(lines)-1]), &got))
+	dataField := got["data"].(string)
+	require.Contains(t, dataField, `"auto_resume":false`)
 }

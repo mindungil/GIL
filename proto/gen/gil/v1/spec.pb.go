@@ -1275,8 +1275,17 @@ type RiskProfile struct {
 	Autonomy                 AutonomyDial           `protobuf:"varint,1,opt,name=autonomy,proto3,enum=gil.v1.AutonomyDial" json:"autonomy,omitempty"`
 	AdversaryReviewerEnabled bool                   `protobuf:"varint,2,opt,name=adversary_reviewer_enabled,json=adversaryReviewerEnabled,proto3" json:"adversary_reviewer_enabled,omitempty"`
 	StuckDetectorEnabled     bool                   `protobuf:"varint,3,opt,name=stuck_detector_enabled,json=stuckDetectorEnabled,proto3" json:"stuck_detector_enabled,omitempty"`
-	unknownFields            protoimpl.UnknownFields
-	sizeCache                protoimpl.SizeCache
+	// resume_on_restart, when true, asks the daemon to auto-restart this
+	// session's run after a daemon restart (P37). The reaper flips the
+	// orphan from running → stopped as usual, then kicks off a fresh
+	// run.Start so the agent can pick up where the prior process died.
+	// The new run inherits the same FrozenSpec from disk and the same
+	// workspace (P5 checkpoint state). Opt-in because re-running an
+	// arbitrary task automatically can be unsafe — only set this on
+	// tasks that are idempotent or verify-gated. Default false.
+	ResumeOnRestart bool `protobuf:"varint,4,opt,name=resume_on_restart,json=resumeOnRestart,proto3" json:"resume_on_restart,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *RiskProfile) Reset() {
@@ -1326,6 +1335,13 @@ func (x *RiskProfile) GetAdversaryReviewerEnabled() bool {
 func (x *RiskProfile) GetStuckDetectorEnabled() bool {
 	if x != nil {
 		return x.StuckDetectorEnabled
+	}
+	return false
+}
+
+func (x *RiskProfile) GetResumeOnRestart() bool {
+	if x != nil {
+		return x.ResumeOnRestart
 	}
 	return false
 }
@@ -1553,11 +1569,12 @@ const file_gil_v1_spec_proto_rawDesc = "" +
 	"\texec_code\x18\x06 \x01(\bR\bexecCode\x12\x1f\n" +
 	"\vmcp_servers\x18\n" +
 	" \x03(\tR\n" +
-	"mcpServers\"\xb3\x01\n" +
+	"mcpServers\"\xdf\x01\n" +
 	"\vRiskProfile\x120\n" +
 	"\bautonomy\x18\x01 \x01(\x0e2\x14.gil.v1.AutonomyDialR\bautonomy\x12<\n" +
 	"\x1aadversary_reviewer_enabled\x18\x02 \x01(\bR\x18adversaryReviewerEnabled\x124\n" +
-	"\x16stuck_detector_enabled\x18\x03 \x01(\bR\x14stuckDetectorEnabled\"y\n" +
+	"\x16stuck_detector_enabled\x18\x03 \x01(\bR\x14stuckDetectorEnabled\x12*\n" +
+	"\x11resume_on_restart\x18\x04 \x01(\bR\x0fresumeOnRestart\"y\n" +
 	"\n" +
 	"Microagent\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12!\n" +

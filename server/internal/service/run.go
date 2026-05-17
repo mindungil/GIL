@@ -284,6 +284,13 @@ func (s *RunService) sessionDir(sessionID string) string {
 // interrupted" signal in both DB (status flip) and events.jsonl
 // (audit row).
 //
+// P37 extension: when the orphan's frozen spec has Risk.ResumeOnRestart
+// set, the reaper additionally calls s.Start with a synthetic
+// StartRunRequest so the agent picks up the task on a fresh agent loop.
+// The new run inherits the same FrozenSpec from disk and the same
+// workspace (P5 checkpoint state), so it converges on the verifier
+// checks where the prior process died.
+//
 // Best-effort: errors on individual sessions don't stop the sweep,
 // and a missing events directory just skips the event-append.
 // Returns the number of sessions reaped.
@@ -309,22 +316,53 @@ func (s *RunService) ReapOrphanRuns(ctx context.Context) (int, error) {
 			log.Printf("WARN reap orphan run %s: UpdateStatus: %v", sess.ID, uerr)
 			continue
 		}
+		// P37: check the spec's resume_on_restart flag. Best-effort: if
+		// the spec can't be loaded (no spec frozen, dir missing, …) the
+		// session just stays stopped — no auto-resume is attempted.
+		autoResume := false
+		if spec, lerr := specstore.NewStore(s.sessionDir(sess.ID)).Load(); lerr == nil &&
+			spec != nil && spec.Risk != nil && spec.Risk.ResumeOnRestart {
+			autoResume = true
+		}
 		// Append a single run_orphaned event so the surface has an audit
 		// trail (events.jsonl readers, `gil events`, the chat surface's
 		// past-session disclosure). Skip silently if the events dir is
 		// missing — old sessions may pre-date that pattern.
+		eventData := []byte(`{"reason":"daemon_restart","prior_status":"running","auto_resume":false}`)
+		if autoResume {
+			eventData = []byte(`{"reason":"daemon_restart","prior_status":"running","auto_resume":true}`)
+		}
 		if p, perr := event.NewPersister(s.sessionDir(sess.ID)); perr == nil {
 			_ = p.Write(event.Event{
 				Timestamp: now,
 				Source:    event.SourceSystem,
 				Kind:      event.KindNote,
 				Type:      "run_orphaned",
-				Data:      []byte(`{"reason":"daemon_restart","prior_status":"running"}`),
+				Data:      eventData,
 			})
 			_ = p.Sync()
 			_ = p.Close()
 		}
 		reaped++
+		// P37: if the spec opted in, kick off a fresh run for this
+		// session. The Start call uses the same session id so the
+		// existing FrozenSpec is reloaded; detach=true is implicit
+		// because we're in startup context with no grpc client to
+		// stream back to. Errors are logged but don't roll back the
+		// stop status — the user can always re-trigger manually.
+		if autoResume {
+			go func(sid string) {
+				_, serr := s.Start(context.Background(), &gilv1.StartRunRequest{
+					SessionId: sid,
+					Detach:    true,
+				})
+				if serr != nil {
+					log.Printf("WARN P37 auto-resume %s: %v", sid, serr)
+				} else {
+					log.Printf("INFO P37 auto-resume %s: kicked", sid)
+				}
+			}(sess.ID)
+		}
 	}
 	return reaped, nil
 }

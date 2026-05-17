@@ -198,6 +198,15 @@ message RiskProfile {
   AutonomyDial autonomy = 1;
   bool adversary_reviewer_enabled = 2;
   bool stuck_detector_enabled = 3;
+  // resume_on_restart, when true, asks the daemon to auto-restart this
+  // session's run after a daemon restart (P37). The reaper flips the
+  // orphan from running → stopped as usual, then kicks off a fresh
+  // run.Start so the agent can pick up where the prior process died.
+  // The new run inherits the same FrozenSpec from disk and the same
+  // workspace (P5 checkpoint state). Opt-in because re-running an
+  // arbitrary task automatically can be unsafe — only set this on
+  // tasks that are idempotent or verify-gated. Default false.
+  bool resume_on_restart = 4;
 }
 
 enum AutonomyDial {
