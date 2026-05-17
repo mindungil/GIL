@@ -94,9 +94,50 @@ func (h *chatHistory) append(sid string, msg provider.Message) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.ensureLoadedLocked(sid)
-	seq := len(h.all[sid])
+	seq := h.nextSeqLocked(sid)
 	h.all[sid] = append(h.all[sid], msg)
 	h.persistAppendLocked(sid, seq, msg)
+}
+
+// nextSeqLocked computes the seq the next append should use. With a
+// DB wired, it reads `MAX(seq) + 1` so the value is correct even when
+// the in-memory list has been shrunk by ReplaceInMemory (P35 chat
+// compaction). Without a DB, falls back to len — pre-P34 contract.
+// Caller holds h.mu.
+func (h *chatHistory) nextSeqLocked(sid string) int {
+	if h.db == nil {
+		return len(h.all[sid])
+	}
+	var maxSeq sql.NullInt64
+	if err := h.db.QueryRow(`SELECT MAX(seq) FROM chat_messages WHERE session_id = ?`, sid).Scan(&maxSeq); err != nil {
+		// Silent fallback — same rationale as persistAppendLocked. Use
+		// in-memory len so an append still lands at a sensible seq even
+		// when the DB query failed.
+		return len(h.all[sid])
+	}
+	if !maxSeq.Valid {
+		return 0
+	}
+	return int(maxSeq.Int64) + 1
+}
+
+// ReplaceInMemory swaps the in-memory slice for sid without touching
+// DB rows. Used by P35 chat-history compaction: the compactor returns
+// a shorter, summary-prefixed message slice that becomes the chat
+// agent's working context, while the chat_messages table retains the
+// full log (export_session, post-restart re-hydration). The loaded
+// flag stays set so the next get() returns the compacted slice
+// instead of re-loading the full log from DB.
+func (h *chatHistory) ReplaceInMemory(sid string, msgs []provider.Message) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	cp := make([]provider.Message, len(msgs))
+	copy(cp, msgs)
+	h.all[sid] = cp
+	if h.loaded == nil {
+		h.loaded = make(map[string]struct{})
+	}
+	h.loaded[sid] = struct{}{}
 }
 
 // reset clears the message log for sid so a subsequent Prompt starts
@@ -449,6 +490,22 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 		Role:    provider.RoleUser,
 		Content: userText,
 	})
+
+	// P35: compact chat history when it crosses 95% of the model's
+	// context window. Reuses the same Hermes pattern the runner uses
+	// in-loop (core/compact.Compactor). System-driven safety net — the
+	// chat agent never sees compaction happen; it just receives a
+	// shorter messages slice with a synthesized middle summary. On
+	// error or skip, we keep the original msgs so the user's turn
+	// isn't blocked by a compaction blip. DB chat_messages stays
+	// authoritative; ReplaceInMemory only swaps the in-memory list.
+	if compacted, didCompact, cerr := compactChatIfNeeded(ctx, provName, modelID, prov, msgs); cerr != nil {
+		// Soft-fail. Continue with msgs as-is.
+		_ = cerr // intentionally unlogged at this level; the next provider call surfaces any actual context-overflow
+	} else if didCompact {
+		msgs = compacted
+		s.chatHistory().ReplaceInMemory(sessionID, compacted)
+	}
 
 	// 4. Resolve the agent profile (system prompt + tool whitelist).
 	//    PromptRequest.agent picks; empty → "default".
