@@ -65,6 +65,41 @@ func TestToolFreezeSpec_HappyPath(t *testing.T) {
 	require.Equal(t, "frozen", got.Status)
 }
 
+// iter127a: agents repeatedly emit `{"goal": "bare string", "one_liner": "..."}`
+// — they misread the schema's nested `required: [one_liner]` as a top-
+// level requirement. Accept the bare-string Goal and the top-level
+// one_liner as equivalents instead of failing with an opaque
+// unmarshal error.
+func TestToolFreezeSpec_TolerantArgShapes(t *testing.T) {
+	wd := t.TempDir()
+	sess, base := newTestSessionService(t)
+	tool := &toolFreezeSpec{sess: sess, base: base}
+	ctx := context.Background()
+
+	// Variant A: bare-string Goal.
+	sid := newTestSession(t, sess.repo, wd)
+	res, err := tool.run(ctx, sid, json.RawMessage(`{"goal": "fix main.go"}`))
+	require.NoError(t, err)
+	require.False(t, res.IsError, res.Content)
+	require.Contains(t, res.Content, "goal: fix main.go")
+
+	// Variant B: object Goal empty + top-level one_liner.
+	wd2 := t.TempDir()
+	sid2 := newTestSession(t, sess.repo, wd2)
+	res2, err := tool.run(ctx, sid2, json.RawMessage(`{"goal": {}, "one_liner": "fix it"}`))
+	require.NoError(t, err)
+	require.False(t, res2.IsError, res2.Content)
+	require.Contains(t, res2.Content, "goal: fix it")
+
+	// Variant C: bare-string Goal + top-level one_liner (Goal wins because it's set first).
+	wd3 := t.TempDir()
+	sid3 := newTestSession(t, sess.repo, wd3)
+	res3, err := tool.run(ctx, sid3, json.RawMessage(`{"goal": "use this one", "one_liner": "fallback"}`))
+	require.NoError(t, err)
+	require.False(t, res3.IsError, res3.Content)
+	require.Contains(t, res3.Content, "goal: use this one")
+}
+
 func TestToolFreezeSpec_RequiresGoalOneLiner(t *testing.T) {
 	wd := t.TempDir()
 	sess, base := newTestSessionService(t)

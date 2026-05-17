@@ -121,16 +121,52 @@ func (t *toolFreezeSpec) schema() json.RawMessage {
 	}`)
 }
 
+// goalArg accepts both the nested object shape (per the freeze_spec
+// schema) and a bare string shorthand. Bench observation: agents
+// repeatedly emit `{"goal": "fix main.go", "one_liner": "..."}` — they
+// read the schema's `"required": ["one_liner"]` and treat one_liner
+// as a top-level required field even though it lives inside goal.
+// Accept the shorthand (string → OneLiner) instead of failing with an
+// opaque "cannot unmarshal string into Go struct field" error. P32-eval
+// iter127a.
+type goalArg struct {
+	OneLiner        string   `json:"one_liner"`
+	Detailed        string   `json:"detailed"`
+	SuccessCriteria []string `json:"success_criteria"`
+	NonGoals        []string `json:"non_goals"`
+}
+
+func (g *goalArg) UnmarshalJSON(b []byte) error {
+	// Try the shorthand first: a bare string becomes OneLiner.
+	if len(b) > 0 && b[0] == '"' {
+		var s string
+		if err := json.Unmarshal(b, &s); err != nil {
+			return err
+		}
+		g.OneLiner = s
+		return nil
+	}
+	// Otherwise the canonical object shape. Use a local alias to avoid
+	// recursing back into this UnmarshalJSON.
+	type alias goalArg
+	var a alias
+	if err := json.Unmarshal(b, &a); err != nil {
+		return err
+	}
+	*g = goalArg(a)
+	return nil
+}
+
 // freezeSpecArgs is the parsed shape of the agent's freeze_spec call.
 // Mirrors the schema above. JSON tags use snake_case to match the
-// schema; unmarshal silently drops unknown fields.
+// schema; unmarshal silently drops unknown fields. The top-level
+// `one_liner` is honored as a safety net for agents that read the
+// schema's nested `"required": ["one_liner"]` as a top-level field
+// (iter127a observation).
 type freezeSpecArgs struct {
-	Goal struct {
-		OneLiner         string   `json:"one_liner"`
-		Detailed         string   `json:"detailed"`
-		SuccessCriteria  []string `json:"success_criteria"`
-		NonGoals         []string `json:"non_goals"`
-	} `json:"goal"`
+	Goal             goalArg `json:"goal"`
+	TopOneLiner      string  `json:"one_liner"`
+	TopDetailed      string  `json:"detailed"`
 	Constraints struct {
 		TechStack []string `json:"tech_stack"`
 		Forbidden []string `json:"forbidden"`
@@ -166,6 +202,15 @@ func (t *toolFreezeSpec) run(ctx context.Context, sessionID string, argsJSON jso
 			Content: "freeze_spec invalid arguments: " + err.Error(),
 			IsError: true,
 		}, nil
+	}
+	// iter127a: lift sibling top-level fields into Goal when the agent
+	// emitted the schema's required fields at the top level alongside
+	// a bare-string Goal. Nested object always wins.
+	if args.Goal.OneLiner == "" && args.TopOneLiner != "" {
+		args.Goal.OneLiner = args.TopOneLiner
+	}
+	if args.Goal.Detailed == "" && args.TopDetailed != "" {
+		args.Goal.Detailed = args.TopDetailed
 	}
 	if strings.TrimSpace(args.Goal.OneLiner) == "" {
 		return provider.ToolResult{
