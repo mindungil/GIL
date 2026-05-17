@@ -568,7 +568,29 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 			Data:      data,
 		})
 	}
-
+	// P44: wire OnRetry on the retry-wrapped chat provider so the user
+	// sees backoff happening instead of a silent 30s gap during
+	// exponential retry. Mirrors run.go's same hookup. The callback
+	// fires AFTER each retryable failure, BEFORE the sleep.
+	if rp, ok := prov.(*provider.Retry); ok {
+		rp.OnRetry = func(attempt, maxAttempts int, err error, wait time.Duration) {
+			emitChatEvent("provider.retry_attempt", event.SourceSystem, event.KindNote, map[string]any{
+				"attempt":      attempt,
+				"max_attempts": maxAttempts,
+				"wait_ms":      wait.Milliseconds(),
+				"err":          err.Error(),
+			})
+			// Also stream as a visible system Part so the chat user sees
+			// the backoff in the transcript. The text matches the
+			// run-side narration shape ("[retrying 2/4 · 1.0s]") so
+			// both surfaces feel consistent.
+			_ = stream.Send(&gilv1.Part{
+				Body: &gilv1.Part_Text{Text: &gilv1.TextDelta{
+					Content: fmt.Sprintf("[system] provider.retry_attempt: %d/%d · waiting %dms", attempt, maxAttempts, wait.Milliseconds()),
+				}},
+			})
+		}
+	}
 	// 6. Multi-turn agent loop. Each iteration calls the LLM; if it
 	//    emits tool_calls, we dispatch them, append the results, and
 	//    re-call. The loop terminates when the LLM returns no tool

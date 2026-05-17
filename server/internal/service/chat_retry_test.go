@@ -138,6 +138,33 @@ func TestChatRetry_RetryDoesNotDuplicateUserTurnInHistory(t *testing.T) {
 		"user message must be persisted exactly once even when provider retries; saw %d copies in history", userCount)
 }
 
+// P44: retry attempts surface visibly on the stream as "[system]
+// provider.retry_attempt: 1/4 · waiting 500ms" so the chat user sees
+// backoff rather than a silent gap. One Part per retry attempt.
+func TestChatRetry_RetryAttempts_SurfaceAsVisibleParts(t *testing.T) {
+	prov := &transientThenSuccessProvider{
+		failsLeft: 2,
+		success: provider.Response{
+			Text:       "ok",
+			StopReason: "end_turn",
+		},
+	}
+	svc, sid := newChatSvcWithProvider(t, prov)
+	stream := &fakePromptStream{ctx: context.Background()}
+
+	err := svc.Prompt(promptReq(sid, "test"), stream)
+	require.NoError(t, err)
+
+	retryParts := 0
+	for _, p := range stream.Parts {
+		if td := p.GetText(); td != nil && strings.Contains(td.GetContent(), "provider.retry_attempt") {
+			retryParts++
+		}
+	}
+	require.Equal(t, 2, retryParts,
+		"expected 2 retry-attempt notices for 2 transient failures; got %d", retryParts)
+}
+
 // Sanity: a session created without explicit status is "created", so
 // the Prompt flow drives through normal state transitions even with
 // the retry wrap in place. Pin via the session status post-prompt.
