@@ -34,6 +34,24 @@ type Client struct {
 	done    chan struct{}
 }
 
+// IsAlive returns true if the subprocess is still running. False once
+// the readPump has exited (subprocess exited / stdout closed / decoder
+// errored) or Close has been called. Used by P47 mid-session
+// detection in RunService.ensureSessionMCPTools to evict and
+// relaunch dead clients on next access. Non-blocking — picks up the
+// channel state via select default.
+func (c *Client) IsAlive() bool {
+	if c.closed.Load() {
+		return false
+	}
+	select {
+	case <-c.done:
+		return false
+	default:
+		return true
+	}
+}
+
 // LaunchOptions configures Launch.
 type LaunchOptions struct {
 	Command string   // executable

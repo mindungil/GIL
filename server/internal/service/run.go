@@ -308,10 +308,53 @@ func (s *RunService) ensureSessionMCPTools(ctx context.Context, sessionID string
 	}
 	s.mu.Lock()
 	if cached, ok := s.mcpClientCache[sessionID]; ok && cached != nil {
+		// P47: check that every cached client is still alive. If any
+		// died (subprocess crashed, stdout closed, killed by OOM), the
+		// whole cache entry is stale — evict and relaunch. Detecting
+		// a single dead client and surgically restarting just it would
+		// be richer but adds complexity; the simpler "all-or-nothing"
+		// reset gets the user unstuck.
+		allAlive := true
+		var deadNames []string
+		for i, cli := range cached.Clients {
+			if !cli.IsAlive() {
+				allAlive = false
+				name := ""
+				if i < len(cached.Launched) {
+					name = cached.Launched[i]
+				}
+				deadNames = append(deadNames, name)
+			}
+		}
+		if allAlive {
+			s.mu.Unlock()
+			return cached.Tools
+		}
+		// Dead entry — drop cached, close survivors, then fall through
+		// to the relaunch path. Emit an audit event so the surface can
+		// surface "MCP server X restarted mid-session".
+		delete(s.mcpClientCache, sessionID)
+		for _, cli := range cached.Clients {
+			_ = cli.Close() // best-effort; dead ones are no-ops
+		}
 		s.mu.Unlock()
-		return cached.Tools
+		if stream != nil {
+			data, _ := json.Marshal(map[string]any{
+				"dead_servers":  deadNames,
+				"action":        "relaunching_on_next_access",
+			})
+			_, _ = stream.Append(event.Event{
+				Timestamp: time.Now().UTC(),
+				Source:    event.SourceSystem,
+				Kind:      event.KindNote,
+				Type:      "mcp_server_died",
+				Data:      data,
+			})
+		}
+		log.Printf("INFO P47 mcp_server_died sessionID=%s dead=%v — evicting cache, will relaunch", sessionID, deadNames)
+	} else {
+		s.mu.Unlock()
 	}
-	s.mu.Unlock()
 
 	// Resolve global + project registries the same way executeRun's
 	// MCP block does so the chat path produces an identical merged
