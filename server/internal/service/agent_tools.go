@@ -366,7 +366,17 @@ func (t *toolListSessions) run(ctx context.Context, _ string, _ json.RawMessage)
 		if hint == "" {
 			hint = "(no description)"
 		}
-		fmt.Fprintf(&b, "%d. %s · %s · %s\n", i+1, sess.ID[:10], sess.Status, hint)
+		// iter151a: surface persisted token / cost totals (iter133c
+		// writes these on run completion) so list_sessions is useful
+		// for spotting expensive vs cheap past runs without needing
+		// show_status on each one. Skip when both are zero so fresh
+		// or never-ran sessions stay terse.
+		extra := ""
+		if sess.TotalTokens > 0 || sess.TotalCostUSD > 0 {
+			extra = fmt.Sprintf(" · tokens=%d cost=$%.4f",
+				sess.TotalTokens, sess.TotalCostUSD)
+		}
+		fmt.Fprintf(&b, "%d. %s · %s · %s%s\n", i+1, sess.ID[:10], sess.Status, hint, extra)
 	}
 	return provider.ToolResult{Content: strings.TrimRight(b.String(), "\n")}, nil
 }

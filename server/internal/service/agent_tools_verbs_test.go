@@ -3,11 +3,13 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
 	"github.com/mindungil/gil/core/provider"
+	"github.com/mindungil/gil/core/session"
 	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
 )
 
@@ -278,6 +280,36 @@ func TestRenderRestoreResult_NoOpRestore(t *testing.T) {
 	require.Contains(t, got, "restored to abcdef12")
 	require.Contains(t, got, "tracked content unchanged")
 	require.NotContains(t, got, "WORKSPACE STATE CHANGED")
+}
+
+// iter151a: list_sessions surfaces persisted token + cost so the agent
+// (and user) can scan recent runs and spot expensive ones without
+// drilling into each one. Skips the suffix when totals are zero so
+// fresh sessions stay terse.
+func TestToolListSessions_ShowsPersistedTotals(t *testing.T) {
+	ctx := context.Background()
+	repo := newTestRepo(t)
+	wd := t.TempDir()
+
+	// Two sessions: one with persisted totals, one without.
+	withTotals, err := repo.Create(ctx, session.CreateInput{WorkingDir: wd, GoalHint: "ran a job"})
+	require.NoError(t, err)
+	require.NoError(t, repo.UpdateTotals(ctx, withTotals.ID, 7777, 0.0123))
+
+	_, err = repo.Create(ctx, session.CreateInput{WorkingDir: wd, GoalHint: "brand new"})
+	require.NoError(t, err)
+
+	tool := &toolListSessions{repo: repo}
+	res, err := tool.run(ctx, "", json.RawMessage(`{}`))
+	require.NoError(t, err)
+	require.False(t, res.IsError)
+	require.Contains(t, res.Content, "tokens=7777")
+	require.Contains(t, res.Content, "cost=$0.0123")
+	// "brand new" row has no totals, so no suffix.
+	require.Contains(t, res.Content, "brand new")
+	// And there shouldn't be a 'tokens=' for the no-totals row.
+	require.Equal(t, 1, strings.Count(res.Content, "tokens="),
+		"expected exactly one tokens= row; got %q", res.Content)
 }
 
 // --- helpers ------------------------------------------------------
