@@ -208,14 +208,12 @@ func (m *chatModel) renderAffordanceLine() string {
 }
 
 // chatSubtitle maps phase → user-typeable verbs in NL form per design §4.3.
+// iter211: ChatPhaseInterview / ChatPhaseAwaitingConfirm dropped (interview
+// engine deletion); their subtitle hints went with them.
 func chatSubtitle(p ChatPhase) string {
 	switch p {
 	case ChatPhaseIdle:
 		return "describe a task, resume by slug, or ask what's running"
-	case ChatPhaseInterview:
-		return "answer the question above, or ask gil to clarify"
-	case ChatPhaseAwaitingConfirm:
-		return `type "freeze" to start the run, or keep iterating`
 	case ChatPhaseRun:
 		return "run in progress · type to queue follow-ups"
 	case ChatPhaseStuck:
@@ -341,10 +339,8 @@ func chatStatusBody(m *chatModel, dot string) string {
 	switch m.phase {
 	case ChatPhaseIdle:
 		return "idle  " + dot + "  ready"
-	case ChatPhaseInterview:
-		return "interview  " + dot + "  gathering context"
-	case ChatPhaseAwaitingConfirm:
-		return "interview  " + dot + "  ready to freeze"
+	// iter211: ChatPhaseInterview / ChatPhaseAwaitingConfirm cases
+	// dropped — see chat_model.go phase-constant note.
 	case ChatPhaseRun:
 		if m.runIter > 0 || m.runCost > 0 {
 			body := fmt.Sprintf("run  %s  iter %d  %s  $%.4f",

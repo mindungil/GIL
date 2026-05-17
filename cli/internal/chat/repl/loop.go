@@ -249,30 +249,14 @@ func emitDeltaNotes(r render.Renderer, prev, cur render.SessionState, ev Tracker
 		// Tokens / latency are reflected in the strip via
 		// Tracker.Apply — no need for a system note. Left as a
 		// no-op case to document where the kind comes from.
-	case "interview.slot_filled":
-		if cur.SlotsFilled > prev.SlotsFilled {
-			r.SystemNote(render.NoteSpec,
-				fmt.Sprintf("slot filled (%d/%d, sat %d%%)",
-					cur.SlotsFilled, cur.SlotsTotal, int(cur.Saturation*100+0.5)))
-		}
-	case "interview.adversary":
-		if cur.AdvFindings != prev.AdvFindings {
-			r.SystemNote(render.NoteAdversary,
-				fmt.Sprintf("%d finding(s)", cur.AdvFindings))
-		}
-	case "interview.started":
-		// Sensing → conversation. The Reason payload looks like
-		// "domain=cli-tooling confidence=0.85" — show it so the user
-		// knows what the engine inferred about their request.
-		msg := "interview started"
-		if ev.Reason != "" {
-			msg += " — " + ev.Reason
-		}
-		r.SystemNote(render.NoteSystem, msg)
-	case "interview.resumed":
-		r.SystemNote(render.NoteSystem, "resumed in-progress interview")
-	case "interview.ready_to_freeze":
-		r.SystemNote(render.NoteSaturation, "ready to freeze — /run to start")
+
+	// interview.slot_filled / adversary / started / resumed /
+	// ready_to_freeze handlers removed in iter211 — the M3 interview-
+	// engine deletion left no producer for any of those event kinds,
+	// so the case bodies were dead code. The chat surface assembles a
+	// spec via the freeze_spec tool inside the natural-language stream
+	// now; no separate phase to surface.
+
 	case "run.stuck":
 		// Surface WHICH pattern fired so the user can decide whether
 		// to wait for the auto-recovery strategy or step in. Reads

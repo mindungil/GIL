@@ -79,10 +79,6 @@ func (r *StdoutChatRenderer) StatusStrip(s SessionState) {
 		// past sessions is handled by the entry self-disclosure, not by
 		// telling the user to memorize a slash command.
 		body = "idle · type a prompt to start a new session"
-	case PhaseInterview:
-		body = formatInterviewStrip(s)
-	case PhaseAwaitingConfirm:
-		body = "interview · ready to freeze · /run to start, prompt to keep iterating"
 	case PhaseRun:
 		body = formatRunStrip(s)
 	case PhaseStuck:
@@ -110,18 +106,8 @@ func stripMiddleDot(s string) string {
 	return strings.ReplaceAll(s, " · ", " | ")
 }
 
-func formatInterviewStrip(s SessionState) string {
-	base := fmt.Sprintf("interview · %d/%d slots · sat %d%%",
-		s.SlotsFilled, s.SlotsTotal, int(s.Saturation*100+0.5))
-	switch {
-	case s.AdvFindings == 0:
-		return base
-	case s.AdvFindings == 1:
-		return base + " · 1 adv finding"
-	default:
-		return fmt.Sprintf("%s · %d adv findings", base, s.AdvFindings)
-	}
-}
+// formatInterviewStrip removed in iter211 — interview phase no longer
+// reachable (see PhaseInterview note in renderer.go).
 
 // formatRunStrip composes the in-flight run strip. Tokens / latency
 // are appended only when the daemon has reported them so a
@@ -176,7 +162,7 @@ func formatDoneStrip(s SessionState, ascii bool) string {
 			mark = "FAIL"
 		}
 	}
-	return fmt.Sprintf("done · %d iters · $%.2f · %s %d/%d checks · /diff /merge",
+	return fmt.Sprintf("done · %d iters · $%.2f · %s %d/%d checks",
 		s.Iter, s.CostUSD, mark, s.ChecksPassed, s.ChecksTotal)
 }
 

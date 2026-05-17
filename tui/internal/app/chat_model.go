@@ -21,13 +21,17 @@ import (
 type ChatPhase string
 
 const (
-	ChatPhaseIdle            ChatPhase = "idle"
-	ChatPhaseInterview       ChatPhase = "interview"
-	ChatPhaseAwaitingConfirm ChatPhase = "awaiting-confirm"
-	ChatPhaseRun             ChatPhase = "run"
-	ChatPhaseStuck           ChatPhase = "stuck"
-	ChatPhaseDone            ChatPhase = "done"
+	ChatPhaseIdle ChatPhase = "idle"
+	ChatPhaseRun  ChatPhase = "run"
+	ChatPhaseStuck ChatPhase = "stuck"
+	ChatPhaseDone ChatPhase = "done"
 )
+
+// ChatPhaseInterview / ChatPhaseAwaitingConfirm removed in iter211 —
+// the interview engine that emitted "sensing"/"conversation"/"confirm"
+// stage transitions was deleted in M3. The chat agent assembles a
+// spec via the freeze_spec tool inside the natural-language stream;
+// the TUI no longer needs a dedicated phase for either.
 
 // chatModel is the bubbletea root model for the prompt-centric chat
 // surface. See docs/plans/phase-26.6-prompt-centric-tui.md.

@@ -10,10 +10,6 @@ type TrackerInput struct {
 	Kind         string
 	SessionID    string
 	DisplayName  string
-	SlotsFilled  int
-	SlotsTotal   int
-	Saturation   float64
-	AdvFindings  int
 	Iter         int
 	MaxIter      int
 	CostUSD      float64
@@ -37,11 +33,9 @@ type TrackerInput struct {
 	PermissionKey     string
 	FromSubagentLabel string
 
-	// Reason is the StageTransition.Reason payload — e.g.
-	// "domain=cli-tooling confidence=0.85" on interview.started, or
-	// the audit's "ready" reason on interview.ready_to_freeze. Empty
-	// for events that don't carry one. Reused for retry's err string
-	// when Kind == "provider.retry_attempt".
+	// Reason is the optional context string attached to an event —
+	// used by provider.retry_attempt to carry the retry's err string,
+	// and by future event kinds that need a single free-form note.
 	Reason string
 
 	// Retry-attempt payload, populated when Kind is
@@ -108,21 +102,10 @@ func (t *Tracker) Apply(in TrackerInput) {
 	}
 
 	switch in.Kind {
-	case "interview.slot_filled":
-		t.s.Phase = render.PhaseInterview
-		t.s.SlotsFilled = in.SlotsFilled
-		t.s.SlotsTotal = in.SlotsTotal
-		t.s.Saturation = in.Saturation
-
-	case "interview.adversary":
-		// Phase stays whatever it was; only update count.
-		t.s.AdvFindings = in.AdvFindings
-
-	case "interview.started", "interview.resumed":
-		t.s.Phase = render.PhaseInterview
-
-	case "interview.ready_to_freeze":
-		t.s.Phase = render.PhaseAwaitingConfirm
+	// interview.* event handlers removed in iter211 — the interview
+	// engine that emitted slot_filled / adversary / started / resumed /
+	// ready_to_freeze was deleted in M3. No producer remains; the chat
+	// agent's freeze_spec tool is the single goal-assembly path.
 
 	case "run.started":
 		t.s.Phase = render.PhaseRun
