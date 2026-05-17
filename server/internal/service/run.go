@@ -283,6 +283,7 @@ func (s *RunService) sweepStaleHeartbeats(ctx context.Context) int {
 		delete(s.runCancels, sess.ID)
 		s.mu.Unlock()
 		reaped++
+		metrics.OrphanRunsReapedTotal.WithLabelValues("stale_heartbeat").Inc()
 	}
 	return reaped
 }
@@ -475,6 +476,7 @@ func (s *RunService) ReapOrphanRuns(ctx context.Context) (int, error) {
 			_ = p.Close()
 		}
 		reaped++
+		metrics.OrphanRunsReapedTotal.WithLabelValues("daemon_restart").Inc()
 		// P37: if the spec opted in, kick off a fresh run for this
 		// session. We just flipped status to "stopped" above for the
 		// P36 audit trail, but Start requires status="frozen" before
@@ -494,6 +496,7 @@ func (s *RunService) ReapOrphanRuns(ctx context.Context) (int, error) {
 				log.Printf("WARN P37 auto-resume %s: pre-Start status restore: %v", sess.ID, uerr)
 				continue
 			}
+			metrics.AutoResumeKickedTotal.Inc()
 			go func(sid string) {
 				_, serr := s.Start(context.Background(), &gilv1.StartRunRequest{
 					SessionId: sid,
