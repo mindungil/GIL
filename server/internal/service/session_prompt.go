@@ -477,6 +477,14 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 	if modelID == "" {
 		modelID = factoryModel
 	}
+	// P43: wrap with retry so the chat agent transparently survives
+	// transient upstream blips (429 rate limit, 5xx transient,
+	// connection drops). Same pattern run.go already uses for the
+	// run-time agent loop. Non-retryable errors (auth, 4xx other than
+	// 429) still surface immediately. The wrapper changes prov.Name()
+	// to add a "+retry" suffix; downstream code that needs the un-
+	// wrapped factory key uses provName (the original variable).
+	prov = provider.NewRetry(prov)
 
 	// 3. Build messages: prior history + new user message.
 	hist := s.chatHistory().get(sessionID)
