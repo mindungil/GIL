@@ -48,7 +48,7 @@ func TestSweepStaleHeartbeats_MissingProgressEntry_Reaps(t *testing.T) {
 
 	// Audit row uses reason=stale_heartbeat so consumers can tell it
 	// from a P36 daemon-restart reap.
-	eventsPath := filepath.Join(sessionsBase, s.ID, "events.jsonl")
+	eventsPath := filepath.Join(sessionsBase, s.ID, "events", "events.jsonl")
 	data, err := os.ReadFile(eventsPath)
 	require.NoError(t, err)
 	lines := strings.Split(strings.TrimSpace(string(data)), "\n")

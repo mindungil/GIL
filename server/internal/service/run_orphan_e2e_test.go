@@ -121,6 +121,7 @@ func TestReapOrphan_WithResumeFlag_AutoRestartsToCompletion(t *testing.T) {
 	marker := filepath.Join(workDir, "resume-marker.txt")
 	_, err = filepath.Abs(marker)
 	require.NoError(t, err)
+	_ = marker
 	// File presence is the verifier's own assertion; if status=done,
 	// it already passed. Belt-and-suspenders: read it back.
 	// (omitted file-read assertion — verify already gates this)

@@ -97,7 +97,7 @@ func TestReapOrphanRuns_AppendsOrphanedEvent(t *testing.T) {
 	require.Equal(t, 1, count)
 
 	// Read events.jsonl and find the run_orphaned event.
-	eventsPath := filepath.Join(sessDir, "events.jsonl")
+	eventsPath := filepath.Join(sessDir, "events", "events.jsonl")
 	data, err := os.ReadFile(eventsPath)
 	require.NoError(t, err, "events.jsonl should exist after reap")
 	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
@@ -183,7 +183,7 @@ func TestReapOrphanRuns_AutoResumeFlagFlowsToEvent(t *testing.T) {
 	require.Equal(t, 1, count)
 
 	// The event payload should carry auto_resume:true.
-	eventsPath := filepath.Join(sessDir, "events.jsonl")
+	eventsPath := filepath.Join(sessDir, "events", "events.jsonl")
 	data, err := os.ReadFile(eventsPath)
 	require.NoError(t, err)
 	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
@@ -213,7 +213,7 @@ func TestReapOrphanRuns_NoSpec_DefaultsToManualResume(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, count)
 
-	eventsPath := filepath.Join(sessionsBase, s.ID, "events.jsonl")
+	eventsPath := filepath.Join(sessionsBase, s.ID, "events", "events.jsonl")
 	data, err := os.ReadFile(eventsPath)
 	require.NoError(t, err)
 	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
@@ -248,7 +248,7 @@ func TestReapOrphanRuns_SpecResumeFalse_DefaultsToManual(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, count)
 
-	eventsPath := filepath.Join(sessDir, "events.jsonl")
+	eventsPath := filepath.Join(sessDir, "events", "events.jsonl")
 	data, err := os.ReadFile(eventsPath)
 	require.NoError(t, err)
 	lines := strings.Split(strings.TrimSpace(string(data)), "\n")

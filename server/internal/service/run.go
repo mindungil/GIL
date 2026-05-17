@@ -261,7 +261,7 @@ func (s *RunService) sweepStaleHeartbeats(ctx context.Context) int {
 		// Audit row mirrors P36's run_orphaned shape but with a
 		// distinct reason so consumers can distinguish startup-reap
 		// from mid-session-reap.
-		if p, perr := event.NewPersister(s.sessionDir(sess.ID)); perr == nil {
+		if p, perr := event.NewPersister(filepath.Join(s.sessionDir(sess.ID), "events")); perr == nil {
 			_ = p.Write(event.Event{
 				Timestamp: now,
 				Source:    event.SourceSystem,
@@ -507,7 +507,7 @@ func (s *RunService) ReapOrphanRuns(ctx context.Context) (int, error) {
 		if autoResume {
 			eventData = []byte(`{"reason":"daemon_restart","prior_status":"running","auto_resume":true}`)
 		}
-		if p, perr := event.NewPersister(s.sessionDir(sess.ID)); perr == nil {
+		if p, perr := event.NewPersister(filepath.Join(s.sessionDir(sess.ID), "events")); perr == nil {
 			_ = p.Write(event.Event{
 				Timestamp: now,
 				Source:    event.SourceSystem,
