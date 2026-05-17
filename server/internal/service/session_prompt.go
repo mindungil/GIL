@@ -431,6 +431,19 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 		totalTokensIn += resp.InputTokens
 		totalTokensOut += resp.OutputTokens
 
+		// P33: stream the upstream-separated chain-of-thought BEFORE the
+		// final answer so the user sees what the model was working
+		// through. Not persisted to chat history (the model regenerates
+		// fresh reasoning each turn — replaying old reasoning wastes
+		// tokens and confuses the next-turn context).
+		if resp.Reasoning != "" {
+			if err := stream.Send(&gilv1.Part{
+				Body: &gilv1.Part_Reasoning{Reasoning: &gilv1.ReasoningDelta{Content: resp.Reasoning}},
+			}); err != nil {
+				return err
+			}
+		}
+
 		// Stream any text the LLM emitted on this turn.
 		if resp.Text != "" {
 			if err := stream.Send(&gilv1.Part{

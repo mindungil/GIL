@@ -169,6 +169,16 @@ func Run(ctx context.Context, cfg Config) error {
 						gotAny = true
 						lastEndedWithNewline = strings.HasSuffix(clean, "\n")
 					}
+				case "reasoning":
+					// P33: separated chain-of-thought from the upstream.
+					// Same ESC-strip as final text (model could echo bytes
+					// from a hostile file into its reasoning trace too).
+					if msg.Text != "" {
+						clean := sanitizeAssistantChunk(msg.Text)
+						cfg.Renderer.AssistantReasoning(clean)
+						gotAny = true
+						lastEndedWithNewline = strings.HasSuffix(clean, "\n")
+					}
 				case "event":
 					if !lastEndedWithNewline {
 						cfg.Renderer.AssistantText("\n")

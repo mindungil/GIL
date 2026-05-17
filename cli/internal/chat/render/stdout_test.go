@@ -44,6 +44,28 @@ func TestStdout_AssistantText_AppendsAsIs(t *testing.T) {
 	require.Equal(t, "hello world", buf.String())
 }
 
+// P33: AssistantReasoning prefixes every non-empty line with "[think]"
+// so the user can scan the transcript and tell reasoning apart from
+// the final answer. Multi-line input gets the prefix per line; empty
+// chunks are no-ops.
+func TestStdout_AssistantReasoning_PrefixesEveryLine(t *testing.T) {
+	r, buf := newStdoutForTest(t)
+	r.AssistantReasoning("first thought\nsecond thought")
+	got := buf.String()
+	require.Contains(t, got, "[think]")
+	require.Contains(t, got, "first thought")
+	require.Contains(t, got, "second thought")
+	// Both lines must carry the prefix — count occurrences.
+	require.Equal(t, 2, strings.Count(got, "[think]"),
+		"expected [think] on both reasoning lines; got %q", got)
+}
+
+func TestStdout_AssistantReasoning_EmptyIsNoop(t *testing.T) {
+	r, buf := newStdoutForTest(t)
+	r.AssistantReasoning("")
+	require.Empty(t, buf.String())
+}
+
 func TestStdout_StatusStrip_Idle(t *testing.T) {
 	r, buf := newStdoutForTest(t)
 	r.StatusStrip(SessionState{Phase: PhaseIdle})

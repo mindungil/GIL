@@ -66,6 +66,14 @@ type SpecView struct {
 type Renderer interface {
 	Banner(state SessionState)
 	AssistantText(chunk string)
+	// AssistantReasoning surfaces upstream-separated chain-of-thought
+	// (e.g. vLLM `reasoning`, DeepSeek `reasoning_content`, Anthropic
+	// extended-thinking) with distinct styling from AssistantText so
+	// the user can tell the model's internal monologue apart from its
+	// final reply. Implementations may dim, indent, or hide reasoning
+	// behind a toggle; the contract is "do not let it be mistaken for
+	// the actual answer". P33.
+	AssistantReasoning(chunk string)
 	SystemNote(kind NoteKind, msg string)
 	StatusStrip(state SessionState)
 	PromptCue()

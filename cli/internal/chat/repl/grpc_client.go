@@ -235,6 +235,13 @@ func (g *GRPCClient) drainPromptStream(
 			if b.Text != nil && b.Text.GetContent() != "" {
 				msgCh <- Message{Kind: "text", Text: b.Text.GetContent()}
 			}
+		case *gilv1.Part_Reasoning:
+			// P33: upstream-separated reasoning. Render as a distinct
+			// message kind so the loop can style it differently from
+			// the final answer (default: dim prefix, no persistence).
+			if b.Reasoning != nil && b.Reasoning.GetContent() != "" {
+				msgCh <- Message{Kind: "reasoning", Text: b.Reasoning.GetContent()}
+			}
 		case *gilv1.Part_ToolCall:
 			if b.ToolCall != nil {
 				msgCh <- Message{Kind: "event", Event: TrackerInput{

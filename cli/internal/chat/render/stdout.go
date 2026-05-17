@@ -45,6 +45,32 @@ func (r *StdoutChatRenderer) AssistantText(chunk string) {
 	fmt.Fprint(r.out, chunk)
 }
 
+// AssistantReasoning prints the model's separated chain-of-thought
+// with a dim "[think]" prefix on each non-empty line, so the user can
+// scan the transcript and tell reasoning apart from the final answer
+// at a glance. Empty chunks (or chunks that are only whitespace) are
+// emitted as-is to preserve streaming-cadence cues from the model.
+// P33.
+func (r *StdoutChatRenderer) AssistantReasoning(chunk string) {
+	if chunk == "" {
+		return
+	}
+	prefix := r.p.Dim("[think] ")
+	// Split on newlines so we can prefix EVERY line of multi-line
+	// reasoning, not just the first. Trailing newline survives the
+	// split as an empty tail element that we emit verbatim.
+	lines := strings.Split(chunk, "\n")
+	for i, line := range lines {
+		if i > 0 {
+			fmt.Fprintln(r.out)
+		}
+		if line == "" {
+			continue
+		}
+		fmt.Fprint(r.out, prefix, r.p.Dim(line))
+	}
+}
+
 func (r *StdoutChatRenderer) StatusStrip(s SessionState) {
 	var body string
 	switch s.Phase {

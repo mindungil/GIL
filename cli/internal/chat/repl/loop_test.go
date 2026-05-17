@@ -212,6 +212,57 @@ func TestLoop_PreservesWireOrder_TextBetweenEvents(t *testing.T) {
 		"text1 must render before event1; got %v", rendered)
 }
 
+// P33: a "reasoning" Message dispatches to AssistantReasoning, not
+// AssistantText. Order matters — reasoning streamed before final
+// answer must render in the same wire order.
+func TestLoop_Reasoning_DispatchesToAssistantReasoning(t *testing.T) {
+	mock := render.NewMockRenderer()
+	fc := &fakeClient{sessionID: "01TEST"}
+	fc.messages = []Message{
+		{Kind: "reasoning", Text: "let me think through this..."},
+		{Kind: "text", Text: "the answer is 42"},
+	}
+	in := strings.NewReader("hi\nquit\n")
+	err := Run(context.Background(), Config{In: in, Renderer: mock, Client: fc})
+	require.NoError(t, err)
+
+	var reasoningIdx, textIdx int = -1, -1
+	for i, c := range mock.Calls {
+		if c.Method == "AssistantReasoning" && reasoningIdx == -1 {
+			reasoningIdx = i
+			require.Equal(t, "let me think through this...", c.Text)
+		}
+		if c.Method == "AssistantText" && c.Text == "the answer is 42" && textIdx == -1 {
+			textIdx = i
+		}
+	}
+	require.NotEqual(t, -1, reasoningIdx, "AssistantReasoning never called")
+	require.NotEqual(t, -1, textIdx, "AssistantText for answer never called")
+	require.Less(t, reasoningIdx, textIdx,
+		"reasoning must render before final answer; got order %v", mock.MethodSequence())
+}
+
+// P33: ESC bytes in reasoning chunks get stripped at the same chokepoint
+// as text — a hostile file echoed into the model's reasoning could still
+// repaint the terminal otherwise.
+func TestLoop_Reasoning_StripsEscSequences(t *testing.T) {
+	mock := render.NewMockRenderer()
+	fc := &fakeClient{sessionID: "01TEST"}
+	fc.messages = []Message{
+		{Kind: "reasoning", Text: "step\x1b[2K1\nstep\x072"},
+	}
+	in := strings.NewReader("hi\nquit\n")
+	err := Run(context.Background(), Config{In: in, Renderer: mock, Client: fc})
+	require.NoError(t, err)
+	for _, c := range mock.Calls {
+		if c.Method != "AssistantReasoning" {
+			continue
+		}
+		require.NotContains(t, c.Text, "\x1b")
+		require.NotContains(t, c.Text, "\x07")
+	}
+}
+
 // iter118a regression: assistant text chunks must have ESC + DEL
 // stripped before reaching the renderer. Newlines must survive.
 func TestLoop_AssistantText_StripsEscSequences(t *testing.T) {
