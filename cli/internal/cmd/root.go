@@ -215,6 +215,7 @@ func Root() *cobra.Command {
 
 	addCmd(mcpCmd(), "tools")
 	addCmd(permissionsCmd(), "tools")
+	addCmd(memoryCmd(), "tools")
 
 	addCmd(daemonCmd(), "maint")
 	addCmd(updateCmd(), "maint")
