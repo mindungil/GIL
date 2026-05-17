@@ -48,6 +48,7 @@ them with the corresponding ` + "`gil`" + ` command first.`,
 	c.AddCommand(sessionListCmd())
 	c.AddCommand(sessionRmCmd())
 	c.AddCommand(sessionShowCmd())
+	c.AddCommand(sessionOrphansCmd())
 	return c
 }
 
