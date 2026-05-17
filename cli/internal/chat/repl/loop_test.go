@@ -75,13 +75,29 @@ func TestLoop_BarePrompt_SendsAndRendersAssistant(t *testing.T) {
 }
 
 func TestLoop_TerminalExit_BareWordExits(t *testing.T) {
-	for _, word := range []string{"quit", "exit", "bye", "QUIT", "/quit", "/exit"} {
+	for _, word := range []string{"quit", "exit", "bye", "QUIT"} {
 		mock := render.NewMockRenderer()
 		fc := &fakeClient{}
 		in := strings.NewReader(word + "\n")
 		err := Run(context.Background(), Config{In: in, Renderer: mock, Client: fc})
 		require.NoError(t, err, "exit word %q should clean-quit", word)
 		require.Empty(t, fc.sentPrompts, "exit word %q must not be sent to the daemon", word)
+	}
+}
+
+// iter210: slash-prefixed exit forms were dropped — the natural-language
+// single-surface contract has no slash escape hatch. They now forward
+// to the daemon like any other input. Users who used to type /quit can
+// type quit (bare) or hit Ctrl+D (EOF).
+func TestLoop_SlashExitForms_ForwardLikeAnyText(t *testing.T) {
+	for _, slash := range []string{"/quit", "/exit"} {
+		mock := render.NewMockRenderer()
+		fc := &fakeClient{}
+		in := strings.NewReader(slash + "\n")
+		err := Run(context.Background(), Config{In: in, Renderer: mock, Client: fc})
+		require.NoError(t, err)
+		require.Equal(t, []string{slash}, fc.sentPrompts,
+			"slash exit %q must forward to daemon — no client-side recognition", slash)
 	}
 }
 

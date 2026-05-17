@@ -13,14 +13,16 @@ import (
 )
 
 // isTerminalExit reports whether a bare line should exit the REPL.
-// Per docs/design/chat-architecture.md §3.1, terminal exit is the
-// ONE client-side recognition that survives the slash-removal pass —
-// the chat surface never matches strings to verbs otherwise. Slash-
-// prefixed forms (`/quit`, `/exit`) also exit so users with the
-// muscle memory don't get punished.
+// Per docs/design/chat-architecture.md §3.1 (and the user-stated rule
+// "슬래시 escape hatch도 없음"), terminal exit is the ONE client-side
+// recognition that survives the slash-removal pass — the chat surface
+// never matches strings to verbs otherwise. No slash-prefixed forms:
+// the recognition is on the bare English word so the natural-language
+// posture stays intact. Users with slash muscle memory can still type
+// the bare word or hit Ctrl+D (EOF).
 func isTerminalExit(line string) bool {
 	switch strings.ToLower(strings.TrimSpace(line)) {
-	case "quit", "exit", "bye", "/quit", "/exit":
+	case "quit", "exit", "bye":
 		return true
 	}
 	return false
