@@ -12,6 +12,32 @@ import (
 	"github.com/mindungil/gil/cli/internal/errmap"
 )
 
+// isDaemonGoneErr reports whether err looks like the daemon went
+// away mid-session (gild process gone, socket missing, gRPC channel
+// errored as Unavailable). Used by the REPL loop to exit cleanly
+// rather than spinning forever on every subsequent input. Match
+// strings rather than typed errors to avoid pulling in grpc/codes
+// at this layer (the loop is decoupled from the SDK boundary).
+func isDaemonGoneErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	for _, sig := range []string{
+		"unavailable",
+		"connection refused",
+		"connection reset",
+		"no such file or directory", // socket gone
+		"broken pipe",
+		"transport: error while dialing",
+	} {
+		if strings.Contains(msg, sig) {
+			return true
+		}
+	}
+	return false
+}
+
 // isTerminalExit reports whether a bare line should exit the REPL.
 // Per docs/design/chat-architecture.md §3.1 (and the user-stated rule
 // "슬래시 escape hatch도 없음"), terminal exit is the ONE client-side
@@ -127,6 +153,16 @@ func Run(ctx context.Context, cfg Config) error {
 			return nil
 		}
 		if err := cfg.Client.SendPrompt(ctx, line); err != nil {
+			// P53: if the daemon has disappeared mid-session (UDS
+			// socket gone / Unavailable / connection refused), exit
+			// cleanly instead of looping the prompt forever. Without
+			// this, a `pkill gild` while a chat is open produced
+			// thousands of "send failed" lines until stdin EOF.
+			if isDaemonGoneErr(err) {
+				cfg.Renderer.SystemNote(render.NoteSystem,
+					"daemon disappeared mid-session — exiting. Restart gild and re-run gil chat to resume.")
+				return fmt.Errorf("daemon unavailable: %w", err)
+			}
 			cfg.Renderer.SystemNote(render.NoteSystem,
 				"send failed: "+errmap.FormatForChat(err))
 			continue
@@ -146,6 +182,17 @@ func Run(ctx context.Context, cfg Config) error {
 			for {
 				msg, more, err := cfg.Client.NextMessage(ctx)
 				if err != nil {
+					// P53: daemon-gone on the stream side too. The
+					// SendPrompt path catches the first attempt after
+					// the daemon dies; this catches the case where the
+					// daemon dies mid-stream (after SendPrompt returned
+					// fine). Exit cleanly instead of continuing the
+					// outer prompt loop just to fail SendPrompt next.
+					if isDaemonGoneErr(err) {
+						cfg.Renderer.SystemNote(render.NoteSystem,
+							"daemon disappeared mid-stream — exiting. Restart gild and re-run gil chat to resume.")
+						return fmt.Errorf("daemon unavailable mid-stream: %w", err)
+					}
 					cfg.Renderer.SystemNote(render.NoteSystem,
 						"stream error: "+humanizeStreamErr(err))
 					streamErrored = true

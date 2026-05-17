@@ -338,3 +338,51 @@ func indexOf(s []string, needle string) int {
 	}
 	return -1
 }
+
+// P53: when SendPrompt returns a "daemon disappeared" error
+// (Unavailable / connection refused / socket gone), the REPL must
+// exit cleanly with a single system note. Without this, the loop
+// kept hitting send-failed for every subsequent input.
+type daemonGoneClient struct {
+	fakeClient
+	sendErr error
+}
+
+func (d *daemonGoneClient) SendPrompt(_ context.Context, prompt string) error {
+	d.sentPrompts = append(d.sentPrompts, prompt)
+	return d.sendErr
+}
+
+func TestLoop_SendPrompt_DaemonGone_ExitsCleanly(t *testing.T) {
+	for _, errMsg := range []string{
+		"rpc error: code = Unavailable desc = connection error",
+		"dial unix /tmp/gild.sock: connect: connection refused",
+		"transport: error while dialing: socket no such file or directory",
+		"write: broken pipe",
+	} {
+		t.Run(errMsg, func(t *testing.T) {
+			mock := render.NewMockRenderer()
+			fc := &daemonGoneClient{sendErr: errors.New(errMsg)}
+			// Send a prompt; SendPrompt will return the daemon-gone error.
+			in := strings.NewReader("hi\n")
+			err := Run(context.Background(), Config{In: in, Renderer: mock, Client: fc})
+			require.Error(t, err, "loop must return an error on daemon-gone")
+			require.Contains(t, err.Error(), "daemon unavailable")
+			// Exactly ONE SendPrompt attempted (no loop-forever).
+			require.Len(t, fc.sentPrompts, 1)
+		})
+	}
+}
+
+func TestLoop_SendPrompt_OtherError_KeepsLooping(t *testing.T) {
+	// Non-daemon errors (e.g. validation) should still note + continue,
+	// matching the pre-P53 behavior for everything except the
+	// daemon-disappeared signal.
+	mock := render.NewMockRenderer()
+	fc := &daemonGoneClient{sendErr: errors.New("bad request: empty prompt")}
+	// Provide stdin with one input then EOF; the loop should attempt
+	// SendPrompt, note the error, then read EOF and exit clean (nil err).
+	in := strings.NewReader("hi\n")
+	err := Run(context.Background(), Config{In: in, Renderer: mock, Client: fc})
+	require.NoError(t, err, "non-daemon errors should not terminate the loop with an error")
+}
