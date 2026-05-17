@@ -615,6 +615,12 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 	needsVerify := false
 	verifyRetries := 0
 	const maxVerifyRetries = 2
+	// P50: track the last verify call's error content so the turn-cap
+	// C1 backstop can surface "which check failed" in the
+	// verify_missing message instead of a generic hint. Empty when
+	// verify was never called (agent did write_file but never
+	// attempted verify).
+	var lastVerifyErr string
 
 	// P39: per-Prompt chat stuck tracker. Records each tool-call
 	// signature (sha256 of name+input) as it fires. When three
@@ -800,6 +806,14 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 			if call.Name == "verify" && !result.IsError {
 				needsVerify = false
 			}
+			// P50: capture the last failed verify output so the C1
+			// backstop's verify_missing message can surface it. Users
+			// hitting the turn cap with broken code (P48 dogfood
+			// pattern) get an actionable hint about WHICH check
+			// failed instead of a generic "you never verified" line.
+			if call.Name == "verify" && result.IsError {
+				lastVerifyErr = result.Content
+			}
 			if err := stream.Send(&gilv1.Part{
 				Body: &gilv1.Part_ToolResult{ToolResult: &gilv1.ToolResultPart{
 					CallId:  call.ID,
@@ -840,8 +854,20 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 	// tool call is still un-verified, surface the same
 	// FailedPrecondition the no-tool-calls path would have.
 	if needsVerify {
+		// P50: more actionable message. When verify was attempted at
+		// least once and failed, surface a truncated tail of the
+		// failure so the user re-prompts with concrete context. When
+		// verify was never attempted, keep the existing generic line.
 		msg := "agent turn cap reached but a code-changing tool call (write_file/edit_file/apply_patch) " +
 			"was never followed by a successful verify; turn aborted"
+		if lastVerifyErr != "" {
+			tail := lastVerifyErr
+			if len(tail) > 400 {
+				tail = "…" + tail[len(tail)-400:]
+			}
+			tail = strings.ReplaceAll(tail, "\n", " · ")
+			msg = "agent turn cap reached with a failing verify. Last verify output: " + tail
+		}
 		_ = stream.Send(&gilv1.Part{
 			Body: &gilv1.Part_Text{Text: &gilv1.TextDelta{Content: "[system] verify_missing: " + msg}},
 		})

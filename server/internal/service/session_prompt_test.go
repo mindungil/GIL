@@ -240,3 +240,38 @@ func (f *fakeContentTool) schema() json.RawMessage { return json.RawMessage(`{}`
 func (f *fakeContentTool) run(_ context.Context, _ string, _ json.RawMessage) (provider.ToolResult, error) {
 	return f.out, nil
 }
+
+// P50: when the agent calls verify and it fails, then hits the turn
+// cap, the verify_missing message includes a tail of the verify
+// output so the user can re-prompt with concrete context. Without
+// P50 the user only saw "you never verified" which mis-describes
+// the situation.
+func TestPrompt_LoopCapHitWithFailedVerify_BackstopIncludesLastOutput(t *testing.T) {
+	// Sequence: write, verify (fails), write, verify (fails), … until cap.
+	var turns []provider.MockTurn
+	for i := 0; i < 5; i++ {
+		turns = append(turns,
+			provider.MockTurn{
+				ToolCalls: []provider.ToolCall{{
+					ID: "w" + string(rune('0'+i)), Name: "write_file",
+					Input: []byte(`{"path":"f` + string(rune('0'+i)) + `.go","content":"package x\n"}`),
+				}},
+			},
+			provider.MockTurn{
+				ToolCalls: []provider.ToolCall{{
+					ID: "v" + string(rune('0'+i)), Name: "verify",
+					Input: []byte(`{"command":"false","description":"deliberate fail"}`),
+				}},
+			},
+		)
+	}
+	svc, sid := newTestSessionServiceWithMockTurns(t, turns)
+	stream := &fakePromptStream{ctx: context.Background()}
+	err := svc.Prompt(promptReq(sid, "write and verify-fail loop"), stream)
+	if err == nil {
+		t.Fatalf("expected verify_missing error; got nil")
+	}
+	if !strings.Contains(err.Error(), "Last verify output") {
+		t.Fatalf("expected message to include 'Last verify output' tail; got: %v", err)
+	}
+}
