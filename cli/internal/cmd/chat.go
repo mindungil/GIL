@@ -17,21 +17,16 @@ import (
 	"github.com/mindungil/gil/sdk"
 )
 
-// noIntentRouter, when true, bypasses the §2.6(b) verb router and
-// forwards every prompt straight to the daemon. Set by the
-// --no-intent-router flag on bare gil. Defaults false (router on).
-var noIntentRouter bool
-
 // chatCmd returns the explicit `gil chat` entrypoint. It is also the
 // implementation behind bare `gil` invocation when stdout is a TTY (see
 // root.go's RunE shim) — calling it directly is for users who want the
 // chat surface even when their stdout is piped (e.g. tee'd into a log).
 //
-// chat is the V1 chat surface for gil. It collapses the previous
-// verb-routing UI into a single REPL: the user types prompts in free
-// text, slash commands manage session lifecycle (/sessions /switch /new
-// /spec /status /diff /merge /run /quit /help), and a tracker maps
-// daemon events to a one-line status strip rendered between turns.
+// chat is the single natural-language surface for gil. The user types
+// what they want in free text; the daemon-side agent loop owns all
+// verb dispatch via tools (show_diff, freeze_spec, start_run, …).
+// There is no client-side routing and no slash-command escape hatch —
+// every prompt streams straight to the daemon.
 //
 // Pre-daemon onboarding (no-init / no-creds short-circuit) lives in
 // chat_onboarding.go and is gated by detectPreDaemonState BEFORE the
@@ -148,11 +143,6 @@ func runChat(cmd *cobra.Command, socket, providerName, model string) error {
 	renderer := render.NewStdoutChatRenderer(out, in, asciiMode, noColor)
 	defer renderer.Close()
 
-	// The intent router is gone (see core/intent/router.go header).
-	// noIntentRouter flag is still parsed for backwards-compatibility
-	// with shell history but has no effect now — every prompt forwards
-	// to the daemon's agent loop.
-	_ = noIntentRouter
 	return repl.Run(ctx, repl.Config{
 		In:       in,
 		Renderer: renderer,
