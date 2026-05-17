@@ -199,6 +199,7 @@ func Root() *cobra.Command {
 	// which is gone. Spec inspection moves into the chat agent's
 	// show_spec tool.
 	addCmd(runCmd(), "advanced")
+	addCmd(resumeCmd(), "advanced")
 	addCmd(watchCmd(), "advanced")
 	addCmd(eventsCmd(), "advanced")
 	// specCmd removed (see comment above interview/resume).
