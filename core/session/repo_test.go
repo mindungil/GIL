@@ -111,3 +111,24 @@ func TestRepo_UpdateStatus(t *testing.T) {
 
 	require.ErrorIs(t, repo.UpdateStatus(ctx, "nonexistent", "x"), ErrNotFound)
 }
+
+// iter133c: UpdateTotals persists final token + cost snapshot so
+// post-run readers (wait_agent, list_sessions, gil status) see real
+// values after the in-memory progress tracker is torn down.
+func TestRepo_UpdateTotals(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	defer db.Close()
+	repo := NewRepo(db)
+
+	s, err := repo.Create(ctx, CreateInput{WorkingDir: "/x"})
+	require.NoError(t, err)
+	require.NoError(t, repo.UpdateTotals(ctx, s.ID, 12345, 0.0789))
+
+	got, err := repo.Get(ctx, s.ID)
+	require.NoError(t, err)
+	require.Equal(t, int64(12345), got.TotalTokens)
+	require.InEpsilon(t, 0.0789, got.TotalCostUSD, 0.0001)
+
+	require.ErrorIs(t, repo.UpdateTotals(ctx, "ghost-sid", 1, 2), ErrNotFound)
+}

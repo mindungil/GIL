@@ -1006,7 +1006,19 @@ func (s *RunService) executeRun(
 	// the run → chat handoff. Streams are reaped only when the
 	// daemon shuts down.
 	defer func() {
+		// iter133c: snapshot final tokens / cost to the persisted row
+		// BEFORE deleting the in-memory tracker so post-run readers
+		// (wait_agent, list_sessions, gil status) see real values rather
+		// than zeros. Best-effort — a write error here is not fatal to
+		// the run-completion flow.
 		s.mu.Lock()
+		snap := s.runProgress[sessionID]
+		var finalTokens int64
+		var finalCost float64
+		if snap != nil {
+			finalTokens = snap.tokens
+			finalCost = snap.cost
+		}
 		delete(s.runProgress, sessionID)
 		delete(s.runLoops, sessionID)
 		delete(s.runCancels, sessionID)
@@ -1017,6 +1029,11 @@ func (s *RunService) executeRun(
 			delete(s.pendingClarifications, sessionID)
 		}
 		s.mu.Unlock()
+		if finalTokens > 0 || finalCost > 0 {
+			// Use a fresh ctx so the persist isn't cancelled by the
+			// parent run ctx that just expired.
+			_ = s.repo.UpdateTotals(context.Background(), sessionID, finalTokens, finalCost)
+		}
 		metrics.SessionsRunning.Dec()
 	}()
 

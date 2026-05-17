@@ -189,6 +189,28 @@ func (r *Repo) UpdateStatus(ctx context.Context, id, status string) error {
 	return nil
 }
 
+// UpdateTotals persists the final token / cost snapshot for a session.
+// Called by RunService at run-completion so wait_agent and other
+// post-run readers don't see zeros after the in-memory progress
+// tracker has been torn down. iter133c: closes the race where the
+// runProgress entry was deleted before any consumer saw the totals.
+func (r *Repo) UpdateTotals(ctx context.Context, id string, totalTokens int64, totalCostUSD float64) error {
+	res, err := r.db.ExecContext(ctx,
+		`UPDATE sessions SET total_tokens = ?, total_cost_usd = ?, updated_at = ? WHERE id = ?`,
+		totalTokens, totalCostUSD, time.Now().UTC(), id)
+	if err != nil {
+		return fmt.Errorf("session.UpdateTotals: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("session.UpdateTotals rowsAffected: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // ListChildren returns sessions whose parent_session_id matches parentID.
 // Order is created_at ascending — earliest spawned first, which matches
 // how a parent agent reasons about its child fleet ("first the explorer,
