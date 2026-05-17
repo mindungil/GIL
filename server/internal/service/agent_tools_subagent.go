@@ -343,7 +343,7 @@ func (t *toolWaitAgent) run(ctx context.Context, parentSessionID string, argsJSO
 		}
 		if isTerminalStatus(child.Status) {
 			t.sess.releaseSubagent(childID)
-			return provider.ToolResult{Content: renderSubagentFinal(child)}, nil
+			return provider.ToolResult{Content: renderSubagentFinal(child, t.sess.progress, t.sess.budgets)}, nil
 		}
 		if time.Now().After(deadline) {
 			return provider.ToolResult{Content: fmt.Sprintf(
@@ -427,10 +427,29 @@ func isTerminalStatus(s string) bool {
 // renderSubagentFinal builds the wait_agent return text. Keep it terse
 // so the parent agent can include it in its own summary without
 // blowing the context window.
-func renderSubagentFinal(s session.Session) string {
+//
+// iter133a: session.TotalTokens/TotalCostUSD on the row are never
+// written by the run path (token + cost live in the in-memory
+// progress/budgets trackers on SessionService, not on the persisted
+// row), so reading them always produced "tokens=0 cost=$0.0000".
+// Read from the live trackers when available — falling back to the
+// row values keeps backwards-compatibility for the legacy code path.
+func renderSubagentFinal(s session.Session, prog ProgressGetter, bg BudgetGetter) string {
+	tokens := s.TotalTokens
+	costUSD := s.TotalCostUSD
+	if prog != nil {
+		if _, t, ok := prog.Progress(s.ID); ok && t > tokens {
+			tokens = t
+		}
+	}
+	if bg != nil {
+		if c, _, _, ok := bg.Budget(s.ID); ok && c > costUSD {
+			costUSD = c
+		}
+	}
 	return fmt.Sprintf(
 		"subagent finished · label=%s · agent_id=%s · status=%s · tokens=%d · cost=$%.4f",
-		s.SubagentLabel, s.ID, s.Status, s.TotalTokens, s.TotalCostUSD,
+		s.SubagentLabel, s.ID, s.Status, tokens, costUSD,
 	)
 }
 

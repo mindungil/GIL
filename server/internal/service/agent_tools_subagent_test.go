@@ -144,3 +144,37 @@ func sessionCreateChild(parentID, label string) session.CreateInput {
 		SubagentLabel:   label,
 	}
 }
+
+// iter133a: session.TotalTokens / TotalCostUSD on the persisted row
+// are not maintained by the run path, so reading them returned
+// "tokens=0 cost=$0.0000" even after a real run. renderSubagentFinal
+// now consults the live trackers; the row values stay as a fallback.
+type fakeProgress struct{ tokens int64 }
+
+func (f fakeProgress) Progress(string) (int32, int64, bool) { return 0, f.tokens, true }
+
+type fakeBudget struct{ cost float64 }
+
+func (f fakeBudget) Budget(string) (float64, bool, string, bool) {
+	return f.cost, false, "", true
+}
+
+func TestRenderSubagentFinal_ReadsLiveTrackers(t *testing.T) {
+	s := session.Session{
+		ID: "abc", SubagentLabel: "explorer", Status: "done",
+		TotalTokens: 0, TotalCostUSD: 0,
+	}
+	got := renderSubagentFinal(s, fakeProgress{tokens: 1234}, fakeBudget{cost: 0.0123})
+	require.Contains(t, got, "tokens=1234")
+	require.Contains(t, got, "cost=$0.0123")
+}
+
+func TestRenderSubagentFinal_FallsBackToRowWhenTrackersAbsent(t *testing.T) {
+	s := session.Session{
+		ID: "abc", SubagentLabel: "explorer", Status: "done",
+		TotalTokens: 999, TotalCostUSD: 0.5,
+	}
+	got := renderSubagentFinal(s, nil, nil)
+	require.Contains(t, got, "tokens=999")
+	require.Contains(t, got, "cost=$0.5000")
+}
