@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -47,22 +48,46 @@ import (
 // clients over to SessionService.Prompt; M3 deletes the interview
 // engine entirely.
 
-// chatHistory holds the running message log per session for the V1
-// chat agent loop. Keyed by session ID. Lives only in process memory
-// — daemon restart wipes the conversation. Persistent storage is a
-// follow-up within M1.
+// chatHistory holds the running message log per session for the chat
+// agent loop. Keyed by session ID. P34 added optional durable backing
+// via the chat_messages table — when SetDB has been called, append
+// writes through and get hydrates on first access after a daemon
+// restart. When db is nil the store behaves as the pre-P34 in-memory
+// version (existing tests that don't wire a Repo keep working
+// untouched).
 type chatHistory struct {
 	mu  sync.Mutex
 	all map[string][]provider.Message
+	// db is the optional durable backing (P34). When nil, append/get/reset
+	// behave as the pre-P34 in-memory-only chatHistory. Set via SetDB.
+	db *sql.DB
+	// loaded tracks which session IDs have been hydrated from DB so the
+	// next access skips the SELECT. Presence-only set; same pattern as
+	// workingSet (P30) — see agent_tools_verbs.go.
+	loaded map[string]struct{}
 }
 
 func newChatHistory() *chatHistory {
-	return &chatHistory{all: make(map[string][]provider.Message)}
+	return &chatHistory{
+		all:    make(map[string][]provider.Message),
+		loaded: make(map[string]struct{}),
+	}
+}
+
+// SetDB attaches a *sql.DB to the store. Pass nil to detach (tests).
+// Safe to call multiple times; the loaded set is reset so the next
+// access rehydrates against the new backing.
+func (h *chatHistory) SetDB(db *sql.DB) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.db = db
+	h.loaded = make(map[string]struct{})
 }
 
 func (h *chatHistory) get(sid string) []provider.Message {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	h.ensureLoadedLocked(sid)
 	src := h.all[sid]
 	out := make([]provider.Message, len(src))
 	copy(out, src)
@@ -72,16 +97,112 @@ func (h *chatHistory) get(sid string) []provider.Message {
 func (h *chatHistory) append(sid string, msg provider.Message) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	h.ensureLoadedLocked(sid)
+	seq := len(h.all[sid])
 	h.all[sid] = append(h.all[sid], msg)
+	h.persistAppendLocked(sid, seq, msg)
 }
 
 // reset clears the message log for sid so a subsequent Prompt starts
 // the agent loop with no prior context. Used by the reset_session
 // verb tool (§2.6) when the user asks to "start over" or "clear chat".
+// P34: also wipes the per-session chat_messages rows so a restart
+// after reset doesn't resurrect the cleared history.
 func (h *chatHistory) reset(sid string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	delete(h.all, sid)
+	delete(h.loaded, sid)
+	h.persistResetLocked(sid)
+}
+
+// ensureLoadedLocked hydrates h.all[sid] from DB on first hit after a
+// SetDB call. Caller holds h.mu. No-op when db is nil. Hydration
+// preserves seq order via ORDER BY seq ASC — the table PK guarantees
+// uniqueness so the loaded slice ends up byte-identical to what append
+// wrote turn-by-turn. Silent failure: pre-restart state is
+// unrecoverable for this session but the in-memory store stays
+// consistent.
+func (h *chatHistory) ensureLoadedLocked(sid string) {
+	if h.loaded == nil {
+		h.loaded = make(map[string]struct{})
+	}
+	if h.db == nil {
+		return
+	}
+	if _, done := h.loaded[sid]; done {
+		return
+	}
+	rows, err := h.db.Query(`SELECT role, content, tool_calls, tool_results
+        FROM chat_messages WHERE session_id = ? ORDER BY seq ASC`, sid)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	var hydrated []provider.Message
+	for rows.Next() {
+		var role, content, toolCallsJSON, toolResultsJSON string
+		if err := rows.Scan(&role, &content, &toolCallsJSON, &toolResultsJSON); err != nil {
+			return
+		}
+		msg := provider.Message{
+			Role:    provider.Role(role),
+			Content: content,
+		}
+		if toolCallsJSON != "" {
+			var calls []provider.ToolCall
+			if err := json.Unmarshal([]byte(toolCallsJSON), &calls); err == nil {
+				msg.ToolCalls = calls
+			}
+		}
+		if toolResultsJSON != "" {
+			var results []provider.ToolResult
+			if err := json.Unmarshal([]byte(toolResultsJSON), &results); err == nil {
+				msg.ToolResults = results
+			}
+		}
+		hydrated = append(hydrated, msg)
+	}
+	if len(hydrated) > 0 {
+		h.all[sid] = hydrated
+	}
+	h.loaded[sid] = struct{}{}
+}
+
+// persistAppendLocked writes a single message row. Caller holds h.mu.
+// Silent failure: durability is best-effort and the in-memory store
+// remains authoritative within the daemon's lifetime. tool_calls /
+// tool_results columns are JSON-encoded slices; nil/empty slices
+// serialize to "" so the columns stay readable for sessions that
+// never call tools.
+func (h *chatHistory) persistAppendLocked(sid string, seq int, msg provider.Message) {
+	if h.db == nil {
+		return
+	}
+	var toolCallsJSON, toolResultsJSON string
+	if len(msg.ToolCalls) > 0 {
+		if b, err := json.Marshal(msg.ToolCalls); err == nil {
+			toolCallsJSON = string(b)
+		}
+	}
+	if len(msg.ToolResults) > 0 {
+		if b, err := json.Marshal(msg.ToolResults); err == nil {
+			toolResultsJSON = string(b)
+		}
+	}
+	_, _ = h.db.Exec(`INSERT INTO chat_messages
+        (session_id, seq, role, content, tool_calls, tool_results)
+        VALUES (?, ?, ?, ?, ?, ?)`,
+		sid, seq, string(msg.Role), msg.Content, toolCallsJSON, toolResultsJSON)
+}
+
+// persistResetLocked deletes every chat_messages row for sid. Caller
+// holds h.mu. Silent failure (same rationale as persistAppendLocked).
+func (h *chatHistory) persistResetLocked(sid string) {
+	if h.db == nil {
+		return
+	}
+	_, _ = h.db.Exec(`DELETE FROM chat_messages WHERE session_id = ?`, sid)
 }
 
 // WithProviderFactory wires the same ProviderFactory used by Run /
@@ -868,12 +989,17 @@ func addSecretsFromDotenv(path string) {
 // chatHistory lazily allocates the message log map. Stored on the
 // service struct via a method-level singleton instead of constructor
 // wiring so existing test setups (NewSessionService(repo, nil)) keep
-// compiling without churn.
+// compiling without churn. P34: when the SessionService has a Repo,
+// the store is auto-wired with the underlying *sql.DB on first
+// allocation so append/get/reset survive a daemon restart.
 func (s *SessionService) chatHistory() *chatHistory {
 	s.chatHistMu.Lock()
 	defer s.chatHistMu.Unlock()
 	if s.chatHist == nil {
 		s.chatHist = newChatHistory()
+		if s.repo != nil {
+			s.chatHist.SetDB(s.repo.DB())
+		}
 	}
 	return s.chatHist
 }

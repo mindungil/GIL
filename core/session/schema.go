@@ -8,7 +8,7 @@ import (
 
 // currentSchemaVersion is the latest schema version. When new migrations
 // are added, this constant must be incremented to match the new version.
-const currentSchemaVersion = 4
+const currentSchemaVersion = 5
 
 // migrations is a slice of SQL migration strings, indexed by version-1.
 // For example, migrations[0] is the SQL for version 1, migrations[1] is for
@@ -81,6 +81,31 @@ var migrations = []string{
 
 	CREATE INDEX IF NOT EXISTS idx_workingset_entries_session
 		ON workingset_entries(session_id);
+	`,
+	// v5 — chat_messages persistence (P34). chatHistory previously held
+	// the per-session message log in a sync.Map on SessionService; daemon
+	// restart silently wiped every in-progress conversation. The table
+	// backs the per-session list with write-through inserts and
+	// hydrate-on-first-access, identical pattern to workingset_entries.
+	// PK (session_id, seq) makes ordering explicit (seq is a 0-based
+	// monotonic counter per session, set by chatHistory.append). tool_calls
+	// and tool_results are JSON-encoded slices; empty string means no
+	// entries. CacheControl is intentionally NOT persisted — it's per-turn
+	// state recomputed by core/compact.MarkCacheBreakpoints every Prompt.
+	`
+	CREATE TABLE IF NOT EXISTS chat_messages (
+		session_id   TEXT NOT NULL,
+		seq          INTEGER NOT NULL,
+		role         TEXT NOT NULL,
+		content      TEXT NOT NULL DEFAULT '',
+		tool_calls   TEXT NOT NULL DEFAULT '',
+		tool_results TEXT NOT NULL DEFAULT '',
+		created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		PRIMARY KEY (session_id, seq)
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_chat_messages_session
+		ON chat_messages(session_id);
 	`,
 }
 
