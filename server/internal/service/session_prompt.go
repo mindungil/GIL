@@ -25,28 +25,24 @@ import (
 	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
 )
 
-// session_prompt.go is the M1 cut of the chat-architecture migration
-// (docs/design/chat-architecture.md). It introduces SessionService.Prompt
-// as the single chat-surface entry point: every natural-language input
-// from cli REPL or TUI flows through here, the daemon runs an agent
-// loop, and Parts stream back.
+// session_prompt.go owns SessionService.Prompt — the single chat-surface
+// entry point (docs/design/chat-architecture.md). Every natural-language
+// input from cli REPL or TUI flows through here, the daemon runs an
+// agent loop with the chat tool registry, and Parts stream back: TextDelta
+// chunks, ToolCallPart / ToolResultPart pairs, SessionAllocatedPart on
+// the first auto-create call, PromptMetrics snapshots, ReasoningDelta
+// when the upstream emits it (P33), and DonePart.
 //
-// V1 scope (this commit):
-//   - auto-create session when PromptRequest.session_id is empty
-//   - in-memory per-session message history (sync.Map keyed by id)
-//   - one provider.Complete call per Prompt — no tool registry yet
-//   - whole assistant response streams as one TextDelta + Metrics + DonePart
-//
-// What's deliberately missing here, deferred to subsequent M1 commits:
-//   - tool registry (show_diff, apply_diff, freeze_spec, start_run, ...)
-//   - multi-turn agent loop (consume tool_call → tool_result → re-call LLM)
-//   - chunked text streaming (split the model's text into multiple TextDeltas)
-//   - persistent chat history (currently lost on daemon restart)
-//   - subagent / spec-build flows
-//
-// The InterviewService stays in place for now; M2 swaps the chat
-// clients over to SessionService.Prompt; M3 deletes the interview
-// engine entirely.
+// What lives here:
+//   - chatHistory: per-session provider.Message log. P34 made it durable
+//     via the chat_messages SQLite table (see chatHistory.SetDB and
+//     ensureLoadedLocked below). Write-through on every append; hydrates
+//     on first access after a daemon restart.
+//   - defaultChatSystemPrompt: the base system prompt sent to the chat
+//     agent. Lists tool families and workflow guidance.
+//   - redact{KnownSecrets,InlineSecretShapes}: secret-scrubbing applied
+//     to user text before it reaches the LLM (iter36a/93a/156).
+//   - Prompt RPC implementation itself, further down.
 
 // chatHistory holds the running message log per session for the chat
 // agent loop. Keyed by session ID. P34 added optional durable backing
