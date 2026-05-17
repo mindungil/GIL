@@ -424,8 +424,14 @@ type RestoreResponse struct {
 	CommitSha        string                 `protobuf:"bytes,1,opt,name=commit_sha,json=commitSha,proto3" json:"commit_sha,omitempty"`
 	CommitMessage    string                 `protobuf:"bytes,2,opt,name=commit_message,json=commitMessage,proto3" json:"commit_message,omitempty"`
 	TotalCheckpoints int32                  `protobuf:"varint,3,opt,name=total_checkpoints,json=totalCheckpoints,proto3" json:"total_checkpoints,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	// Files whose tracked content changed between the pre-restore HEAD and
+	// the target checkpoint. Empty when the restore was a no-op (target ==
+	// pre-restore HEAD). Capped at 50 entries on the server side; truncated
+	// lists set `changed_files_truncated = true`.
+	ChangedFiles          []string `protobuf:"bytes,4,rep,name=changed_files,json=changedFiles,proto3" json:"changed_files,omitempty"`
+	ChangedFilesTruncated bool     `protobuf:"varint,5,opt,name=changed_files_truncated,json=changedFilesTruncated,proto3" json:"changed_files_truncated,omitempty"`
+	unknownFields         protoimpl.UnknownFields
+	sizeCache             protoimpl.SizeCache
 }
 
 func (x *RestoreResponse) Reset() {
@@ -477,6 +483,20 @@ func (x *RestoreResponse) GetTotalCheckpoints() int32 {
 		return x.TotalCheckpoints
 	}
 	return 0
+}
+
+func (x *RestoreResponse) GetChangedFiles() []string {
+	if x != nil {
+		return x.ChangedFiles
+	}
+	return nil
+}
+
+func (x *RestoreResponse) GetChangedFilesTruncated() bool {
+	if x != nil {
+		return x.ChangedFilesTruncated
+	}
+	return false
 }
 
 type AnswerPermissionRequest struct {
@@ -1096,12 +1116,14 @@ const file_gil_v1_run_proto_rawDesc = "" +
 	"\x0eRestoreRequest\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x12\n" +
-	"\x04step\x18\x02 \x01(\x05R\x04step\"\x84\x01\n" +
+	"\x04step\x18\x02 \x01(\x05R\x04step\"\xe1\x01\n" +
 	"\x0fRestoreResponse\x12\x1d\n" +
 	"\n" +
 	"commit_sha\x18\x01 \x01(\tR\tcommitSha\x12%\n" +
 	"\x0ecommit_message\x18\x02 \x01(\tR\rcommitMessage\x12+\n" +
-	"\x11total_checkpoints\x18\x03 \x01(\x05R\x10totalCheckpoints\"\xa5\x01\n" +
+	"\x11total_checkpoints\x18\x03 \x01(\x05R\x10totalCheckpoints\x12#\n" +
+	"\rchanged_files\x18\x04 \x03(\tR\fchangedFiles\x126\n" +
+	"\x17changed_files_truncated\x18\x05 \x01(\bR\x15changedFilesTruncated\"\xa5\x01\n" +
 	"\x17AnswerPermissionRequest\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x1d\n" +

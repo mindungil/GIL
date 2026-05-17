@@ -492,6 +492,12 @@ func TestRunService_Restore_RollsBackWorkspace(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "v1", string(got))
 
+	// P32: step=1 was a real rollback (v2 → v1), so changed_files
+	// must include file.txt — no silent discontinuity.
+	require.Contains(t, resp.ChangedFiles, "file.txt",
+		"step=1 from v2 should report file.txt as changed; got %v", resp.ChangedFiles)
+	require.False(t, resp.ChangedFilesTruncated)
+
 	// Restore to step=-1 (latest) → file should be "v2".
 	resp2, err := svc.Restore(ctx, &gilv1.RestoreRequest{SessionId: s.ID, Step: -1})
 	require.NoError(t, err)
@@ -501,6 +507,17 @@ func TestRunService_Restore_RollsBackWorkspace(t *testing.T) {
 	got2, err := os.ReadFile(filepath.Join(workDir, "file.txt"))
 	require.NoError(t, err)
 	require.Equal(t, "v2", string(got2))
+
+	// P32: step=-1 reverses step=1's restore — file.txt changed again.
+	require.Contains(t, resp2.ChangedFiles, "file.txt")
+
+	// P32: restoring to the SAME commit we just landed on is a no-op;
+	// changed_files must be empty so renderRestoreResult skips the
+	// WORKSPACE CHANGED warning.
+	resp3, err := svc.Restore(ctx, &gilv1.RestoreRequest{SessionId: s.ID, Step: -1})
+	require.NoError(t, err)
+	require.Empty(t, resp3.ChangedFiles, "no-op restore must report empty changed_files")
+	require.False(t, resp3.ChangedFilesTruncated)
 }
 
 func TestRunService_Restore_RejectsRunning(t *testing.T) {

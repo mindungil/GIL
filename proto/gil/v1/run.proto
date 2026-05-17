@@ -132,6 +132,12 @@ message RestoreResponse {
   string commit_sha     = 1;
   string commit_message = 2;
   int32  total_checkpoints = 3;
+  // Files whose tracked content changed between the pre-restore HEAD and
+  // the target checkpoint. Empty when the restore was a no-op (target ==
+  // pre-restore HEAD). Capped at 50 entries on the server side; truncated
+  // lists set `changed_files_truncated = true`.
+  repeated string changed_files = 4;
+  bool changed_files_truncated  = 5;
 }
 
 // PermissionDecision encodes the user's full answer to a permission_ask,

@@ -105,6 +105,66 @@ func (s *ShadowGit) Restore(ctx context.Context, commitSHA string) error {
 	return err
 }
 
+// HeadSHA returns the current HEAD commit SHA. Useful when a caller
+// needs to capture the pre-restore state so it can diff against the
+// restore target afterwards. Returns "" without error when the shadow
+// repo has no commits yet (matches ListCommits' fresh-init behavior).
+func (s *ShadowGit) HeadSHA(ctx context.Context) (string, error) {
+	out, err := s.gitCmd(ctx, "rev-parse", "HEAD")
+	if err != nil {
+		if strings.Contains(err.Error(), "does not have any commits yet") ||
+			strings.Contains(err.Error(), "ambiguous argument 'HEAD'") ||
+			strings.Contains(err.Error(), "unknown revision") {
+			return "", nil
+		}
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
+}
+
+// ChangedFiles returns the set of tracked files whose content differs
+// between two commits, in `git diff --name-only` order. Either side may
+// be "" — meaning "no commit on that side" — and the function returns an
+// empty list without error (treated as a no-op diff). Caller bounds the
+// result if it needs a cap.
+func (s *ShadowGit) ChangedFiles(ctx context.Context, fromSHA, toSHA string) ([]string, error) {
+	if fromSHA == "" || toSHA == "" || fromSHA == toSHA {
+		return nil, nil
+	}
+	out, err := s.gitCmd(ctx, "diff", "--name-only", fromSHA, toSHA)
+	if err != nil {
+		return nil, err
+	}
+	out = strings.TrimSpace(out)
+	if out == "" {
+		return nil, nil
+	}
+	return strings.Split(out, "\n"), nil
+}
+
+// FilesDiffFromWorktree returns tracked files where the working tree
+// differs from the given commit — i.e. the files that would change if
+// we checked targetSHA back into the workspace. Differs from
+// ChangedFiles (which is commit-vs-commit) because previous Restore
+// calls update the workspace without moving HEAD, so commit-vs-commit
+// can falsely report "no change" even when the visible files would
+// shift. Used by the Restore path to surface a discontinuity warning
+// that matches what the agent actually sees on disk.
+func (s *ShadowGit) FilesDiffFromWorktree(ctx context.Context, targetSHA string) ([]string, error) {
+	if targetSHA == "" {
+		return nil, nil
+	}
+	out, err := s.gitCmd(ctx, "diff", "--name-only", targetSHA)
+	if err != nil {
+		return nil, err
+	}
+	out = strings.TrimSpace(out)
+	if out == "" {
+		return nil, nil
+	}
+	return strings.Split(out, "\n"), nil
+}
+
 // Reset HARD-resets HEAD and the working tree to commitSHA — equivalent to
 // `git reset --hard <sha>`. Use Reset for stuck-recovery rollbacks where the
 // agent needs a clean slate at the target commit; use Restore for less

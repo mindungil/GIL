@@ -1626,13 +1626,35 @@ func (s *RunService) Restore(ctx context.Context, req *gilv1.RestoreRequest) (*g
 			"step %d out of range (have %d checkpoints)", req.Step, len(commits))
 	}
 	target := commits[idx]
+	// P32: enumerate files that will actually flip under the agent —
+	// the diff between the *current working tree* and the target commit,
+	// not HEAD-vs-target. `git checkout <sha> -- .` (in Restore) updates
+	// the workspace without moving HEAD, so a prior Restore call could
+	// leave HEAD claiming we're at sha2 while the visible files match
+	// sha1. The agent cares about what changes on disk, so compare
+	// workspace against target. Non-fatal on error.
+	preChanged, _ := sg.FilesDiffFromWorktree(ctx, target.SHA)
 	if err := sg.Restore(ctx, target.SHA); err != nil {
 		return nil, status.Errorf(codes.Internal, "restore: %v", err)
 	}
+	// Cap so a huge rollback doesn't bloat the agent's tool result past
+	// the loop's context budget. 50 paths is enough for the agent to
+	// spot patterns; truncation is signaled separately.
+	const changedFilesCap = 50
+	var changed []string
+	var truncated bool
+	if len(preChanged) > changedFilesCap {
+		changed = preChanged[:changedFilesCap]
+		truncated = true
+	} else {
+		changed = preChanged
+	}
 	return &gilv1.RestoreResponse{
-		CommitSha:        target.SHA,
-		CommitMessage:    target.Message,
-		TotalCheckpoints: int32(len(commits)),
+		CommitSha:             target.SHA,
+		CommitMessage:         target.Message,
+		TotalCheckpoints:      int32(len(commits)),
+		ChangedFiles:          changed,
+		ChangedFilesTruncated: truncated,
 	}, nil
 }
 

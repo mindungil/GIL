@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/mindungil/gil/core/provider"
+	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
 )
 
 // agent_tools_verbs_test.go covers the §2.6 verb-tool wave at unit
@@ -230,6 +231,53 @@ func TestToolRestoreCheckpoint_RejectsBadJSON(t *testing.T) {
 	res, err := r.run(context.Background(), "s1", json.RawMessage(`not json`))
 	require.NoError(t, err)
 	require.True(t, res.IsError)
+}
+
+// P32: renderRestoreResult emits a loud WORKSPACE CHANGED warning + a
+// changed-files enumeration so the agent treats prior in-conversation
+// assumptions as stale. No-op restores (target == prior HEAD) skip the
+// warning and report unchanged content instead.
+func TestRenderRestoreResult_WithChangedFiles(t *testing.T) {
+	resp := &gilv1.RestoreResponse{
+		CommitSha:        "abcdef1234567890",
+		CommitMessage:    "checkpoint at iter 5",
+		TotalCheckpoints: 4,
+		ChangedFiles:     []string{"main.go", "calc/calc.go"},
+	}
+	got := renderRestoreResult(resp)
+	require.Contains(t, got, "restored to abcdef12")
+	require.Contains(t, got, `"checkpoint at iter 5"`)
+	require.Contains(t, got, "WORKSPACE STATE CHANGED")
+	require.Contains(t, got, "re-read the affected files")
+	require.Contains(t, got, "main.go")
+	require.Contains(t, got, "calc/calc.go")
+	require.Contains(t, got, "changed files (2)")
+	require.NotContains(t, got, "more changed files omitted")
+}
+
+func TestRenderRestoreResult_TruncatedList(t *testing.T) {
+	resp := &gilv1.RestoreResponse{
+		CommitSha:             "deadbeefcafebabe",
+		CommitMessage:         "big rollback",
+		TotalCheckpoints:      10,
+		ChangedFiles:          []string{"a", "b", "c"},
+		ChangedFilesTruncated: true,
+	}
+	got := renderRestoreResult(resp)
+	require.Contains(t, got, "more changed files omitted")
+}
+
+func TestRenderRestoreResult_NoOpRestore(t *testing.T) {
+	resp := &gilv1.RestoreResponse{
+		CommitSha:        "abcdef12",
+		CommitMessage:    "self-target",
+		TotalCheckpoints: 1,
+		ChangedFiles:     nil,
+	}
+	got := renderRestoreResult(resp)
+	require.Contains(t, got, "restored to abcdef12")
+	require.Contains(t, got, "tracked content unchanged")
+	require.NotContains(t, got, "WORKSPACE STATE CHANGED")
 }
 
 // --- helpers ------------------------------------------------------

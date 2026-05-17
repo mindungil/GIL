@@ -458,12 +458,47 @@ func (t *toolRestoreCheckpoint) run(ctx context.Context, sessionID string, argsJ
 		}
 		return provider.ToolResult{Content: "restore failed: " + es, IsError: true}, nil
 	}
-	return provider.ToolResult{Content: fmt.Sprintf(
-		"restored to %s · %q (%d total checkpoints)",
-		resp.GetCommitSha()[:min(len(resp.GetCommitSha()), 8)],
-		strings.TrimSpace(resp.GetCommitMessage()),
-		resp.GetTotalCheckpoints(),
-	)}, nil
+	return provider.ToolResult{Content: renderRestoreResult(resp)}, nil
+}
+
+// renderRestoreResult formats the RestoreResponse into the tool result
+// the agent loop sees. Beyond the bare checkpoint header it injects a
+// loud WORKSPACE CHANGED warning + the list of files that flipped, so
+// the agent treats prior conversation assumptions (file contents,
+// freshly-read snippets, plan steps that reference specific lines) as
+// stale instead of acting on them. The agent's next move should be to
+// re-read affected files or, when the goal itself drifted, surface the
+// discontinuity to the user and ask whether to re-freeze the spec.
+// Roadmap S2: "Workspace rollback safety net" (post-v0.2.0).
+func renderRestoreResult(resp *gilv1.RestoreResponse) string {
+	var b strings.Builder
+	sha := resp.GetCommitSha()
+	if len(sha) > 8 {
+		sha = sha[:8]
+	}
+	fmt.Fprintf(&b, "restored to %s · %q (%d total checkpoints)\n\n",
+		sha, strings.TrimSpace(resp.GetCommitMessage()), resp.GetTotalCheckpoints())
+
+	changed := resp.GetChangedFiles()
+	if len(changed) == 0 {
+		// No file delta means the workspace was already at the target
+		// commit; no discontinuity to flag.
+		b.WriteString("workspace tracked content unchanged (target == prior HEAD).")
+		return strings.TrimRight(b.String(), "\n")
+	}
+
+	b.WriteString("**WORKSPACE STATE CHANGED**: Files in the session's working directory were rolled back. ")
+	b.WriteString("Any assumption you made in this conversation about file contents above is now stale. ")
+	b.WriteString("Before any further edit, re-read the affected files. If the user's goal references specific lines or symbols that just shifted, surface the discontinuity and ask whether to re-freeze the spec.\n\n")
+
+	fmt.Fprintf(&b, "changed files (%d):\n", len(changed))
+	for _, f := range changed {
+		fmt.Fprintf(&b, "  %s\n", f)
+	}
+	if resp.GetChangedFilesTruncated() {
+		b.WriteString("  … (more changed files omitted; cap is 50)\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 // --- show_instructions -------------------------------------------
