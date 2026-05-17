@@ -268,7 +268,7 @@ func (t *toolShowSpec) name() string { return "show_spec" }
 
 func (t *toolShowSpec) description() string {
 	return "Read the frozen spec for the current session. " +
-		"Returns 'no spec frozen yet' when the session hasn't completed an interview. " +
+		"Returns 'no spec frozen yet' when freeze_spec hasn't been called. " +
 		"Use when the user asks to see the spec, the plan, the brief, or what was agreed."
 }
 
