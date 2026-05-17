@@ -72,6 +72,19 @@ func TestStdout_StatusStrip_Idle(t *testing.T) {
 	require.Equal(t, "[idle · type a prompt to start a new session]\n", buf.String())
 }
 
+// P49: idle strip with non-zero spend surfaces tokens + cost so the
+// user sees accumulated cost between turns. Zero values fall back to
+// the default idle text (TestStdout_StatusStrip_Idle above pins that).
+func TestStdout_StatusStrip_Idle_WithSpend(t *testing.T) {
+	r, buf := newStdoutForTest(t)
+	r.StatusStrip(SessionState{
+		Phase:   PhaseIdle,
+		Tokens:  4231,
+		CostUSD: 0.0123,
+	})
+	require.Equal(t, "[idle · 4.2k · $0.0123 · type a prompt to continue]\n", buf.String())
+}
+
 // iter211: PhaseInterview / PhaseAwaitingConfirm removed (interview
 // engine deleted in M3). The strip no longer has dedicated phases for
 // interview / awaiting-confirm; tests for those were dropped with the

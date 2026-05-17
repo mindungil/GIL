@@ -78,7 +78,14 @@ func (r *StdoutChatRenderer) StatusStrip(s SessionState) {
 		// §2.6: keep the idle strip free of slash-jargon. Discovery of
 		// past sessions is handled by the entry self-disclosure, not by
 		// telling the user to memorize a slash command.
+		// P49: surface running tokens/cost when non-zero so the user
+		// sees spend accumulate across chat turns between prompts.
+		// Default empty when no turns yet; concise format when present.
 		body = "idle · type a prompt to start a new session"
+		if s.Tokens > 0 || s.CostUSD > 0 {
+			body = fmt.Sprintf("idle · %s · $%.4f · type a prompt to continue",
+				formatTokens(s.Tokens), s.CostUSD)
+		}
 	case PhaseRun:
 		body = formatRunStrip(s)
 	case PhaseStuck:

@@ -18,6 +18,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/mindungil/gil/core/cost"
 	"github.com/mindungil/gil/core/event"
 	"github.com/mindungil/gil/core/paths"
 	"github.com/mindungil/gil/core/provider"
@@ -852,11 +853,20 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 		return status.Errorf(codes.FailedPrecondition, "%s", msg)
 	}
 
-	// 6. Metrics + Done.
+	// 6. Metrics + Done. P49: include cost_usd so the chat surface
+	// can show running spend instead of just token counts. Best-effort
+	// — unknown models (not in the embedded catalog) just return 0
+	// and the surface degrades gracefully to tokens-only.
+	costCalc := cost.NewCalculator()
+	turnCost, _ := costCalc.Estimate(modelID, cost.Usage{
+		InputTokens:  totalTokensIn,
+		OutputTokens: totalTokensOut,
+	})
 	if err := stream.Send(&gilv1.Part{
 		Body: &gilv1.Part_Metrics{Metrics: &gilv1.PromptMetrics{
 			TokensIn:  totalTokensIn,
 			TokensOut: totalTokensOut,
+			CostUsd:   turnCost,
 			LatencyMs: totalLatency.Milliseconds(),
 		}},
 	}); err != nil {

@@ -166,5 +166,12 @@ func (t *Tracker) Apply(in TrackerInput) {
 		if in.LatencyMs > 0 {
 			t.s.LatencyMs = in.LatencyMs
 		}
+		// P49: accumulate per-turn cost into the session running
+		// total. Each prompt.metrics carries the cost for ONE turn,
+		// not the lifetime — sum them so the status strip / banner
+		// reflects total spend across the chat session.
+		if in.CostUSD > 0 {
+			t.s.CostUSD += in.CostUSD
+		}
 	}
 }

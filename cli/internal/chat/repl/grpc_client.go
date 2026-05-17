@@ -276,6 +276,7 @@ func (g *GRPCClient) drainPromptStream(
 					Kind:      "prompt.metrics",
 					SessionID: g.activeSess,
 					Tokens:    b.Metrics.GetTokensIn() + b.Metrics.GetTokensOut(),
+					CostUSD:   b.Metrics.GetCostUsd(),
 					LatencyMs: b.Metrics.GetLatencyMs(),
 				}}
 			}
