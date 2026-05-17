@@ -8,7 +8,7 @@ import (
 
 // currentSchemaVersion is the latest schema version. When new migrations
 // are added, this constant must be incremented to match the new version.
-const currentSchemaVersion = 5
+const currentSchemaVersion = 6
 
 // migrations is a slice of SQL migration strings, indexed by version-1.
 // For example, migrations[0] is the SQL for version 1, migrations[1] is for
@@ -106,6 +106,27 @@ var migrations = []string{
 
 	CREATE INDEX IF NOT EXISTS idx_chat_messages_session
 		ON chat_messages(session_id);
+	`,
+	// v6 — session_memories: cross-session memory bank (P55). Lets the
+	// chat agent persist short notes ("user prefers tabs", "auth module
+	// uses session_token") that get auto-surfaced into the next chat
+	// session's system prompt. Per design: id PRIMARY KEY (not
+	// session_id+seq) because per-prompt rendering takes recent-N across
+	// all sessions, not per-session ordering. content capped at 500 chars
+	// by the toolRemember enforcement; the column is TEXT to keep the
+	// schema simple.
+	`
+	CREATE TABLE IF NOT EXISTS session_memories (
+		id          INTEGER PRIMARY KEY AUTOINCREMENT,
+		session_id  TEXT NOT NULL,
+		content     TEXT NOT NULL,
+		created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_session_memories_created
+		ON session_memories(created_at);
+	CREATE INDEX IF NOT EXISTS idx_session_memories_session
+		ON session_memories(session_id);
 	`,
 }
 

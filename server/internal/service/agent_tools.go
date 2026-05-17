@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -182,8 +183,23 @@ func (s *SessionService) buildChatToolRegistry(runSvc *RunService, parentProvide
 			&toolShowInstructions{sess: s},
 			&toolExportSession{sess: s},
 			&toolResetSession{sess: s},
+			// P55 cross-session memory bank — see agent_tools_memory.go.
+			// Lazy-wires the DB from the repo at registration time so
+			// test setups without a repo silently degrade (the tool
+			// returns "noted (no durable storage wired)").
+			&toolRemember{db: rememberDB(s)},
 		},
 	}
+}
+
+// rememberDB extracts the *sql.DB for the toolRemember wiring. Wrapped
+// in a tiny helper so test code can pass a SessionService with nil
+// repo without panicking.
+func rememberDB(s *SessionService) *sql.DB {
+	if s == nil || s.repo == nil {
+		return nil
+	}
+	return s.repo.DB()
 }
 
 // runRegistryRunService fetches the daemon's RunService instance.

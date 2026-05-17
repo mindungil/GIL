@@ -598,6 +598,15 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 	//    calls (StopReason="end_turn") or we hit the iteration cap.
 	const maxAgentTurns = 8
 	systemPrompt := fmt.Sprintf(agent.SystemPrompt, provName, modelID, sessionID)
+	// P55: prepend recent cross-session memories so the agent has
+	// continuity across sessions. Best-effort: nil DB or query
+	// failures just skip the block; the agent runs with the base
+	// system prompt unchanged.
+	if s.repo != nil {
+		if memBlock := renderMemoriesForPrompt(loadRecentMemories(ctx, s.repo.DB())); memBlock != "" {
+			systemPrompt = memBlock + systemPrompt
+		}
+	}
 	var totalTokensIn, totalTokensOut int64
 	var totalLatency time.Duration
 
