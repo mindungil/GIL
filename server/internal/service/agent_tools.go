@@ -155,7 +155,7 @@ func (s *SessionService) buildChatToolRegistry(runSvc *RunService, parentProvide
 			// with InterviewService in M3; without it the system_prompt's
 			// spec slot stays empty.
 			&toolFreezeSpec{sess: s, base: s.sessionsBase},
-			&toolStartRun{rs: runSvc},
+			&toolStartRun{rs: runSvc, parentProvider: parentProvider, parentModel: parentModel},
 			&toolApplyDiff{rs: runSvc, tracker: s.diffTracker},
 			// Subagent delegation (G5) — see agent_tools_subagent.go.
 			// spawn_agent creates a child session with a sliced spec

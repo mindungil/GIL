@@ -364,6 +364,14 @@ func renderFreezeSummary(fs *gilv1.FrozenSpec) string {
 // is the user's call ("how's it going?" → show_status tool).
 type toolStartRun struct {
 	rs *RunService
+	// iter206a: parent chat session's provider/model so the autonomous
+	// run inherits the same backend instead of falling back to the
+	// daemon's "anthropic" default. Without this, a chat session running
+	// on vllm fires start_run and immediately fails with "no credentials
+	// for anthropic". Same defense as iter39a (spawn_agent) applied to a
+	// different lifecycle tool.
+	parentProvider string
+	parentModel    string
 }
 
 func (t *toolStartRun) name() string { return "start_run" }
@@ -426,10 +434,21 @@ func (t *toolStartRun) run(ctx context.Context, sessionID string, argsJSON json.
 		}, nil
 	}
 
+	// iter206a: fall back to the parent chat session's provider/model
+	// when the agent omitted them, so a vllm-backed chat doesn't fire
+	// start_run against the daemon's anthropic default.
+	prov := args.Provider
+	if prov == "" {
+		prov = t.parentProvider
+	}
+	mdl := args.Model
+	if mdl == "" {
+		mdl = t.parentModel
+	}
 	resp, err := t.rs.Start(ctx, &gilv1.StartRunRequest{
 		SessionId: sessionID,
-		Provider:  args.Provider,
-		Model:     args.Model,
+		Provider:  prov,
+		Model:     mdl,
 		Detach:    true,
 	})
 	if err != nil {
