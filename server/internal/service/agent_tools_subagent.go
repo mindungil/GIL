@@ -49,9 +49,11 @@ func (t *toolSpawnAgent) description() string {
 		"frozen spec (workspace, tools, models, verification inherited unless the " +
 		"parent spec restricts them). Returns the child agent_id + label so the " +
 		"parent can call wait_agent later. Subject to daemon-wide concurrency and " +
-		"depth limits — at the V1 cap, parents are root only (children cannot spawn " +
-		"further children). Use for parallel exploration, isolated experiments, or " +
-		"work that benefits from a fresh context."
+		"depth limits — current cap is depth=2 (root → child → grandchild), so a " +
+		"depth=1 child CAN spawn a depth=2 grandchild for deeper decomposition, " +
+		"but depth=2 cannot spawn further. Per-root total is capped at 8 active " +
+		"subagents across the whole tree. Use for parallel exploration, isolated " +
+		"experiments, or work that benefits from a fresh context."
 }
 
 func (t *toolSpawnAgent) schema() json.RawMessage {
@@ -197,12 +199,16 @@ func (t *toolSpawnAgent) run(ctx context.Context, parentSessionID string, argsJS
 	// S8 — child runner's system_prompt picks up Goal.Detailed via the
 	// standard spec-injection path, so we encode the subagent context
 	// here instead of plumbing a parallel hint slot through AgentLoop.
+	childDepth := parentSess.SubagentDepth + 1
+	spawnHint := "You can spawn one more layer of subagents (depth cap is 2)."
+	if childDepth >= subagentMaxDepth {
+		spawnHint = "Do not call spawn_agent — you are at the depth cap and cannot spawn further children."
+	}
 	subagentHint := fmt.Sprintf(
-		"You are a subagent of session %s (label=%s, depth=%d). "+
+		"You are a subagent of session %s (label=%s, depth=%d of max %d). "+
 			"You do not have access to the parent's conversation. "+
-			"Complete the task below and report a terse summary in your final message. "+
-			"Do not call spawn_agent — subagents cannot spawn further children (V1 depth cap).",
-		parentSess.ID, args.Label, parentSess.SubagentDepth+1,
+			"Complete the task below and report a terse summary in your final message. %s",
+		parentSess.ID, args.Label, childDepth, subagentMaxDepth, spawnHint,
 	)
 	childSpec.Goal = &gilv1.Goal{
 		OneLiner: args.Task,

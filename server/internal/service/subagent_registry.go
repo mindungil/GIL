@@ -28,10 +28,17 @@ const (
 	// can be moved to a config slot later if dogfood needs it.
 	subagentMaxPerRoot = 8
 	// subagentMaxDepth caps recursion (parent → child → grandchild …).
-	// V1 hard cap is 1 (root can spawn children but children cannot
-	// spawn further) per design §6.2 — relax once a real use case for
-	// grandchildren shows up.
-	subagentMaxDepth = 1
+	// V1 hard cap was 1 (root can spawn children but children cannot
+	// spawn further). P40 lifts to 2 so a top-level coordinator can
+	// spawn sub-coordinators that themselves spawn workers — the natural
+	// shape of complex autonomous work (e.g. "split a refactor into
+	// per-module subagents, each of which farms out per-file edits").
+	// Per-root fork-bomb safety is still subagentMaxPerRoot=8 across
+	// the whole tree; per-session budget caps are still enforced via
+	// the spec's Budget.MaxTotalTokens / MaxCostUSD. Going beyond
+	// depth=2 would need a per-depth concurrent cap to stay safe;
+	// future phase.
+	subagentMaxDepth = 2
 )
 
 // errSubagentLimitReached is returned to spawn_agent when the registry
@@ -128,8 +135,10 @@ func resolveRootSessionID(ctx context.Context, repo *session.Repo, sess session.
 	if sess.ParentSessionID == "" {
 		return sess.ID, nil
 	}
-	// V1 maxDepth=1 → at most 2 hops. Keep a small loop budget so a
-	// future maxDepth bump doesn't need a code change here.
+	// P40 maxDepth=2 → at most 3 hops (root → child → grandchild).
+	// hopLimit=8 stays comfortably above that and gives headroom for
+	// future bumps without needing a code change here. A corrupted
+	// parent-link chain trips the limit and surfaces as a clear error.
 	const hopLimit = 8
 	cur := sess
 	for hop := 0; hop < hopLimit; hop++ {

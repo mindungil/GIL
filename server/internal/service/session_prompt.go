@@ -334,7 +334,7 @@ Tools — subagent delegation (call to split work in parallel):
   string the child receives as its first user message. Optional
   agent_type (default / explore / plan) and spec_override (narrows
   workspace / tools / max_iterations). Subject to V1 caps: max 8
-  active children per root, depth 1 only (children cannot spawn
+  active children per root, depth 2 (children CAN spawn one
   further). Returns the child's agent_id + label.
 - wait_agent: block until a spawned child reaches terminal state
   (done / failed / stopped / budget_exceeded). Identify by agent_id
