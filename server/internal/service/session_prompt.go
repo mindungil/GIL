@@ -2,7 +2,9 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -583,6 +585,22 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 	verifyRetries := 0
 	const maxVerifyRetries = 2
 
+	// P39: per-Prompt chat stuck tracker. Records each tool-call
+	// signature (sha256 of name+input) as it fires. When three
+	// consecutive identical signatures appear, we emit a single
+	// stuck_detected event so the chat surface can surface "agent is
+	// looping" to the user. We don't break the loop — maxAgentTurns
+	// already caps it — and we don't recover (the run-time agent
+	// loop's stuck strategies require a freezable spec; chat may not
+	// have one). Observability only. Reset to nil after one signal
+	// per turn so a real productive call sequence after the stuck
+	// run isn't double-flagged.
+	const chatStuckRepeats = 3
+	var (
+		chatCallSigs   []string
+		chatStuckFired bool
+	)
+
 	for turn := 0; turn < maxAgentTurns; turn++ {
 		t0 := time.Now()
 		resp, err := prov.Complete(ctx, provider.Request{
@@ -704,6 +722,31 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 				"name":  call.Name,
 				"input": string(call.Input),
 			})
+			// P39 chat stuck detection: hash (name + input) and check
+			// for consecutive identical calls. Single signal per turn
+			// once the streak fires, then quiet — productive calls
+			// after the stuck run shouldn't double-flag. Surfaces both
+			// as an event (for giltui Tail subscribers + audit) AND as
+			// a visible Part text so the chat user sees the warning
+			// inline without needing a separate observer.
+			if !chatStuckFired {
+				chatCallSigs = append(chatCallSigs, chatStuckSig(call.Name, call.Input))
+				if chatStuckCheck(chatCallSigs, chatStuckRepeats) {
+					emitChatEvent("stuck_detected", event.SourceSystem, event.KindNote, map[string]any{
+						"pattern": "repeated_action_observation",
+						"tool":    call.Name,
+						"count":   chatStuckRepeats,
+						"surface": "chat",
+					})
+					_ = stream.Send(&gilv1.Part{
+						Body: &gilv1.Part_Text{Text: &gilv1.TextDelta{
+							Content: fmt.Sprintf("[system] stuck_detected: %s called %d× with identical input — refine the prompt or stop the run",
+								call.Name, chatStuckRepeats),
+						}},
+					})
+					chatStuckFired = true
+				}
+			}
 			result, runErr := dispatchTool(ctx, registry, sessionID, call)
 			if runErr != nil {
 				result = provider.ToolResult{
@@ -1037,6 +1080,33 @@ func addSecretsFromDotenv(path string) {
 			knownSecretsList = append(knownSecretsList, val)
 		}
 	}
+}
+
+// chatStuckSig returns a short stable signature for a chat-side
+// tool call so the P39 chat stuck detector can compare consecutive
+// invocations without storing the full input JSON. Uses sha256
+// truncated to 8 bytes (16 hex chars) — collision risk is negligible
+// at the 3-call window we check against.
+func chatStuckSig(name string, input []byte) string {
+	h := sha256.Sum256(append([]byte(name+"\x00"), input...))
+	return hex.EncodeToString(h[:8])
+}
+
+// chatStuckCheck reports whether the trailing window of sigs all
+// match — i.e., the same tool-call signature has fired `window`
+// times consecutively. Pure function; tests pin the behavior
+// without spinning up a full chat agent loop.
+func chatStuckCheck(sigs []string, window int) bool {
+	if window <= 0 || len(sigs) < window {
+		return false
+	}
+	tail := sigs[len(sigs)-window:]
+	for _, s := range tail[1:] {
+		if s != tail[0] {
+			return false
+		}
+	}
+	return true
 }
 
 // chatHistory lazily allocates the message log map. Stored on the
