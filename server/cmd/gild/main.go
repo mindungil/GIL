@@ -583,6 +583,12 @@ func newServer(dbPath, sockPath, sessionsBase, authFile string, authMW *auth.Mid
 	} else if reaped > 0 {
 		slog.Info("reaped orphan runs from prior daemon", "count", reaped)
 	}
+	// P38: launch the mid-session orphan sweeper. While the daemon is
+	// running, this catches goroutines that died silently (panic recovered,
+	// hung syscall, OOM-killed child) by checking heartbeat staleness
+	// every sweepInterval. Cancel is wired to ctx via the long-lived
+	// daemon context so the goroutine terminates on shutdown.
+	runSvc.StartMidSessionOrphanSweeper(context.Background())
 	gilv1.RegisterSessionServiceServer(g, service.
 		NewSessionService(repo, runSvc).
 		WithSessionsBase(sessionsBase).

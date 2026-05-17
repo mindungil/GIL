@@ -57,6 +57,13 @@ type runProgressSnap struct {
 	cost           float64
 	budgetExceeded bool
 	budgetReason   string
+	// lastHeartbeat tracks when the agent loop last reported progress.
+	// Used by P38's mid-session orphan detector to flag runs whose
+	// goroutine died silently (panic recovered into errgroup, hung
+	// system call, OOM-killed child). Refreshed on each event the
+	// run's subscriber receives; zero value means "not yet heartbeat
+	// since Start began."
+	lastHeartbeat time.Time
 }
 
 // pendingAsk records everything AnswerPermission needs to dispatch a
@@ -154,6 +161,130 @@ func NewRunService(repo *session.Repo, sessionsBase string, factory ProviderFact
 		runCancels:            make(map[string]context.CancelFunc),
 		mcpClientCache:        make(map[string]*mcpLaunchResult),
 	}
+}
+
+// staleHeartbeatThreshold is how long without a heartbeat refresh a
+// run can sit before the P38 sweeper flags it as mid-session orphan.
+// Picked to be well above any normal LLM call duration (Anthropic
+// streaming on a long turn rarely exceeds 2 minutes) but well below
+// a "user walked away for hours" threshold. 10 minutes gives strong
+// signal without false positives.
+const staleHeartbeatThreshold = 10 * time.Minute
+
+// sweepInterval is how often the mid-session sweeper wakes to scan
+// for stale heartbeats. 2 minutes is a good balance — frequent
+// enough to catch a hung run within a few minutes, infrequent enough
+// to be invisible in profiling.
+const sweepInterval = 2 * time.Minute
+
+// StartMidSessionOrphanSweeper launches a long-lived goroutine that
+// periodically scans running sessions for stale heartbeats and reaps
+// any whose runProgress entry was dropped OR whose lastHeartbeat is
+// older than staleHeartbeatThreshold. Called once at daemon startup
+// after ReapOrphanRuns. The returned cancel func stops the sweeper
+// on daemon shutdown.
+//
+// Why this exists (P38): P36 reaping fires only at daemon startup.
+// A run goroutine that panic-recovers into a hung state, OOMs into
+// a dead state, or whose containing process becomes unresponsive
+// will leave the DB in status='running' but the sweeper here flags
+// it and flips to stopped within ~staleHeartbeatThreshold of the
+// last heartbeat.
+//
+// Best-effort: errors are logged but the loop keeps ticking.
+func (s *RunService) StartMidSessionOrphanSweeper(ctx context.Context) context.CancelFunc {
+	cctx, cancel := context.WithCancel(ctx)
+	go func() {
+		t := time.NewTicker(sweepInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-cctx.Done():
+				return
+			case <-t.C:
+				if reaped := s.sweepStaleHeartbeats(cctx); reaped > 0 {
+					log.Printf("INFO P38 mid-session orphan sweep reaped count=%d", reaped)
+				}
+			}
+		}
+	}()
+	return cancel
+}
+
+// sweepStaleHeartbeats does one pass. Returns count of reaped sessions.
+func (s *RunService) sweepStaleHeartbeats(ctx context.Context) int {
+	if s.repo == nil {
+		return 0
+	}
+	runs, err := s.repo.List(ctx, session.ListOptions{
+		StatusFilter: "running",
+		Limit:        1000,
+	})
+	if err != nil {
+		log.Printf("WARN P38 sweep list: %v", err)
+		return 0
+	}
+	if len(runs) == 0 {
+		return 0
+	}
+	cutoff := time.Now().Add(-staleHeartbeatThreshold)
+	reaped := 0
+	now := time.Now().UTC()
+	for _, sess := range runs {
+		s.mu.Lock()
+		snap, hasProgress := s.runProgress[sess.ID]
+		var stale bool
+		switch {
+		case !hasProgress:
+			// runProgress entry was never created or got dropped —
+			// either way no live goroutine is feeding it.
+			stale = true
+		case snap.lastHeartbeat.IsZero():
+			// Snap exists but never seeded — shouldn't happen post-P38
+			// since Start now seeds with time.Now(), but defensively
+			// treat as stale rather than panicking.
+			stale = true
+		case snap.lastHeartbeat.Before(cutoff):
+			stale = true
+		}
+		s.mu.Unlock()
+		if !stale {
+			continue
+		}
+		// Flip status; the goroutine is dead in some sense even if
+		// the OS thread is still alive. Manual `gil run` re-trigger
+		// is the recovery path.
+		if uerr := s.repo.UpdateStatus(ctx, sess.ID, "stopped"); uerr != nil {
+			log.Printf("WARN P38 reap stale %s: UpdateStatus: %v", sess.ID, uerr)
+			continue
+		}
+		// Audit row mirrors P36's run_orphaned shape but with a
+		// distinct reason so consumers can distinguish startup-reap
+		// from mid-session-reap.
+		if p, perr := event.NewPersister(s.sessionDir(sess.ID)); perr == nil {
+			_ = p.Write(event.Event{
+				Timestamp: now,
+				Source:    event.SourceSystem,
+				Kind:      event.KindNote,
+				Type:      "run_orphaned",
+				Data:      []byte(`{"reason":"stale_heartbeat","prior_status":"running","auto_resume":false}`),
+			})
+			_ = p.Sync()
+			_ = p.Close()
+		}
+		// Clear in-memory entries so a future Start on the same
+		// session id rebuilds them cleanly.
+		s.mu.Lock()
+		delete(s.runProgress, sess.ID)
+		delete(s.runLoops, sess.ID)
+		if cancel, ok := s.runCancels[sess.ID]; ok && cancel != nil {
+			cancel()
+		}
+		delete(s.runCancels, sess.ID)
+		s.mu.Unlock()
+		reaped++
+	}
+	return reaped
 }
 
 // ensureSessionMCPTools resolves the spec allowlist + global/project
@@ -1066,9 +1197,11 @@ func (s *RunService) executeRun(
 	stream := s.ensureSessionStream(sessionID)
 
 	// Register progress snap under the lock. The stream is already
-	// registered by ensureSessionStream.
+	// registered by ensureSessionStream. P38: seed lastHeartbeat with
+	// "now" so the mid-session sweeper doesn't mis-flag a run that
+	// hasn't emitted its first event yet.
 	s.mu.Lock()
-	s.runProgress[sessionID] = &runProgressSnap{}
+	s.runProgress[sessionID] = &runProgressSnap{lastHeartbeat: time.Now()}
 	s.mu.Unlock()
 
 	// Wire provider retry observability. The provider was wrapped in
@@ -1166,6 +1299,11 @@ func (s *RunService) executeRun(
 			s.mu.Lock()
 			snap := s.runProgress[sessionID]
 			if snap != nil {
+				// P38 heartbeat: every event the run emits refreshes
+				// the timestamp. The mid-session sweeper compares
+				// against time.Now() to detect goroutines that died
+				// or hung without writing the status flip.
+				snap.lastHeartbeat = time.Now()
 				if evt.Type == "iteration_start" {
 					snap.iters++
 				}
