@@ -125,6 +125,21 @@ func runChat(cmd *cobra.Command, socket, providerName, model string) error {
 	if abs, err := filepath.Abs(workingDir); err == nil {
 		workingDir = abs
 	}
+	// iter182: fail fast when --working-dir points at a missing or
+	// not-a-directory path. Otherwise the session creates fine but
+	// every file-touching tool (read_file, write_file, run_bash with
+	// cmd.Dir, …) fails for the same root cause, and the agent ends
+	// up in a dead state the user has to abandon. Surface it once at
+	// the client so the user can `mkdir` or re-target before sending
+	// a single prompt.
+	if info, err := os.Stat(workingDir); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("working dir %q does not exist (mkdir it first, or pass --working-dir to a real path)", workingDir)
+		}
+		return fmt.Errorf("working dir %q: %w", workingDir, err)
+	} else if !info.IsDir() {
+		return fmt.Errorf("working dir %q is not a directory", workingDir)
+	}
 	grpcClient := repl.NewGRPCClient(cli, workingDir)
 	grpcClient.SetProvider(providerName, model)
 	defer grpcClient.Close()
