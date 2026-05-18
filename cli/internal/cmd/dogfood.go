@@ -281,6 +281,31 @@ func (r *dogfoodRunner) runOneTurn(ctx context.Context, turn int, prompt string)
 			break
 		}
 		if err != nil {
+			// P61 v2 fix: the daemon sends a Done part (with
+			// StopReason="verify_missing") AND THEN errors the stream
+			// with FailedPrecondition. By the time we see the error
+			// here, the Done was already processed and rec.StopReason
+			// is set — so the error is just the trailing wire signal,
+			// not a fatal condition. Continue normally; the recovery
+			// loop sees verify_missing and injects a fix prompt.
+			//
+			// If rec.StopReason is empty but the error string mentions
+			// verify_missing, synthesize the stop reason so the loop
+			// recovers correctly even when wire ordering differs.
+			if rec.StopReason != "" {
+				break
+			}
+			lower := strings.ToLower(err.Error())
+			if strings.Contains(lower, "verify_missing") || strings.Contains(lower, "code-changing tool call") {
+				rec.StopReason = "verify_missing"
+				// Try to pull the verify tail out of the err message —
+				// the daemon includes "Last verify output: <tail>" in
+				// the message (P50).
+				if idx := strings.Index(err.Error(), "Last verify output:"); idx >= 0 {
+					lastVerifyTail = strings.TrimSpace(err.Error()[idx+len("Last verify output:"):])
+				}
+				break
+			}
 			return rec, fmt.Errorf("stream recv: %w", err)
 		}
 		if alloc := part.GetSessionAllocated(); alloc != nil {
