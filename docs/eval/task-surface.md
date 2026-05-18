@@ -1,0 +1,214 @@
+# Task Surface Measurement
+
+Living document. Measures **where the gil harness amplifies the underlying model
+vs. where it can't**. The goal criterion under test is "drives to goal
+completion" — the one criterion still unquantified.
+
+**Harness under test**: develop @ 907c1f2 (2026-05-18). gil dogfood runner
+(P61/P63b/P63c) with stall detection + assertion-driven recovery + pressure-
+driven compaction.
+
+**Model**: qwen3.6-27b via OSLab vllm (default workspace credential). Single
+model for the first pass. If failures cluster by task pattern → fix harness.
+If failures cluster by reasoning depth → measure ceiling with another model.
+
+---
+
+## Task Slate (8)
+
+Each task: a single prompt file fed to `gil dogfood`, an assert command for
+deterministic PASS, a max-wall budget. Easy → hard gradient.
+
+| #  | Task             | Type                | Surface           | Budget  | Assert                                           |
+|----|------------------|---------------------|-------------------|---------|--------------------------------------------------|
+| 01 | md2html          | new code, single    | text proc         | 15m     | `go test ./...` + 3 fixture HTML files exist     |
+| 02 | json-validator   | new code, single    | schema + CLI      | 20m     | `go test ./...` covering 5 schema cases          |
+| 03 | bug-fix          | modification        | bounded diff      | 15m     | seed test passes + others stay green             |
+| 04 | lru-cache        | algorithmic         | DS, O(1) ops      | 20m     | `go test ./...` 5 scenarios incl. eviction order |
+| 05 | refactor         | multi-file, behav-preserve | integration-lite | 25m | all existing tests pass post-refactor          |
+| 06 | regex-match      | DSL, state machine  | multi-pass        | 30m     | 10 (pattern,input,expected) table-driven cases   |
+| 07 | chess-perft      | algorithmic, deep   | recursion + state | 60m     | perft(3) matches known counts on 2 positions     |
+| 08 | http-kv          | integration         | runtime           | 30m     | 5 curl scenarios + JSON shape checks             |
+
+PASS criteria intentionally deterministic (assert exits non-zero on fail).
+Verdict per task is one of: **PASS / FAIL / INCOMPLETE / STALLED**.
+
+- PASS: assertion green, end_turn clean
+- FAIL: assertion red despite end_turn
+- INCOMPLETE: max_turns or max_wall reached
+- STALLED: 3 consecutive empty re-engagements detected (P63c)
+
+---
+
+## Result Log
+
+Filled in as each task completes. One row per run, append-only.
+
+| #  | Task         | Verdict | Wall    | Turns | Tokens in/out | Failure surface                |
+|----|--------------|---------|---------|-------|---------------|--------------------------------|
+| 01 | md2html      | PASS    | 1m27s   | 2     | 128k / 4.4k   | —                              |
+| 02 | json-validator | PASS  | 3m12s   | 8     | 466k / 9.2k   | —                              |
+| 03 | bug-fix      | PASS    | 19.9s   | 2     | 43k / 0.8k    | —                              |
+| 04 | lru-cache    | PASS    | 52.6s   | 2     | 89k / 2.5k    | —                              |
+| 05 | refactor     | PASS    | 41.5s   | 4     | 92k / 1.8k    | —                              |
+| 06 | regex-match  | PASS    | 3m47s   | 13    | 699k / 10.3k  | turn count ↑↑ — DSL stress     |
+| 07 | chess-perft  | PASS    | 30m1s   | 32    | 8.4M / 20.8k  | first PASS after 4× prior FAIL |
+| 08 | http-kv      | PASS    | 2m23s   | 7     | 272k / 7k     | —                              |
+
+---
+
+## Analysis (slate 1, 2026-05-18)
+
+**Result: 8 / 8 PASS.** Total wall ~42m, ~10M in / 56k out tokens, 70 turns
+combined, $0 (vllm). The strongest dogfood data point gil has produced.
+
+### Falsified hypotheses
+
+- **H1** (multi-file state degrades harness) — **FALSIFIED.** Task 05 (refactor
+  across 3 files) and task 08 (http handler + in-memory store + httptest)
+  both PASSed in <5min and <10 turns.
+- **H2** (3+ sub-objectives blocks verify-loop) — **FALSIFIED.** Chess perft
+  has ~6 piece-type generators + check detection + castling + en-passant +
+  legal-move filter and PASSed in 32 turns.
+- **H3** (stall detection saves tokens on FAIL) — **UNTESTED** (no FAILs).
+- **H4** (deterministic asserts → higher rate) — **CONSISTENT** but
+  unfalsifiable without FAILs.
+
+### Reversal of prior eval
+
+The prior session evaluation (2026-05-18, pre-slate) concluded:
+
+> 검증된 task 표면이 좁다 — 데이터 포인트는 6개고, 솔직히 성공은 md2html과
+> gil-on-gil 두 종류뿐. chess는 model capability boundary.
+
+This slate falsifies both claims. The task surface is wider than the prior
+6 dogfood data points suggested, AND chess-perft-depth-3 is *not* the model
+boundary when the harness has P63 lifted caps + P63b assertion recovery +
+P63c stall detection. The first 4 chess FAILs (P57, P61, v3 cadence-driven
+compaction, P63b) were harness-shaped, not model-shaped.
+
+### Turn-count curve
+
+Healthy stratification by task difficulty:
+
+| Difficulty class            | Turns range | Tasks                 |
+|-----------------------------|-------------|------------------------|
+| Trivial (1-shot)            | 2           | md2html, bug-fix, lru |
+| Moderate (multi-file)       | 4-7         | refactor, http-kv     |
+| DSL / multi-pass reasoning  | 8-13        | json-validator, regex |
+| Deep state machine          | 32          | chess-perft           |
+
+Harness does not waste turns on easy tasks (chunky 60-100s "first turn does
+everything" pattern) and sustains 32 productive turns on hard tasks without
+the compaction-induced wipeout that killed earlier chess runs.
+
+### Ceiling not yet found
+
+8 / 8 PASS means **the harness ceiling lies above this slate**, not at it.
+The data does not say what the harness *can't* do — only what it can.
+
+### Followup options
+
+1. **Push the ceiling** — add 3-4 harder tasks: chess perft(4+) where node
+   counts grow 20× (memory + speed pressure), tiny compiler frontend
+   (lexer + parser + AST + eval), git-style content-addressed store with
+   pack files, distributed-lock primitive with property tests.
+
+2. **Lock in the wins (regression CI)** — wire the 8 PASS tasks into a
+   GitHub Actions matrix that runs on every push to develop. Drift detector
+   for the harness itself. Bigger compounding value once ceiling-finding is
+   done.
+
+3. **Cross-model ceiling check** — run the slate against a second model
+   (claude or different qwen size) to measure how much harness compensates
+   for model size vs how much it inherits ceiling.
+
+Recommend: **1 → 2 → 3.** Find the ceiling first, then CI, then cross-model.
+
+---
+
+## Slate 2 (harder probe, 3 tasks)
+
+Different shapes from slate 1: multi-stage pipeline, algorithmic depth, state-heavy VM. Goal: find where 8/8 starts to fail.
+
+| #  | Task            | Type                      | Surface           | Budget  | Assert        |
+|----|-----------------|---------------------------|-------------------|---------|---------------|
+| 09 | mini-compiler   | 3-stage pipeline          | lex+parse+eval    | 45m     | `go test ./...` covering 8 cases |
+| 10 | bst-delete      | algorithmic (3-case del)  | recursion + stress | 40m    | `go test ./...` incl. 50-seed stress |
+| 11 | bytecode-vm     | state machine + assembler | 2-pass label res  | 45m    | `go test ./...` incl. factorial-via-jumps |
+
+| #  | Task            | Verdict | Wall    | Turns | Tokens in/out | Failure surface |
+|----|-----------------|---------|---------|-------|---------------|-----------------|
+| 09 | mini-compiler   | INCOMPLETE→PASS | 11m→2m34s | 25→1 | 2M→211k / 30k→8k | **death-by-verify** (P65 fix) |
+| 10 | bst-delete      | PASS    | 1m22s   | 1     | 74k / 4.5k    | —               |
+| 11 | bytecode-vm     | FAIL    | 10m39s  | 7     | 253k / 13.2k  | model boundary — self-imposed SWAP, no design rewind |
+
+### Slate 2 findings
+
+**Finding #1 — "Death by verification" harness bug (FIXED via P65).**
+Task 09 first run: 25 turns INCOMPLETE despite `go test ./...` passing
+throughout. Root cause: `recoveryPromptFor` accepted end_turn as "done" only
+when `ToolCallCount == 0`. Productive agents who end each turn with a
+read-only verify call (go test, ls, cat) had `ToolCallCount > 0`, runner
+injected "Continue executing", agent re-verified, loop. Burned full budget.
+
+Fix (`cli/internal/cmd/dogfood.go`): also run user assertions on
+end_turn-with-tools. If green, accept as done. If failed, fall through to
+existing "Continue" prompt. Re-run: **25 turns → 1 turn**, 11m → 2m34s,
+2M tokens → 211k. 10× efficiency improvement, same task.
+
+**Finding #2 — Vacuous-assert false positive (METHODOLOGY).**
+Task 11 first run: `go test ./...` exit 0 with `[no test files]` — agent
+never wrote tests, assertion silently passed. Fix going forward: 3-layer
+assert per task:
+1. `find . -name '*_test.go' -type f | grep .` (test file exists)
+2. `go test ./...` (tests pass)
+3. `go test -count=1 -v ./... 2>&1 | grep -q '^--- PASS:'` (actual PASS line visible)
+
+Slate 1 is not retroactively at risk — manually verified each task wrote
+test files. But slate 3+ MUST use the 3-layer assert.
+
+**Finding #3 — First genuine model boundary (UNFIXED — model-shaped).**
+Task 11 re-run with 3-layer assert: agent wrote `vm_test.go` (213 LOC)
+including a `factorial_5_via_labeled_loop` test that uses a `SWAP` opcode
+the spec doesn't have. Agent's `vm.go` doesn't implement SWAP. Across 7
+turns of P63c-driven recovery, agent never rewinded the design decision —
+instead kept trying to fix surface-level errors. P63c stall detection
+correctly abandoned after 3 consecutive empty re-engagements (saved
+~10+ turns vs the prior wasteful behavior).
+
+This is the first failure attributable to the model, not the harness.
+The prior 4 chess perft FAILs were harness-shaped (cadence compaction,
+heredoc EOF, etc.) — that's now confirmed by this contrast: with the
+harness improvements, chess perft PASSes, but bytecode-vm with a
+self-imposed circular dependency in the test design FAILs.
+
+### Updated assessment after slate 2
+
+| Class                                  | Count | Verdict signature                |
+|----------------------------------------|-------|----------------------------------|
+| Trivial / known-shape (1-4 turns)      | 7     | all PASS, fast                    |
+| Multi-stage / DSL (8-25 turns)         | 3     | all PASS after P65 fix            |
+| Deep state machine (32 turns)          | 1     | PASS (chess perft, prior fail)    |
+| Self-imposed circular dependency       | 1     | FAIL (genuine model boundary)     |
+
+The harness is **stronger than expected**. 10 / 11 PASS. The single FAIL
+is a clean model-boundary diagnosis (agent designs a test that requires
+a feature not in spec, then can't reorient). Harness saved tokens via
+P63c stall detection rather than burning budget.
+
+### Next-step recommendation update
+
+After slate 2 evidence, original next-step ordering (find ceiling → CI →
+cross-model) holds but with adjustments:
+
+1. **Push the ceiling further** with 2-3 more "reorientation-requiring"
+   tasks. Specifically tasks where the agent must (a) discover a bad
+   design choice through testing, and (b) rewrite a chunk of code, not
+   just patch a line. Examples: a graph algorithm where a wrong data
+   structure choice manifests at depth 4+, a state-machine where
+   transitions interact across files.
+2. **CI wiring with 3-layer assert template** — the assert pattern is
+   ready to template; wire 9-10 known-PASS tasks into GitHub Actions.
+3. **Cross-model after CI** — compare qwen3.6-27b reorientation behavior
+   vs another model on task 11.

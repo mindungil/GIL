@@ -243,6 +243,29 @@ func (r *dogfoodRunner) Run(ctx context.Context) (*dogfoodResult, error) {
 			turn, turnRec.StopReason, turnRec.WallMs, turnRec.CostUSD)
 
 		nextPrompt = recoveryPromptFor(turnRec)
+
+		// P65 — accept end_turn early when the user's assertions are
+		// green, even if the last turn had tool calls. Without this,
+		// productive agents who end each turn with read-only verify
+		// calls (go test, ls) trap in "death by verification": the
+		// runner sees ToolCallCount > 0 → injects "Continue executing"
+		// → agent re-verifies → loop burns max_turns despite asserts
+		// being green throughout. Observed at task09 mini-compiler:
+		// 25 turns INCOMPLETE despite `go test ./...` passing
+		// continuously. The assertion is the authoritative "done"
+		// oracle for the user; if it's green, accept the agent's
+		// end_turn.
+		if turnRec.StopReason == "end_turn" && turnRec.ToolCallCount > 0 && len(r.assertCmds) > 0 {
+			if r.runAssertCheck(ctx) == "" {
+				result.Reason = "end_turn"
+				break
+			}
+			// Assertion failed and the agent did real work — reset
+			// the stall counter and let recoveryPromptFor's
+			// "Continue executing your plan" prompt re-engage.
+			consecutiveStalled = 0
+		}
+
 		if nextPrompt == "" {
 			// Agent says it's done. P63b: before believing it, run the
 			// user's assertions. If any fail, inject a recovery prompt
