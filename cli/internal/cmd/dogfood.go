@@ -206,6 +206,16 @@ func (r *dogfoodRunner) Run(ctx context.Context) (*dogfoodResult, error) {
 	deadline := r.startedAt.Add(r.maxWall)
 	result := &dogfoodResult{}
 
+	// P63c: track consecutive empty end_turns AFTER an assertion
+	// failure has triggered re-engagement. v4 chess data showed the
+	// agent can fall into "I'm done" → "you're not done" → "ok still
+	// done" loops where the recovery prompt fizzles and 15+ turns are
+	// wasted on identical 0-tool responses. After 3 such consecutive
+	// empty re-engagements, abandon — the agent is not making progress
+	// and more turns won't help.
+	const maxStalledRecoveries = 3
+	consecutiveStalled := 0
+
 	nextPrompt := r.initial
 	for turn := 1; turn <= r.maxTurns; turn++ {
 		if time.Now().After(deadline) {
@@ -240,8 +250,25 @@ func (r *dogfoodRunner) Run(ctx context.Context) (*dogfoodResult, error) {
 			if len(r.assertCmds) > 0 {
 				failedTail := r.runAssertCheck(ctx)
 				if failedTail != "" {
+					// P63c stall detection: if THIS turn produced no
+					// tool calls AND we already re-engaged on a prior
+					// assertion failure, count it as a stalled
+					// recovery. Three stalls in a row → abandon.
+					if turnRec.ToolCallCount == 0 && consecutiveStalled > 0 {
+						consecutiveStalled++
+					} else if turnRec.ToolCallCount == 0 {
+						consecutiveStalled = 1 // first stall after first assertion fail
+					} else {
+						consecutiveStalled = 0 // real work happened; reset
+					}
+					if consecutiveStalled >= maxStalledRecoveries {
+						result.Reason = "stalled"
+						fmt.Fprintf(r.stdout, "[dogfood] turn %d ABANDONED — %d consecutive empty re-engagements; agent not making progress\n",
+							turn, consecutiveStalled)
+						break
+					}
 					nextPrompt = assertionRecoveryPrompt(failedTail)
-					fmt.Fprintf(r.stdout, "[dogfood] turn %d agent declared done BUT assertion failed — re-engaging\n", turn)
+					fmt.Fprintf(r.stdout, "[dogfood] turn %d agent declared done BUT assertion failed — re-engaging (stalled=%d)\n", turn, consecutiveStalled)
 					continue
 				}
 			}
@@ -497,7 +524,7 @@ func verdictFromReason(r *dogfoodResult) string {
 	switch r.Reason {
 	case "end_turn":
 		return "PASS"
-	case "max_turns", "max_wall":
+	case "max_turns", "max_wall", "stalled":
 		return "INCOMPLETE"
 	default:
 		return "ERROR"

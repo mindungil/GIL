@@ -676,18 +676,14 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 	)
 
 	for turn := 0; turn < maxAgentTurns; turn++ {
-		// P63: periodic in-loop compaction. The entry-time check (P35)
-		// runs once before turn 0; in long agent loops the history
-		// grows by tool results + reasoning + assistant turns and can
-		// blow past the threshold mid-loop. Re-check every 5 iterations
-		// so the next provider call doesn't get blasted out of context
-		// window. Idempotent: if not over threshold, no-op + fast path.
-		if turn > 0 && turn%5 == 0 {
-			if compacted, didCompact, cerr := compactChatIfNeeded(ctx, provName, modelID, prov, msgs); cerr == nil && didCompact {
-				msgs = compacted
-				s.chatHistory().ReplaceInMemory(sessionID, compacted)
-			}
-		}
+		// P63c: removed "every 5 iters compaction" — v4 chess dogfood
+		// data showed this aggressively wiped middle context (failing
+		// test details), and the agent then looped emitting empty
+		// end_turn replies because it didn't remember what was broken.
+		// P35's entry-time + threshold-driven check is enough — long
+		// loops still get compacted if they cross the 95% threshold,
+		// but only when actually under pressure, not on a cadence.
+		// Compaction is pressure-driven, not cadence-driven.
 		t0 := time.Now()
 		resp, err := prov.Complete(ctx, provider.Request{
 			Model:       modelID,

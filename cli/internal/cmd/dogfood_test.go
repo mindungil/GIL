@@ -82,10 +82,10 @@ func TestVerdictFromReason_AssertionFails(t *testing.T) {
 }
 
 func TestVerdictFromReason_BudgetExhausted_NoAssertion(t *testing.T) {
-	for _, reason := range []string{"max_turns", "max_wall"} {
+	for _, reason := range []string{"max_turns", "max_wall", "stalled"} {
 		r := &dogfoodResult{Reason: reason}
 		require.Equal(t, "INCOMPLETE", verdictFromReason(r),
-			"budget-exhausted without assertions should be INCOMPLETE not PASS")
+			"budget-exhausted without assertions should be INCOMPLETE not PASS (reason=%s)", reason)
 	}
 }
 
