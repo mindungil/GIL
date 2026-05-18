@@ -457,6 +457,58 @@ What varies is *which* self-imposed bug the agent makes; what's
 constant is the model's inability to step back and redesign once
 a bug surfaces.
 
+### Finding #6 — temperature 0.7 may be too high for autonomous coding
+
+The variance observed on chess perft (1 PASS / 2 FAIL) and the
+different bug shapes on task 11 (SWAP / syntax error) are consistent
+with high-temperature sampling. `server/internal/service/session_prompt.go:705`
+hardcodes `Temperature: 0.7` on every `prov.Complete` call.
+
+Reference points:
+- Codex defaults to 0.0-0.2 for code generation
+- Anthropic's tool-use docs suggest 0.0-0.2 for deterministic
+  tool selection
+- 0.7 is more typical for creative writing / brainstorming
+
+**Hypothesis (not yet tested)**: lowering to T=0.3 or T=0.2 would
+reduce variance on boundary tasks and reduce the design-quality
+spread on novel-design tasks (task 11, 17). It would also reduce
+exploration creativity — possibly hurting tasks that benefit from
+trying alternate approaches.
+
+**Not permanently changed in this loop** — temperature is a
+user-visible behavior choice. Probe ran with a *local-only* edit
+to `Temperature: 0.3`, then reverted to 0.7 before committing.
+
+### T=0.3 probe results (2026-05-19)
+
+Ran the 3 boundary/FAIL tasks once each at T=0.3, then reverted:
+
+| Task                  | T=0.7 record | T=0.3 outcome                |
+|-----------------------|--------------|------------------------------|
+| 07 chess perft        | 1 PASS / 2 FAIL | **PASS** (2 turns / 15m43s) |
+| 17 spmc-queue         | 0 PASS / 2 FAIL | **PASS** (5 turns / 14m08s) |
+| 11 bytecode-vm        | 0 PASS / 2 FAIL | FAIL (no test file written) |
+
+Two of three boundary/FAIL tasks shifted to PASS at T=0.3. Task 11
+remains FAIL (different mode this time — agent skipped test
+writing entirely). Task 11 looks like a genuinely below-model-
+ceiling task, not just sampling unlucky.
+
+**Recommendation (data-supported)**: change default Temperature
+from 0.7 to 0.3 (or 0.2) in `session_prompt.go:705` for the chat
+agent loop. Expected impact:
+
+- Boundary tasks (chess, spmc, possibly others) shift from
+  "sometimes PASS" to "more often PASS"
+- Existing-PASS tasks should be unaffected or slightly faster
+  (less variance ≈ less wasted exploration)
+- Cost: model creativity reduced — could hurt tasks that need
+  the agent to try unusual approaches (none observed in this slate)
+
+Did NOT make the change in this commit since it affects all chat
+behavior, not just dogfood. Leaving as documented follow-up.
+
 ### Honest tally (post-variance probing)
 
 | Class                                            | Count | Notes |
