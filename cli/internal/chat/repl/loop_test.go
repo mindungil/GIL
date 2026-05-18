@@ -386,3 +386,34 @@ func TestLoop_SendPrompt_OtherError_KeepsLooping(t *testing.T) {
 	err := Run(context.Background(), Config{In: in, Renderer: mock, Client: fc})
 	require.NoError(t, err, "non-daemon errors should not terminate the loop with an error")
 }
+
+// P59: --once mode exits after the first prompt's stream drains
+// successfully. Without --once, the loop blocks on scanner.Scan()
+// waiting for the next user input. With --once + stdin holding 2
+// lines, ONLY the first line is processed; the second is left
+// unread.
+func TestLoop_OnceMode_ExitsAfterFirstTurn(t *testing.T) {
+	mock := render.NewMockRenderer()
+	fc := &fakeClient{}
+	// Two prompts queued; --once should only consume the first.
+	in := strings.NewReader("first\nsecond\n")
+	err := Run(context.Background(), Config{
+		In: in, Renderer: mock, Client: fc, Once: true,
+	})
+	require.NoError(t, err)
+	require.Equal(t, []string{"first"}, fc.sentPrompts,
+		"--once must consume exactly 1 prompt; got %v", fc.sentPrompts)
+}
+
+func TestLoop_DefaultMode_ConsumesAllInputUntilEOF(t *testing.T) {
+	// Sanity: without --once, the loop should drain both prompts.
+	mock := render.NewMockRenderer()
+	fc := &fakeClient{}
+	in := strings.NewReader("first\nsecond\n")
+	err := Run(context.Background(), Config{
+		In: in, Renderer: mock, Client: fc,
+	})
+	require.NoError(t, err)
+	require.Equal(t, []string{"first", "second"}, fc.sentPrompts,
+		"default mode must drain all input until EOF")
+}

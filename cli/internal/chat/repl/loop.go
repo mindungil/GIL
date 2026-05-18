@@ -90,6 +90,11 @@ type Config struct {
 	In       io.Reader
 	Renderer render.Renderer
 	Client   SessionClient
+	// Once, when true, exits the REPL after the first prompt's
+	// stream drains successfully. Use for non-interactive piped
+	// invocation (gil chat --once < spec.txt) so the loop doesn't
+	// block waiting for a second prompt that will never come. P59.
+	Once bool
 }
 
 // Run executes the chat REPL until the user types a bare exit word
@@ -244,6 +249,14 @@ func Run(ctx context.Context, cfg Config) error {
 					"empty stream — interview produced no output (provider misconfigured or auth missing?)")
 			}
 			cfg.Renderer.AssistantText("\n")
+		}
+		// P59: --once mode exits after the first prompt's stream
+		// drains successfully. Use for piped/scripted invocation
+		// where the agent's "are you done?"-style trailing question
+		// would otherwise hang the loop waiting on a second stdin
+		// line that never comes.
+		if cfg.Once {
+			return nil
 		}
 	}
 }

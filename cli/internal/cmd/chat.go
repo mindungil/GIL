@@ -38,6 +38,7 @@ import (
 // off to repl.Run.
 func chatCmd() *cobra.Command {
 	var socket, providerName, model, workingDir string
+	var once bool
 	c := &cobra.Command{
 		Use:     "chat",
 		Aliases: []string{"talk"},
@@ -49,15 +50,22 @@ client-side routing — every prompt streams straight to the daemon.
 
 Bare ` + "`gil`" + ` in a TTY launches the same surface. ` + "`gil chat`" + ` is the
 explicit form for piped/scripted use and for the rare case the user
-wants the chat surface regardless of TTY state.`,
+wants the chat surface regardless of TTY state.
+
+--once exits after the first prompt's stream drains successfully.
+Use for piped/scripted invocation (` + "`gil chat --once < spec.txt`" + `)
+where the agent's "are you done?"-style trailing question would
+otherwise hang the loop waiting on a second stdin line that never
+comes.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runChat(cmd, socket, providerName, model)
+			return runChat(cmd, socket, providerName, model, once)
 		},
 	}
 	c.Flags().StringVar(&socket, "socket", defaultSocket(), "gild UDS socket path")
 	c.Flags().StringVar(&providerName, "provider", "", "LLM provider (anthropic|openai|openrouter|vllm|mock); empty → workspace config")
 	c.Flags().StringVar(&model, "model", "", "LLM model id; empty → provider default or workspace config")
+	c.Flags().BoolVar(&once, "once", false, "exit after the first prompt's stream drains (for piped/scripted use)")
 	// G4 — #32 followup: the chat handler reads --working-dir via
 	// cmd.Flags().GetString but the flag wasn't registered here, so
 	// the value silently fell through to os.Getwd(). Register it so
@@ -75,7 +83,7 @@ wants the chat surface regardless of TTY state.`,
 // SetProvider so they reach the daemon's SessionService.Prompt RPC
 // (InterviewService removed in M3). Empty values defer to the layered
 // workspace-config defaults applied by session_prompt.go.
-func runChat(cmd *cobra.Command, socket, providerName, model string) error {
+func runChat(cmd *cobra.Command, socket, providerName, model string, once bool) error {
 	out := cmd.OutOrStdout()
 	in := cmd.InOrStdin()
 	ctx := cmd.Context()
@@ -147,6 +155,7 @@ func runChat(cmd *cobra.Command, socket, providerName, model string) error {
 		In:       in,
 		Renderer: renderer,
 		Client:   grpcClient,
+		Once:     once,
 	})
 }
 
