@@ -200,6 +200,7 @@ func Root() *cobra.Command {
 	// show_spec tool.
 	addCmd(runCmd(), "advanced")
 	addCmd(resumeCmd(), "advanced")
+	addCmd(dogfoodCmd(), "advanced")
 	addCmd(watchCmd(), "advanced")
 	addCmd(eventsCmd(), "advanced")
 	// specCmd removed (see comment above interview/resume).
