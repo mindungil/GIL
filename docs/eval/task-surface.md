@@ -520,6 +520,29 @@ the caveat — not a slam-dunk default switch, more like "T=0.7 is
 too high for many tasks but T=0.3 is too low for others, sweet
 spot likely 0.4-0.5, needs more probing".
 
+### T=0.5 sweet-spot probe
+
+Ran chess perft at T=0.5 once: FAIL (7 turns / 18m, P63c stall).
+Agent wrote `debug_test.go` to inspect moves (real debugging
+behavior) but still couldn't get perft correct.
+
+Chess perft pass rate by temperature (small N):
+
+| T    | PASS / total | Notes |
+|------|--------------|-------|
+| 0.7  | 1 / 3        | one PASS in slate 1                |
+| 0.5  | 0 / 1        | this probe                         |
+| 0.3  | 1 / 1        | T=0.3 probe earlier in this loop  |
+
+T=0.5 doesn't obviously beat T=0.7 on chess at N=1. T=0.3 is
+the only temperature with a clean PASS in this loop's reruns,
+but task 11 T=0.3 FAILed (no tests). The right answer is
+per-task: precision tasks (move-gen correctness) want low T,
+exploration tasks (write tests for an unfamiliar API) want
+higher T. A per-task temperature override on `gil dogfood`
+(e.g. `--temperature 0.3`) is probably more useful than picking
+one global default.
+
 ### Honest tally (post-variance probing)
 
 | Class                                            | Count | Notes |
