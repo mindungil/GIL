@@ -171,12 +171,13 @@ brews:
   - name: gil
     ids: [gil-bundle]
     # Skipped until the user creates and authorises the
-    # mindungil/homebrew-tap repo. Setting skip_upload: auto would
-    # only suppress upload on snapshot builds; we want a hard skip
-    # on the formula step itself, so we gate via a templated
-    # disable expression that always evaluates true. Remove this
-    # line once the tap repo exists.
-    disable: "true"
+    # mindungil/homebrew-tap repo. `disable` was the v1 field name
+    # for this; GoReleaser v2 renamed it to `skip_upload` with
+    # "true" meaning "never upload". The formula still gets generated
+    # locally (harmless artifact) — only the push to the tap repo is
+    # suppressed. Flip this back to "auto" or remove once the tap
+    # repo exists.
+    skip_upload: "true"
     repository:
       owner: mindungil
       name: homebrew-tap
