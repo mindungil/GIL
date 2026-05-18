@@ -61,3 +61,6 @@ python/gil_swebench/proto/*_pb2_grpc.py
 # SWE-bench results / workspaces (typically large; opt-in to commit)
 python/gil_swebench/results/
 python/gil_swebench/workspaces/
+
+# Python generated proto bindings (regenerated via python/gil_swebench/compile_protos.py)
+python/gil_swebench/proto/
