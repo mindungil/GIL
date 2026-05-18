@@ -506,8 +506,19 @@ agent loop. Expected impact:
 - Cost: model creativity reduced — could hurt tasks that need
   the agent to try unusual approaches (none observed in this slate)
 
+**Tradeoff caveat**: T=0.3 isn't strictly better. Task 11 at T=0.3
+FAILed with a NEW mode — agent skipped test writing entirely
+(`go test ./...` returned `[no test files]`). At T=0.7 the agent
+wrote tests but with bugs. Lower temperature ≈ more conservative
+= agent less likely to explore unprompted requirements. For tasks
+needing both precision AND exploration, a middle value (T=0.4 or
+T=0.5) might be the sweet spot, not measured in this loop.
+
 Did NOT make the change in this commit since it affects all chat
-behavior, not just dogfood. Leaving as documented follow-up.
+behavior, not just dogfood. Leaving as documented follow-up with
+the caveat — not a slam-dunk default switch, more like "T=0.7 is
+too high for many tasks but T=0.3 is too low for others, sweet
+spot likely 0.4-0.5, needs more probing".
 
 ### Honest tally (post-variance probing)
 
