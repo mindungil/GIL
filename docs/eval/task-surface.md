@@ -283,7 +283,7 @@ design call. Constraint forces redesign if the call was wrong.
 
 ### Slate 4 finding
 
-**Finding #5 — first concurrency-bug FAIL + harness time-bound gap.**
+**Finding #5 — first concurrency-bug FAIL + harness time-bound gap (P66 fix).**
 Agent wrote SPMC with `diff := seq - pos` check. Handled diff==0 (free)
 and diff==1 (occupied per current push) but missed diff < 0 (slot has
 older un-popped data from a previous wrap). Producer livelocks waiting
@@ -301,10 +301,19 @@ The pattern: agent wrote a subtle concurrency bug AND the harness has
 no per-assert (or per-tool-call) timeout to bound the cost of a hung
 test. Combined effect: 43min wall on 3 turns.
 
-**Cheap mitigation (no harness change required)**: wrap test commands
-in `timeout 60s` shell prefix and use `! grep '^--- FAIL:'` for stricter
-asserts. Slate 5+ should use this template. Recorded in
-docs/eval/task-surface.md as the standard template.
+**Root-cause fix (P66, commit a0a433b)**: chat agent loop now tracks
+consecutive timeouts across calls. When ≥3 in a row, emits
+`stop_reason=tool_timeout_loop` and ends the Prompt RPC cleanly.
+Bounds worst-case turn wall at 3 × per-tool-timeout = ~3 minutes
+instead of unbounded. Non-timeout results (success OR other errors)
+reset the counter so legitimate one-off slow tests still work.
+
+**Methodology layer (also kept)**: slate-5+ assert template wraps
+tests in `timeout 60s` and uses `! grep '^--- FAIL:'` for stricter
+PASS. This is defense-in-depth — P66 catches in-turn hangs, but the
+assert wrapper catches post-turn assert hangs that don't go through
+chat tools (e.g. if a future suite extension runs custom external
+checks).
 
 **Standard 3-layer assert template (slate 5+)**:
 ```
@@ -342,5 +351,69 @@ than slates 3-4.
 | #  | Task          | Verdict | Wall    | Turns | Tokens in/out | Failure surface |
 |----|---------------|---------|---------|-------|---------------|-----------------|
 | 18 | lisp          | PASS    | 23m3s   | 4     | 1.4M / 14k    | turn 3 verify_missing 7.7m, recovered turn 4 |
-| 19 | sudoku        |         |         |       |               |                 |
-| 20 | union-find    |         |         |       |               |                 |
+| 19 | sudoku        | PASS    | 21m54s  | 7     | 2.3M / 30k    | turn 1 verify hung 11m, recovered |
+| 20 | union-find    | PASS    | 1m25s   | 1     | 75k / 4.6k    | trap skipped — both optimizations from start |
+
+### Slate 5 finding
+
+| #  | Verdict | Notes                                              |
+|----|---------|----------------------------------------------------|
+| 18 | PASS    | 4 turns / 23m — closure semantics required recovery |
+| 19 | PASS    | 7 turns / 22m — sudoku hard timed out turn 1, retried |
+| 20 | PASS    | 1 turn / 1m25s — textbook                          |
+
+Slate 5 confirms: harness drives to completion on non-concurrency
+novel-shape tasks too. Long-tail (lisp 23m, sudoku 22m) is agent
+exploration time, not harness pathology — P63c stall detection
+correctly did NOT fire (real work happening each turn).
+
+### Final tally — 20 tasks across 5 slates
+
+| Verdict          | Count | Notes |
+|------------------|-------|-------|
+| PASS             | 18    | 13 in 1 turn, 5 in 2-13 turns |
+| FAIL (model)     | 2     | bytecode-vm SWAP self-trap, spmc-queue livelock |
+| Harness fixes    | 1     | P65 death-by-verify (commit 84beb62) |
+| Methodology      | 1     | 3-layer assert + timeout wrapper |
+
+**Harness ceiling > model ceiling**, confirmed across 20 tasks of
+varying shape: pure code, modifications, multi-stage pipelines, deep
+state machines, concurrency, novel-design reorientation, search +
+heuristic, classic algorithms.
+
+---
+
+## Regression suite — full run (2026-05-18, post-P66)
+
+Ran `docs/eval/run-suite.sh "0[1-6]-*" "0[89]-*" "1[0-6]-*"` against
+the daemon built from commit `a0a433b` (P65 + P66). All 14 wired
+known-PASS tasks PASSed cleanly:
+
+| Task             | Wall   | Tokens in | Notes |
+|------------------|--------|-----------|-------|
+| 01 md2html       | 270s   | 331k      |       |
+| 02 json-validator| 191s   | 339k      |       |
+| 03 bug-fix       | 26s    | 63k       |       |
+| 04 lru-cache     | 41s    | 44k       |       |
+| 05 refactor      | 27s    | 51k       |       |
+| 06 regex         | 160s   | 97k       |       |
+| 08 http-kv       | 74s    | 99k       |       |
+| 09 mini-compiler | 128s   | 173k      | P65 unblock confirmed (not INCOMPLETE) |
+| 10 bst-delete    | 103s   | 103k      |       |
+| 12 dijkstra-perf | 185s   | 225k      |       |
+| 13 atomic-batch  | 201s   | 175k      |       |
+| 14 rate-limiter  | 87s    | 117k      |       |
+| 15 sliding-dedup | 169s   | 111k      |       |
+| 16 diff-reverse  | 206s   | 158k      |       |
+
+**Totals**: 1867s ≈ 31m wall, 2.1M input tokens, 14/14 PASS, $0 cost.
+
+This is the first confirmed end-to-end regression baseline for the
+gil harness. Suite is now a load-bearing artifact — every push to
+develop should run it (currently manual; CI wiring deferred until a
+CI-friendly model credential is solved).
+
+Task 07 (chess-perft, ~30min slow) excluded from default suite run;
+runnable separately via `run-suite.sh "07-*"`. Tasks 11, 17 (known
+model-boundary FAIL) not wired into suite; runnable from
+`/home/ubuntu/eval/task1?-*/` for re-investigation.
