@@ -3,6 +3,9 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -78,8 +81,10 @@ func TestToolVerify_PassTransitionsStep(t *testing.T) {
 		json.RawMessage(`{"items":[{"description":"echo","acceptance_check":"true"}]}`))
 
 	tool := &toolVerify{repo: repo}
+	// iter52a: `sh -c 'exit 0'` is now flagged weak. Use `test` instead —
+	// real shell builtin assertion returning 0 for true conditions.
 	res, err := tool.run(context.Background(), sid,
-		json.RawMessage(`{"description":"smoke","command":"true","step_id":1}`))
+		json.RawMessage(`{"description":"smoke","command":"test -d .","step_id":1}`))
 	require.NoError(t, err)
 	require.False(t, res.IsError, res.Content)
 	require.Contains(t, res.Content, "[PASS]")
@@ -116,8 +121,12 @@ func TestToolVerify_NoStepIDStillRuns(t *testing.T) {
 	sid := newTestSession(t, repo, wd)
 
 	tool := &toolVerify{repo: repo}
+	// iter52a: `sh -c 'exit 0'` is now classified as weak (interpreter
+	// inline-script no-op). Use a real behavior check instead — `test`
+	// is a shell builtin that returns 0 for non-empty strings, which
+	// is a legitimate (if minimal) assertion.
 	res, err := tool.run(context.Background(), sid,
-		json.RawMessage(`{"description":"adhoc","command":"true"}`))
+		json.RawMessage(`{"description":"adhoc","command":"test -d ."}`))
 	require.NoError(t, err)
 	require.False(t, res.IsError)
 	require.NotContains(t, res.Content, "step ", "no step_id means no transition message")
@@ -135,6 +144,93 @@ something else`
 	require.Contains(t, failures, "go: TestFoo")
 	require.Contains(t, failures, "pytest: tests/auth_test.py::test_login")
 	require.Contains(t, failures, "jest: user can sign up")
+}
+
+func TestIsWeakVerifyCommand(t *testing.T) {
+	tests := []struct {
+		name    string
+		cmd     string
+		wantBad bool
+	}{
+		{"bare cat", "cat foo.go", true},
+		{"bare ls", "ls -la", true},
+		{"bare echo", "echo hi", true},
+		{"bare pwd", "pwd", true},
+		{"bare true", "true", true},
+		{"bare stat", "stat foo.go", true},
+		{"bare head", "head -10 foo.go", true},
+		{"bare tail", "tail -20 foo.log", true},
+		{"bare file", "file foo.go", true},
+		{"leading whitespace", "   cat foo.go", true},
+		{"build is fine", "go build ./...", false},
+		{"test is fine", "go test ./...", false},
+		{"compound — cat then build", "cat foo.go && go build ./...", false},
+		{"compound — head then test", "head foo.go && go test", false},
+		{"pipe to test runner", "find . -name '*.go' | xargs go vet", false},
+		{"explicit assertion script", "./scripts/check.sh", false},
+		// P29: write-shaped verify is now weak (bug fix — was false).
+		{"cat redirect to file", "cat > foo.txt", true},
+		{"echo redirect to file", "echo hi > foo.txt", true},
+		{"heredoc cat to file", "cat <<EOF > foo.go\npackage x\nEOF", true},
+		{"heredoc indented", "cat <<-EOF > foo.go\npackage x\nEOF", true},
+		{"append redirect to file", "echo hi >> foo.txt", true},
+		// /dev/null carve-out: silenced output is fine if leading cmd is real.
+		{"build silenced to devnull", "go build ./... > /dev/null", false},
+		{"test stderr to devnull", "go test ./... 2>/dev/null", false},
+		{"stderr merge to stdout", "go vet ./... 2>&1", false},
+		// Compound writes still pass (chain short-circuits before redirect).
+		{"write then check", "cat <<EOF > t.go\npackage x\nEOF\n && go build", false},
+		{"empty after trim", "   ", true},
+		// iter52a: interpreter-with-inline-script no-op bypass.
+		{"python3 -c noop", `python3 -c "print('PASS')"`, true},
+		{"python -c noop", `python -c "import sys; sys.exit(0)"`, true},
+		{"bash -c noop", `bash -c "true"`, true},
+		{"sh -c noop", `sh -c "exit 0"`, true},
+		{"node -e noop", `node -e "console.log('ok')"`, true},
+		{"ruby -e noop", `ruby -e "puts 'ok'"`, true},
+		{"awk BEGIN noop", `awk 'BEGIN{print "ok"}'`, true},
+		// But chained interpreter calls pass (real check after).
+		{"python -c then test", `python3 -c "print('start')" && go test`, false},
+		{"python without -c is fine (running a script)", "python3 ./check.py", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := isWeakVerifyCommand(tc.cmd)
+			if got != tc.wantBad {
+				t.Fatalf("isWeakVerifyCommand(%q) = %v, want %v", tc.cmd, got, tc.wantBad)
+			}
+		})
+	}
+}
+
+func TestToolVerify_WeakCommand_Rejects(t *testing.T) {
+	repo := newTestRepo(t)
+	wd := t.TempDir()
+	sid := newTestSession(t, repo, wd)
+	tool := &toolVerify{repo: repo}
+	res, _ := tool.run(t.Context(), sid, json.RawMessage(`{"description":"check","command":"cat main.go"}`))
+	if !res.IsError {
+		t.Fatalf("expected IsError, got %+v", res)
+	}
+	if !strings.Contains(res.Content, "too weak") {
+		t.Fatalf("error message missing 'too weak': %s", res.Content)
+	}
+}
+
+func TestToolVerify_CompoundCommand_OK(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	repo := newTestRepo(t)
+	sid := newTestSession(t, repo, dir)
+	tool := &toolVerify{repo: repo}
+	res, _ := tool.run(t.Context(), sid, json.RawMessage(`{"description":"build","command":"cat main.go && go build ./..."}`))
+	// We don't care whether `go build` succeeds (no go.mod in tempdir).
+	// We only care that the schema guard didn't reject before exec.
+	if res.IsError && strings.Contains(res.Content, "too weak") {
+		t.Fatalf("compound command rejected as weak: %+v", res)
+	}
 }
 
 func TestPlanStepsThenAgentCannotMarkVerified(t *testing.T) {

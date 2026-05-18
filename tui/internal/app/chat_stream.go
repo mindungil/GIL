@@ -147,17 +147,8 @@ func nextChatPromptEventCmd(stream gilv1.SessionService_PromptClient) tea.Cmd {
 	}
 }
 
-// stagePhase maps an interview StageTransition.To to the local
-// ChatPhase. The wire stages emitted by the daemon are "sensing" /
-// "conversation" / "confirm" — V1 collapses sensing+conversation
-// to interview and confirm to awaiting-confirm.
-func stagePhase(stage string) ChatPhase {
-	switch stage {
-	case "confirm":
-		return ChatPhaseAwaitingConfirm
-	case "sensing", "conversation":
-		return ChatPhaseInterview
-	default:
-		return ChatPhaseIdle
-	}
-}
+// stagePhase removed in iter211 — the interview StageTransition events
+// it mapped from ("sensing"/"conversation"/"confirm") were emitted by
+// the InterviewService, which was deleted in M3. The function had no
+// caller after that deletion; the chat agent now assembles a spec via
+// the freeze_spec tool inside the natural-language stream.

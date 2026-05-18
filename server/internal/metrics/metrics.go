@@ -41,6 +41,30 @@ var (
 		Help: "Number of sessions currently in the RUNNING state.",
 	})
 
+	// OrphanRunsReapedTotal is incremented on each orphan reap (P36
+	// startup sweep and P38 mid-session heartbeat sweep). Labeled by
+	// reason: "daemon_restart" (P36) or "stale_heartbeat" (P38). With
+	// these counters surfaced to Prometheus, operators can:
+	//   - Track baseline restart-reap rate (should equal # of daemon
+	//     bounces × mean active runs).
+	//   - Track stale-heartbeat false-positive rate (suspiciously high
+	//     count = threshold too tight; suspiciously zero = sweeper or
+	//     heartbeat refresh broken).
+	OrphanRunsReapedTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "gil_orphan_runs_reaped_total",
+		Help: "Total number of orphan runs reaped (P36 startup or P38 sweeper), by reason.",
+	}, []string{"reason"})
+
+	// AutoResumeKickedTotal is incremented when P37's opt-in
+	// auto-resume fires a Start goroutine after orphan reap. Lets
+	// operators tell apart "users opting in" from "users staying
+	// manual." Always paired with an OrphanRunsReapedTotal{reason=
+	// "daemon_restart"} increment for the same session.
+	AutoResumeKickedTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "gil_auto_resume_kicked_total",
+		Help: "Total P37 auto-resume Start invocations from orphan reaping.",
+	})
+
 	// BuildInfo is a static metric carrying version label.
 	BuildInfo = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "gil_build_info",

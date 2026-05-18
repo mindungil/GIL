@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,6 +16,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+
+	_ "modernc.org/sqlite"
 
 	"github.com/mindungil/gil/core/credstore"
 	"github.com/mindungil/gil/core/paths"
@@ -169,6 +172,108 @@ func runDoctorChecks(ctx context.Context, layout paths.Layout, layoutErr error) 
 	// Tools group.
 	out = append(out, checkTools()...)
 
+	// Persistence group (P60) — verifies the SQLite schema is current
+	// + the load-bearing tables that P30/P34/P55 introduced are
+	// present. Catches a daemon-vs-binary skew where the on-disk DB
+	// is older than the binary expects (or vice versa).
+	if layoutErr == nil {
+		out = append(out, checkPersistenceSchema(layout)...)
+	}
+
+	return out
+}
+
+// checkPersistenceSchema opens the sessions DB read-only and reports
+// the schema version + presence of the load-bearing tables. P60.
+//
+// Reports:
+//   - schema_version: current = required (OK) / current < required (WARN)
+//     / DB missing or unreadable (WARN — daemon hasn't started yet)
+//   - chat_messages, session_memories, workingset_entries, plan_steps:
+//     present (OK) / missing (FAIL with a hint to start gild so the
+//     migration runs)
+//
+// Read-only — never mutates the DB. Closes the connection on return.
+func checkPersistenceSchema(layout paths.Layout) []Check {
+	const group = "Persistence"
+	dbPath := layout.SessionsDB()
+	out := []Check{}
+	if _, err := os.Stat(dbPath); err != nil {
+		out = append(out, Check{
+			Group:   group,
+			Name:    "schema version",
+			Status:  StatusWarn,
+			Message: "sessions DB missing",
+			Hint:    `start gild once (e.g. "gil status") to run migrations`,
+		})
+		return out
+	}
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		out = append(out, Check{
+			Group:   group,
+			Name:    "schema version",
+			Status:  StatusWarn,
+			Message: "open " + dbPath + ": " + err.Error(),
+		})
+		return out
+	}
+	defer db.Close()
+
+	const requiredVersion = 6 // bump alongside core/session/schema.go
+	var current int
+	row := db.QueryRow(`SELECT COALESCE(MAX(version), 0) FROM schema_version`)
+	if err := row.Scan(&current); err != nil {
+		out = append(out, Check{
+			Group:   group,
+			Name:    "schema version",
+			Status:  StatusWarn,
+			Message: "read schema_version: " + err.Error(),
+		})
+	} else if current < requiredVersion {
+		out = append(out, Check{
+			Group:   group,
+			Name:    "schema version",
+			Status:  StatusWarn,
+			Message: fmt.Sprintf("DB at v%d, current binary expects v%d", current, requiredVersion),
+			Hint:    "restart gild to apply pending migrations",
+		})
+	} else {
+		out = append(out, Check{
+			Group:   group,
+			Name:    "schema version",
+			Status:  StatusOK,
+			Message: fmt.Sprintf("v%d", current),
+		})
+	}
+
+	for _, table := range []struct {
+		name, intro string
+	}{
+		{"chat_messages", "P34 chat history persistence"},
+		{"session_memories", "P55 cross-session memory bank"},
+		{"workingset_entries", "P30 working set persistence"},
+		{"plan_steps", "verify-loop discipline (M5.3)"},
+	} {
+		var got string
+		row := db.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name = ?`, table.name)
+		if err := row.Scan(&got); err != nil {
+			out = append(out, Check{
+				Group:   group,
+				Name:    table.name,
+				Status:  StatusFail,
+				Message: "table missing — " + table.intro + " not active",
+				Hint:    "restart gild to run migrations",
+			})
+		} else {
+			out = append(out, Check{
+				Group:   group,
+				Name:    table.name,
+				Status:  StatusOK,
+				Message: "present",
+			})
+		}
+	}
 	return out
 }
 

@@ -357,6 +357,205 @@ const (
 	verifyTailLineCount = 20
 )
 
+// weakVerifyLeadingCommands lists shell commands whose primary action
+// only inspects state (no behavior assertion, no build/test/lint).
+// See spec C4 Layer A for the rationale.
+//
+// Add a command here only if it cannot produce a non-zero exit on
+// logic failure (e.g. plain `grep` without -q can still exit 1 on
+// no-match, so it stays off this list).
+var weakVerifyLeadingCommands = map[string]struct{}{
+	"cat": {}, "ls": {}, "pwd": {}, "echo": {}, "true": {},
+	"stat": {}, "head": {}, "tail": {}, "file": {},
+}
+
+// verifyRedirectDevTargets lists /dev paths that are legit redirect
+// targets (silence/logging), not file writes. Hoisted to avoid
+// per-call allocation in redirectsToFile.
+var verifyRedirectDevTargets = map[string]struct{}{
+	"/dev/null":   {},
+	"/dev/stderr": {},
+	"/dev/stdout": {},
+}
+
+// interpreterInlineScript pairs an interpreter binary with the flag
+// it uses to take a script argument inline. `python3 -c "print('ok')"`
+// is a verify no-op even though the leading word isn't in
+// weakVerifyLeadingCommands. iter52a caught this pattern.
+var interpreterInlineScript = map[string]string{
+	"python":  "-c",
+	"python2": "-c",
+	"python3": "-c",
+	"bash":    "-c",
+	"sh":      "-c",
+	"zsh":     "-c",
+	"dash":    "-c",
+	"node":    "-e",
+	"deno":    "eval",
+	"ruby":    "-e",
+	"perl":    "-e",
+	"php":     "-r",
+	"Rscript": "-e",
+	"awk":     "BEGIN", // awk 'BEGIN{print}' is the no-op idiom
+}
+
+// isWeakVerifyCommand reports whether cmd is unsuitable for verifying
+// behavior. Five checks, ordered cheap-first:
+//
+//  1. Compound (chain or pipe) → not weak; agent threaded a real check.
+//  2. Heredoc (`<<` / `<<-`) → weak; the command is writing content,
+//     not checking it. Closes failure-floor §11.4 loophole.
+//  3. Top-level redirect (`>` or `>>`) to a non-`/dev/{null,stderr,stdout}`
+//     target → weak; the command is writing a file, not checking.
+//     Carve-out preserves `go build ./... > /dev/null` style usage.
+//  4. Interpreter-with-inline-script (iter52a): `python3 -c "..."`,
+//     `bash -c "..."`, `node -e "..."` etc. The script body is opaque
+//     and trivially "exit 0", which would otherwise bypass C4.
+//  5. Leading command in weakVerifyLeadingCommands → weak.
+//
+// Conservative by design: false-negatives still possible (e.g. an
+// agent writing `mybuild` as a wrapper that always exit 0) — this is
+// a quality scaffold, not a sandbox.
+func isWeakVerifyCommand(cmd string) bool {
+	trimmed := strings.TrimSpace(cmd)
+	if trimmed == "" {
+		return true
+	}
+	fields := strings.Fields(trimmed)
+	if len(fields) == 0 {
+		return true
+	}
+	// Compound commands (chain or pipe) pass — but only when the
+	// separator is OUTSIDE quoted regions. iter52a: `python -c "import
+	// sys; sys.exit(0)"` has a `;` inside the script body that must
+	// NOT count as a shell chain.
+	if hasUnquotedSeparator(trimmed) {
+		return false
+	}
+	// Interpreter + inline script (iter52a) → weak.
+	if flag, ok := interpreterInlineScript[fields[0]]; ok && len(fields) >= 2 {
+		if fields[1] == flag {
+			return true
+		}
+		// awk's canonical no-op idiom: `awk 'BEGIN{...}'`. The single-
+		// quoted body is one shell field; trim leading quote before
+		// matching.
+		if fields[0] == "awk" && strings.HasPrefix(strings.TrimLeft(fields[1], "'\""), "BEGIN") {
+			return true
+		}
+	}
+	// Heredoc → write-shaped, weak.
+	if strings.Contains(trimmed, "<<") {
+		return true
+	}
+	// Top-level redirect to file → write-shaped, weak.
+	// Carve out /dev/null, /dev/stderr, /dev/stdout (legit silencing).
+	if redirectsToFile(trimmed) {
+		return true
+	}
+	_, weak := weakVerifyLeadingCommands[fields[0]]
+	return weak
+}
+
+// hasUnquotedSeparator reports whether s contains a shell chain
+// operator (&&, ||, ;, |) outside any single- or double-quoted region.
+// Backslash-escape is honored. This is intentionally a tiny scanner
+// rather than a real parser — gil's threat model is C4 quality
+// scaffold, not a sandbox.
+func hasUnquotedSeparator(s string) bool {
+	var inSingle, inDouble, escape bool
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if escape {
+			escape = false
+			continue
+		}
+		switch c {
+		case '\\':
+			if !inSingle {
+				escape = true
+			}
+		case '\'':
+			if !inDouble {
+				inSingle = !inSingle
+			}
+		case '"':
+			if !inSingle {
+				inDouble = !inDouble
+			}
+		case '&':
+			if !inSingle && !inDouble && i+1 < len(s) && s[i+1] == '&' {
+				return true
+			}
+		case '|':
+			if !inSingle && !inDouble {
+				return true
+			}
+		case ';':
+			if !inSingle && !inDouble {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// redirectsToFile reports whether trimmed contains an output redirect
+// (`>` or `>>`) whose target is a regular file path (not /dev/null,
+// /dev/stderr, /dev/stdout, and not a stderr-merge like `2>&1`).
+//
+// Cheap parse: split on whitespace, walk tokens, when a token is `>`
+// or `>>` (or ends with one, e.g. `2>`), inspect the next token. The
+// `&` prefix on the target (`>&1`) is the merge form — not a file.
+func redirectsToFile(trimmed string) bool {
+	fields := strings.Fields(trimmed)
+	for i, tok := range fields {
+		// Strip a leading FD digit: `2>` → `>`, `1>>` → `>>`.
+		// Only single-digit FDs are handled; multi-digit (e.g. `10>file`) won't trip this check.
+		op := tok
+		if len(op) > 1 && (op[0] >= '0' && op[0] <= '9') {
+			op = op[1:]
+		}
+		// Operators where the next token is the target.
+		if op == ">" || op == ">>" {
+			if i+1 >= len(fields) {
+				return false
+			}
+			target := fields[i+1]
+			if strings.HasPrefix(target, "&") {
+				// Merge form: `>&1`, `>&2` — not a file.
+				continue
+			}
+			if _, ok := verifyRedirectDevTargets[target]; ok {
+				continue
+			}
+			return true
+		}
+		// Glued form: `>file` or `>>file` (uncommon but valid).
+		if strings.HasPrefix(op, ">>") && len(op) > 2 {
+			target := op[2:]
+			if strings.HasPrefix(target, "&") {
+				continue
+			}
+			if _, ok := verifyRedirectDevTargets[target]; ok {
+				continue
+			}
+			return true
+		}
+		if strings.HasPrefix(op, ">") && len(op) > 1 {
+			target := op[1:]
+			if strings.HasPrefix(target, "&") {
+				continue
+			}
+			if _, ok := verifyRedirectDevTargets[target]; ok {
+				continue
+			}
+			return true
+		}
+	}
+	return false
+}
+
 type toolVerify struct {
 	repo    *session.Repo
 	tracker *turnDiffTracker
@@ -395,6 +594,15 @@ func (t *toolVerify) run(ctx context.Context, sessionID string, argsJSON json.Ra
 	}
 	if strings.TrimSpace(args.Command) == "" {
 		return provider.ToolResult{Content: "command is empty", IsError: true}, nil
+	}
+	if isWeakVerifyCommand(args.Command) {
+		return provider.ToolResult{
+			Content: "verify command is too weak — `cat`/`ls`/`echo` only inspect state, " +
+				"they don't verify behavior. Use build, test, lint, type-check, or a custom " +
+				"assertion script. Chain to a real check (e.g. `cat foo.go && go build`) if " +
+				"you must inspect first.",
+			IsError: true,
+		}, nil
 	}
 	wd, err := sessionWD(ctx, t.repo, sessionID)
 	if err != nil {

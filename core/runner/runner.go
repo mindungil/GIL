@@ -632,12 +632,17 @@ loop:
 		lastResponse = &copyResp
 		lastRole = role
 
-		a.emit(event.SourceAgent, event.KindObservation, "provider_response", map[string]any{
+		a.emitWithMetrics(event.SourceAgent, event.KindObservation, "provider_response", map[string]any{
 			"text_len":      len(resp.Text),
 			"tool_calls":    len(resp.ToolCalls),
 			"input_tokens":  resp.InputTokens,
 			"output_tokens": resp.OutputTokens,
 			"stop_reason":   resp.StopReason,
+		}, event.Metrics{
+			// iter133b: typed token count so the progress subscriber
+			// in RunService.runProgress can accumulate without parsing
+			// the JSON payload.
+			Tokens: resp.InputTokens + resp.OutputTokens,
 		})
 
 		// Capture the agent's text BEFORE the budget check so that even
@@ -1644,6 +1649,19 @@ func formatVerifyFeedback(results []verify.Result) string {
 // emit appends an event to a.Events if non-nil and always buffers locally for
 // stuck detection (bounded ring buffer of recentMax events).
 func (a *AgentLoop) emit(source event.Source, kind event.Kind, eventType string, data any) {
+	a.emitWithMetrics(source, kind, eventType, data, event.Metrics{})
+}
+
+// emitWithMetrics is the typed-metrics variant of emit. Use when the
+// event carries token / cost / latency counts that downstream
+// subscribers (notably the SessionService progress tracker) read off
+// the typed Metrics field instead of re-parsing the Data JSON. iter133b:
+// progress for subagents reported tokens=0 because every emit went
+// through the metrics-less helper above — the run path collects the
+// token deltas in JSON data, but RunService.runProgress only reads
+// evt.Metrics.Tokens. Setting the typed field at the emit site closes
+// the gap without forcing every subscriber to learn JSON shapes.
+func (a *AgentLoop) emitWithMetrics(source event.Source, kind event.Kind, eventType string, data any, metrics event.Metrics) {
 	var dataJSON []byte
 	if data != nil {
 		dataJSON, _ = json.Marshal(data)
@@ -1654,6 +1672,7 @@ func (a *AgentLoop) emit(source event.Source, kind event.Kind, eventType string,
 		Kind:      kind,
 		Type:      eventType,
 		Data:      dataJSON,
+		Metrics:   metrics,
 	}
 	if a.Events != nil {
 		_, _ = a.Events.Append(e)

@@ -2,16 +2,23 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/mindungil/gil/core/cost"
 	"github.com/mindungil/gil/core/event"
 	"github.com/mindungil/gil/core/paths"
 	"github.com/mindungil/gil/core/provider"
@@ -21,45 +28,65 @@ import (
 	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
 )
 
-// session_prompt.go is the M1 cut of the chat-architecture migration
-// (docs/design/chat-architecture.md). It introduces SessionService.Prompt
-// as the single chat-surface entry point: every natural-language input
-// from cli REPL or TUI flows through here, the daemon runs an agent
-// loop, and Parts stream back.
+// session_prompt.go owns SessionService.Prompt — the single chat-surface
+// entry point (docs/design/chat-architecture.md). Every natural-language
+// input from cli REPL or TUI flows through here, the daemon runs an
+// agent loop with the chat tool registry, and Parts stream back: TextDelta
+// chunks, ToolCallPart / ToolResultPart pairs, SessionAllocatedPart on
+// the first auto-create call, PromptMetrics snapshots, ReasoningDelta
+// when the upstream emits it (P33), and DonePart.
 //
-// V1 scope (this commit):
-//   - auto-create session when PromptRequest.session_id is empty
-//   - in-memory per-session message history (sync.Map keyed by id)
-//   - one provider.Complete call per Prompt — no tool registry yet
-//   - whole assistant response streams as one TextDelta + Metrics + DonePart
-//
-// What's deliberately missing here, deferred to subsequent M1 commits:
-//   - tool registry (show_diff, apply_diff, freeze_spec, start_run, ...)
-//   - multi-turn agent loop (consume tool_call → tool_result → re-call LLM)
-//   - chunked text streaming (split the model's text into multiple TextDeltas)
-//   - persistent chat history (currently lost on daemon restart)
-//   - subagent / spec-build flows
-//
-// The InterviewService stays in place for now; M2 swaps the chat
-// clients over to SessionService.Prompt; M3 deletes the interview
-// engine entirely.
+// What lives here:
+//   - chatHistory: per-session provider.Message log. P34 made it durable
+//     via the chat_messages SQLite table (see chatHistory.SetDB and
+//     ensureLoadedLocked below). Write-through on every append; hydrates
+//     on first access after a daemon restart.
+//   - defaultChatSystemPrompt: the base system prompt sent to the chat
+//     agent. Lists tool families and workflow guidance.
+//   - redact{KnownSecrets,InlineSecretShapes}: secret-scrubbing applied
+//     to user text before it reaches the LLM (iter36a/93a/156).
+//   - Prompt RPC implementation itself, further down.
 
-// chatHistory holds the running message log per session for the V1
-// chat agent loop. Keyed by session ID. Lives only in process memory
-// — daemon restart wipes the conversation. Persistent storage is a
-// follow-up within M1.
+// chatHistory holds the running message log per session for the chat
+// agent loop. Keyed by session ID. P34 added optional durable backing
+// via the chat_messages table — when SetDB has been called, append
+// writes through and get hydrates on first access after a daemon
+// restart. When db is nil the store behaves as the pre-P34 in-memory
+// version (existing tests that don't wire a Repo keep working
+// untouched).
 type chatHistory struct {
 	mu  sync.Mutex
 	all map[string][]provider.Message
+	// db is the optional durable backing (P34). When nil, append/get/reset
+	// behave as the pre-P34 in-memory-only chatHistory. Set via SetDB.
+	db *sql.DB
+	// loaded tracks which session IDs have been hydrated from DB so the
+	// next access skips the SELECT. Presence-only set; same pattern as
+	// workingSet (P30) — see agent_tools_verbs.go.
+	loaded map[string]struct{}
 }
 
 func newChatHistory() *chatHistory {
-	return &chatHistory{all: make(map[string][]provider.Message)}
+	return &chatHistory{
+		all:    make(map[string][]provider.Message),
+		loaded: make(map[string]struct{}),
+	}
+}
+
+// SetDB attaches a *sql.DB to the store. Pass nil to detach (tests).
+// Safe to call multiple times; the loaded set is reset so the next
+// access rehydrates against the new backing.
+func (h *chatHistory) SetDB(db *sql.DB) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.db = db
+	h.loaded = make(map[string]struct{})
 }
 
 func (h *chatHistory) get(sid string) []provider.Message {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	h.ensureLoadedLocked(sid)
 	src := h.all[sid]
 	out := make([]provider.Message, len(src))
 	copy(out, src)
@@ -69,16 +96,153 @@ func (h *chatHistory) get(sid string) []provider.Message {
 func (h *chatHistory) append(sid string, msg provider.Message) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	h.ensureLoadedLocked(sid)
+	seq := h.nextSeqLocked(sid)
 	h.all[sid] = append(h.all[sid], msg)
+	h.persistAppendLocked(sid, seq, msg)
+}
+
+// nextSeqLocked computes the seq the next append should use. With a
+// DB wired, it reads `MAX(seq) + 1` so the value is correct even when
+// the in-memory list has been shrunk by ReplaceInMemory (P35 chat
+// compaction). Without a DB, falls back to len — pre-P34 contract.
+// Caller holds h.mu.
+func (h *chatHistory) nextSeqLocked(sid string) int {
+	if h.db == nil {
+		return len(h.all[sid])
+	}
+	var maxSeq sql.NullInt64
+	if err := h.db.QueryRow(`SELECT MAX(seq) FROM chat_messages WHERE session_id = ?`, sid).Scan(&maxSeq); err != nil {
+		// Silent fallback — same rationale as persistAppendLocked. Use
+		// in-memory len so an append still lands at a sensible seq even
+		// when the DB query failed.
+		return len(h.all[sid])
+	}
+	if !maxSeq.Valid {
+		return 0
+	}
+	return int(maxSeq.Int64) + 1
+}
+
+// ReplaceInMemory swaps the in-memory slice for sid without touching
+// DB rows. Used by P35 chat-history compaction: the compactor returns
+// a shorter, summary-prefixed message slice that becomes the chat
+// agent's working context, while the chat_messages table retains the
+// full log (export_session, post-restart re-hydration). The loaded
+// flag stays set so the next get() returns the compacted slice
+// instead of re-loading the full log from DB.
+func (h *chatHistory) ReplaceInMemory(sid string, msgs []provider.Message) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	cp := make([]provider.Message, len(msgs))
+	copy(cp, msgs)
+	h.all[sid] = cp
+	if h.loaded == nil {
+		h.loaded = make(map[string]struct{})
+	}
+	h.loaded[sid] = struct{}{}
 }
 
 // reset clears the message log for sid so a subsequent Prompt starts
 // the agent loop with no prior context. Used by the reset_session
 // verb tool (§2.6) when the user asks to "start over" or "clear chat".
+// P34: also wipes the per-session chat_messages rows so a restart
+// after reset doesn't resurrect the cleared history.
 func (h *chatHistory) reset(sid string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	delete(h.all, sid)
+	delete(h.loaded, sid)
+	h.persistResetLocked(sid)
+}
+
+// ensureLoadedLocked hydrates h.all[sid] from DB on first hit after a
+// SetDB call. Caller holds h.mu. No-op when db is nil. Hydration
+// preserves seq order via ORDER BY seq ASC — the table PK guarantees
+// uniqueness so the loaded slice ends up byte-identical to what append
+// wrote turn-by-turn. Silent failure: pre-restart state is
+// unrecoverable for this session but the in-memory store stays
+// consistent.
+func (h *chatHistory) ensureLoadedLocked(sid string) {
+	if h.loaded == nil {
+		h.loaded = make(map[string]struct{})
+	}
+	if h.db == nil {
+		return
+	}
+	if _, done := h.loaded[sid]; done {
+		return
+	}
+	rows, err := h.db.Query(`SELECT role, content, tool_calls, tool_results
+        FROM chat_messages WHERE session_id = ? ORDER BY seq ASC`, sid)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	var hydrated []provider.Message
+	for rows.Next() {
+		var role, content, toolCallsJSON, toolResultsJSON string
+		if err := rows.Scan(&role, &content, &toolCallsJSON, &toolResultsJSON); err != nil {
+			return
+		}
+		msg := provider.Message{
+			Role:    provider.Role(role),
+			Content: content,
+		}
+		if toolCallsJSON != "" {
+			var calls []provider.ToolCall
+			if err := json.Unmarshal([]byte(toolCallsJSON), &calls); err == nil {
+				msg.ToolCalls = calls
+			}
+		}
+		if toolResultsJSON != "" {
+			var results []provider.ToolResult
+			if err := json.Unmarshal([]byte(toolResultsJSON), &results); err == nil {
+				msg.ToolResults = results
+			}
+		}
+		hydrated = append(hydrated, msg)
+	}
+	if len(hydrated) > 0 {
+		h.all[sid] = hydrated
+	}
+	h.loaded[sid] = struct{}{}
+}
+
+// persistAppendLocked writes a single message row. Caller holds h.mu.
+// Silent failure: durability is best-effort and the in-memory store
+// remains authoritative within the daemon's lifetime. tool_calls /
+// tool_results columns are JSON-encoded slices; nil/empty slices
+// serialize to "" so the columns stay readable for sessions that
+// never call tools.
+func (h *chatHistory) persistAppendLocked(sid string, seq int, msg provider.Message) {
+	if h.db == nil {
+		return
+	}
+	var toolCallsJSON, toolResultsJSON string
+	if len(msg.ToolCalls) > 0 {
+		if b, err := json.Marshal(msg.ToolCalls); err == nil {
+			toolCallsJSON = string(b)
+		}
+	}
+	if len(msg.ToolResults) > 0 {
+		if b, err := json.Marshal(msg.ToolResults); err == nil {
+			toolResultsJSON = string(b)
+		}
+	}
+	_, _ = h.db.Exec(`INSERT INTO chat_messages
+        (session_id, seq, role, content, tool_calls, tool_results)
+        VALUES (?, ?, ?, ?, ?, ?)`,
+		sid, seq, string(msg.Role), msg.Content, toolCallsJSON, toolResultsJSON)
+}
+
+// persistResetLocked deletes every chat_messages row for sid. Caller
+// holds h.mu. Silent failure (same rationale as persistAppendLocked).
+func (h *chatHistory) persistResetLocked(sid string) {
+	if h.db == nil {
+		return
+	}
+	_, _ = h.db.Exec(`DELETE FROM chat_messages WHERE session_id = ?`, sid)
 }
 
 // WithProviderFactory wires the same ProviderFactory used by Run /
@@ -144,6 +308,10 @@ Tools — code I/O (scoped to the session working dir):
   transitions the matching plan_step on success/failure. After every
   code-changing tool call (write_file, edit_file, apply_patch) you
   MUST run verify before progressing or declaring the work done.
+  verify commands must exercise behavior, not just inspect state.
+  Prefer build, test, lint, type-check, or assertion scripts. Standalone
+  cat / ls / echo / pwd are not valid verify checks — chain them to a
+  real check (e.g. cat foo.go && go build) if you must inspect first.
 - webfetch: GET an http(s) URL, capped at 256 KB / 15s. Use for docs,
   issue links, public web content.
 
@@ -167,7 +335,7 @@ Tools — subagent delegation (call to split work in parallel):
   string the child receives as its first user message. Optional
   agent_type (default / explore / plan) and spec_override (narrows
   workspace / tools / max_iterations). Subject to V1 caps: max 8
-  active children per root, depth 1 only (children cannot spawn
+  active children per root, depth 2 (children CAN spawn one
   further). Returns the child's agent_id + label.
 - wait_agent: block until a spawned child reaches terminal state
   (done / failed / stopped / budget_exceeded). Identify by agent_id
@@ -209,6 +377,17 @@ Tools — session ops:
 - reset_session: clear the conversation history so the next prompt
   starts fresh. Does NOT touch the workspace, frozen spec, or
   checkpoints. Confirm intent (it cannot be undone) before calling.
+- remember: persist a short note (≤500 chars) into cross-session
+  memory. Recent memories auto-surface in future sessions' system
+  prompt. Use for: project facts, failed approaches, user
+  preferences, gotchas. Do NOT use for: session-local state.
+- request_user_input: pause the autonomous loop and ask the user
+  ONE focused question. Use when the task is genuinely ambiguous
+  (multiple acceptable interpretations / destructive op needing
+  confirmation / missing user-only knowledge). After calling, END
+  THE TURN with no further tool calls so the user can answer in
+  their next prompt. Do NOT use for things you can figure out by
+  reading the code.
 
 Additional tools — MCP servers (dynamic):
 - If the frozen spec lists MCP servers under tools.mcp_servers,
@@ -229,9 +408,13 @@ Workflow guidance:
   overhead; just do the edit and call verify once at the end.
 - Show the user a short summary at the end with what changed and the
   final verify result.
-- For an ambiguous task: ask 1-2 focused clarifying questions
-  (goal, scope, success criteria) before doing destructive work. For
-  obvious tasks just proceed.
+- For an ambiguous task: call request_user_input with ONE focused
+  question (goal, scope, success criteria) BEFORE doing destructive
+  work. For obvious tasks just proceed — don't ask permission for
+  things you can do safely. The agent has up to 30 turns per
+  prompt to drive a task to completion; use them. Each verify
+  failure can be retried up to 8 times before the C1 backstop
+  fires. Iterate fast, fix actual root causes, don't give up.
 - For a question about workspace state: call the matching read-only
   tool (show_diff, list_sessions, …) instead of describing what you'd
   show.
@@ -255,7 +438,15 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 	if sessionID == "" {
 		hint := firstTextPart(req.GetParts())
 		hint = truncateGoalHint(hint, 80)
-		sess, err := s.repo.Create(ctx, session.CreateInput{GoalHint: hint})
+		// PromptRequest.working_dir seeds the auto-created session's
+		// working directory so the agent's run_bash / write_file
+		// tools have a place to operate. Empty value leaves the
+		// session unrooted; tools then refuse with a clear error
+		// rather than silently writing to /tmp.
+		sess, err := s.repo.Create(ctx, session.CreateInput{
+			GoalHint:   hint,
+			WorkingDir: req.GetWorkingDir(),
+		})
 		if err != nil {
 			return status.Errorf(codes.Internal, "auto-create session: %v", err)
 		}
@@ -302,6 +493,14 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 	if modelID == "" {
 		modelID = factoryModel
 	}
+	// P43: wrap with retry so the chat agent transparently survives
+	// transient upstream blips (429 rate limit, 5xx transient,
+	// connection drops). Same pattern run.go already uses for the
+	// run-time agent loop. Non-retryable errors (auth, 4xx other than
+	// 429) still surface immediately. The wrapper changes prov.Name()
+	// to add a "+retry" suffix; downstream code that needs the un-
+	// wrapped factory key uses provName (the original variable).
+	prov = provider.NewRetry(prov)
 
 	// 3. Build messages: prior history + new user message.
 	hist := s.chatHistory().get(sessionID)
@@ -317,6 +516,22 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 		Role:    provider.RoleUser,
 		Content: userText,
 	})
+
+	// P35: compact chat history when it crosses 95% of the model's
+	// context window. Reuses the same Hermes pattern the runner uses
+	// in-loop (core/compact.Compactor). System-driven safety net — the
+	// chat agent never sees compaction happen; it just receives a
+	// shorter messages slice with a synthesized middle summary. On
+	// error or skip, we keep the original msgs so the user's turn
+	// isn't blocked by a compaction blip. DB chat_messages stays
+	// authoritative; ReplaceInMemory only swaps the in-memory list.
+	if compacted, didCompact, cerr := compactChatIfNeeded(ctx, provName, modelID, prov, msgs); cerr != nil {
+		// Soft-fail. Continue with msgs as-is.
+		_ = cerr // intentionally unlogged at this level; the next provider call surfaces any actual context-overflow
+	} else if didCompact {
+		msgs = compacted
+		s.chatHistory().ReplaceInMemory(sessionID, compacted)
+	}
 
 	// 4. Resolve the agent profile (system prompt + tool whitelist).
 	//    PromptRequest.agent picks; empty → "default".
@@ -334,7 +549,7 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 	}
 	// 5. Build the tool registry for this turn, filtered by the
 	//    agent's tool whitelist (empty whitelist = full registry).
-	registry := s.buildChatToolRegistry(s.runService()).filterByName(agent.Tools)
+	registry := s.buildChatToolRegistry(s.runService(), provName, modelID).filterByName(agent.Tools)
 
 	// MCP surface in chat-mode (chat-mode parity with run-mode).
 	// When the session has a frozen spec naming MCP servers, lazy-
@@ -369,17 +584,106 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 			Data:      data,
 		})
 	}
-
+	// P44: wire OnRetry on the retry-wrapped chat provider so the user
+	// sees backoff happening instead of a silent 30s gap during
+	// exponential retry. Mirrors run.go's same hookup. The callback
+	// fires AFTER each retryable failure, BEFORE the sleep.
+	if rp, ok := prov.(*provider.Retry); ok {
+		rp.OnRetry = func(attempt, maxAttempts int, err error, wait time.Duration) {
+			emitChatEvent("provider.retry_attempt", event.SourceSystem, event.KindNote, map[string]any{
+				"attempt":      attempt,
+				"max_attempts": maxAttempts,
+				"wait_ms":      wait.Milliseconds(),
+				"err":          err.Error(),
+			})
+			// Also stream as a visible system Part so the chat user sees
+			// the backoff in the transcript. The text matches the
+			// run-side narration shape ("[retrying 2/4 · 1.0s]") so
+			// both surfaces feel consistent.
+			_ = stream.Send(&gilv1.Part{
+				Body: &gilv1.Part_Text{Text: &gilv1.TextDelta{
+					Content: fmt.Sprintf("[system] provider.retry_attempt: %d/%d · waiting %dms", attempt, maxAttempts, wait.Milliseconds()),
+				}},
+			})
+		}
+	}
 	// 6. Multi-turn agent loop. Each iteration calls the LLM; if it
 	//    emits tool_calls, we dispatch them, append the results, and
 	//    re-call. The loop terminates when the LLM returns no tool
 	//    calls (StopReason="end_turn") or we hit the iteration cap.
-	const maxAgentTurns = 8
+	// P63: lifted from 8 → 30. Data from P57 chess engine dogfood
+	// showed the agent was actively debugging at turn 8 (manually
+	// tracing piece moves to find a Kiwipete perft bug) and would
+	// have likely converged with another 2-5 turns. md2html and
+	// most bench tasks converge in 2-4 turns, so lifting has no
+	// downside there. P38 heartbeat + P49 cost surfacing bound the
+	// worst-case runaway. Trust agent autonomy within this larger
+	// envelope.
+	const maxAgentTurns = 30
 	systemPrompt := fmt.Sprintf(agent.SystemPrompt, provName, modelID, sessionID)
+	// P55: prepend recent cross-session memories so the agent has
+	// continuity across sessions. Best-effort: nil DB or query
+	// failures just skip the block; the agent runs with the base
+	// system prompt unchanged.
+	if s.repo != nil {
+		if memBlock := renderMemoriesForPrompt(loadRecentMemories(ctx, s.repo.DB())); memBlock != "" {
+			systemPrompt = memBlock + systemPrompt
+		}
+	}
 	var totalTokensIn, totalTokensOut int64
 	var totalLatency time.Duration
 
+	// C1 verify-enforcement tracker. `needsVerify` flips true on each
+	// code-changing tool call (write_file / edit_file / apply_patch)
+	// and back to false on a successful verify call (IsError=false).
+	// If true at the "model ended turn" boundary, the system injects a
+	// reminder and loops the agent for up to maxVerifyRetries more
+	// iterations of this Prompt RPC. This correctly handles multi-phase
+	// turns where the agent writes, verifies, then writes again — the
+	// second write re-arms the gate even if a prior verify passed.
+	codeChangingTools := map[string]bool{
+		"write_file": true, "edit_file": true, "apply_patch": true,
+	}
+	needsVerify := false
+	verifyRetries := 0
+	// P63: lifted from 2 → 8. Real bug-fix cycles often need more than
+	// 2 verify retries — compile error → fix → tests fail → fix → tests
+	// pass is already 4 verifies. 2 was set defensively when chat was
+	// a single-prompt-single-response surface; now it just blocks real
+	// agent driving.
+	const maxVerifyRetries = 8
+	// P50: track the last verify call's error content so the turn-cap
+	// C1 backstop can surface "which check failed" in the
+	// verify_missing message instead of a generic hint. Empty when
+	// verify was never called (agent did write_file but never
+	// attempted verify).
+	var lastVerifyErr string
+
+	// P39: per-Prompt chat stuck tracker. Records each tool-call
+	// signature (sha256 of name+input) as it fires. When three
+	// consecutive identical signatures appear, we emit a single
+	// stuck_detected event so the chat surface can surface "agent is
+	// looping" to the user. We don't break the loop — maxAgentTurns
+	// already caps it — and we don't recover (the run-time agent
+	// loop's stuck strategies require a freezable spec; chat may not
+	// have one). Observability only. Reset to nil after one signal
+	// per turn so a real productive call sequence after the stuck
+	// run isn't double-flagged.
+	const chatStuckRepeats = 3
+	var (
+		chatCallSigs   []string
+		chatStuckFired bool
+	)
+
 	for turn := 0; turn < maxAgentTurns; turn++ {
+		// P63c: removed "every 5 iters compaction" — v4 chess dogfood
+		// data showed this aggressively wiped middle context (failing
+		// test details), and the agent then looped emitting empty
+		// end_turn replies because it didn't remember what was broken.
+		// P35's entry-time + threshold-driven check is enough — long
+		// loops still get compacted if they cross the 95% threshold,
+		// but only when actually under pressure, not on a cadence.
+		// Compaction is pressure-driven, not cadence-driven.
 		t0 := time.Now()
 		resp, err := prov.Complete(ctx, provider.Request{
 			Model:       modelID,
@@ -401,6 +705,19 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 		totalTokensIn += resp.InputTokens
 		totalTokensOut += resp.OutputTokens
 
+		// P33: stream the upstream-separated chain-of-thought BEFORE the
+		// final answer so the user sees what the model was working
+		// through. Not persisted to chat history (the model regenerates
+		// fresh reasoning each turn — replaying old reasoning wastes
+		// tokens and confuses the next-turn context).
+		if resp.Reasoning != "" {
+			if err := stream.Send(&gilv1.Part{
+				Body: &gilv1.Part_Reasoning{Reasoning: &gilv1.ReasoningDelta{Content: resp.Reasoning}},
+			}); err != nil {
+				return err
+			}
+		}
+
 		// Stream any text the LLM emitted on this turn.
 		if resp.Text != "" {
 			if err := stream.Send(&gilv1.Part{
@@ -410,11 +727,51 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 			}
 		}
 
-		// If no tool calls, the LLM is done.
+		// If no tool calls, the LLM thinks it's done. Apply the C1
+		// verify-gate before letting the turn close.
 		if len(resp.ToolCalls) == 0 {
 			s.chatHistory().append(sessionID,
 				provider.Message{Role: provider.RoleAssistant, Content: resp.Text})
-			break
+
+			if !needsVerify {
+				break
+			}
+			if verifyRetries >= maxVerifyRetries {
+				// Stubborn agent. Surface an error done so callers know
+				// the work isn't actually verified. Emit as system text
+				// first so chat clients render it visibly (the Done
+				// part itself is silent unless stop_reason="error").
+				msg := "code-changing tools were called but verify was never run; turn aborted"
+				_ = stream.Send(&gilv1.Part{
+					Body: &gilv1.Part_Text{Text: &gilv1.TextDelta{Content: "[system] verify_missing: " + msg}},
+				})
+				_ = stream.Send(&gilv1.Part{
+					Body: &gilv1.Part_Done{
+						Done: &gilv1.DonePart{StopReason: "verify_missing", ErrorMessage: msg},
+					},
+				})
+				return status.Errorf(codes.FailedPrecondition, "%s", msg)
+			}
+
+			// Inject a synthetic user message reminding the agent. Covers
+			// both "verify not called" and "verify called but failed/rejected"
+			// — toolVerify sets IsError=true on !pass (real failure) and on
+			// weak-command schema reject. The agent must either fix the
+			// underlying issue and re-run verify, or call a real verify if
+			// none was made.
+			reminder := "Reminder: you called write_file/edit_file/apply_patch " +
+				"but verify has not reported success this turn. Call verify " +
+				"with a real behavior check (build, test, lint) — and if a " +
+				"prior verify failed, fix the underlying issue first."
+			reminderMsg := provider.Message{Role: provider.RoleUser, Content: reminder}
+			msgs = append(msgs, reminderMsg)
+			s.chatHistory().append(sessionID, reminderMsg)
+			// Echo the reminder to the stream so observers see the gate fire.
+			_ = stream.Send(&gilv1.Part{
+				Body: &gilv1.Part_Text{Text: &gilv1.TextDelta{Content: "[system] " + reminder}},
+			})
+			verifyRetries++
+			continue
 		}
 
 		// Append the assistant turn (with tool calls) to messages so
@@ -447,6 +804,31 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 				"name":  call.Name,
 				"input": string(call.Input),
 			})
+			// P39 chat stuck detection: hash (name + input) and check
+			// for consecutive identical calls. Single signal per turn
+			// once the streak fires, then quiet — productive calls
+			// after the stuck run shouldn't double-flag. Surfaces both
+			// as an event (for giltui Tail subscribers + audit) AND as
+			// a visible Part text so the chat user sees the warning
+			// inline without needing a separate observer.
+			if !chatStuckFired {
+				chatCallSigs = append(chatCallSigs, chatStuckSig(call.Name, call.Input))
+				if chatStuckCheck(chatCallSigs, chatStuckRepeats) {
+					emitChatEvent("stuck_detected", event.SourceSystem, event.KindNote, map[string]any{
+						"pattern": "repeated_action_observation",
+						"tool":    call.Name,
+						"count":   chatStuckRepeats,
+						"surface": "chat",
+					})
+					_ = stream.Send(&gilv1.Part{
+						Body: &gilv1.Part_Text{Text: &gilv1.TextDelta{
+							Content: fmt.Sprintf("[system] stuck_detected: %s called %d× with identical input — refine the prompt or stop the run",
+								call.Name, chatStuckRepeats),
+						}},
+					})
+					chatStuckFired = true
+				}
+			}
 			result, runErr := dispatchTool(ctx, registry, sessionID, call)
 			if runErr != nil {
 				result = provider.ToolResult{
@@ -456,6 +838,27 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 				}
 			}
 			toolResults = append(toolResults, result)
+			// C1: track which tool categories fired this turn.
+			// iter86a: only arm needsVerify on SUCCESSFUL code-changing
+			// calls. A failed write_file/edit_file/apply_patch (path
+			// escape, readonly target, hunk not found, etc.) didn't
+			// actually change any files, so requiring a verify after
+			// it surfaces verify_missing on a turn that did nothing —
+			// false-positive that wastes turns and confuses the agent.
+			if codeChangingTools[call.Name] && !result.IsError {
+				needsVerify = true
+			}
+			if call.Name == "verify" && !result.IsError {
+				needsVerify = false
+			}
+			// P50: capture the last failed verify output so the C1
+			// backstop's verify_missing message can surface it. Users
+			// hitting the turn cap with broken code (P48 dogfood
+			// pattern) get an actionable hint about WHICH check
+			// failed instead of a generic "you never verified" line.
+			if call.Name == "verify" && result.IsError {
+				lastVerifyErr = result.Content
+			}
 			if err := stream.Send(&gilv1.Part{
 				Body: &gilv1.Part_ToolResult{ToolResult: &gilv1.ToolResultPart{
 					CallId:  call.ID,
@@ -484,11 +887,57 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 		s.chatHistory().append(sessionID, toolFeedback)
 	}
 
-	// 6. Metrics + Done.
+	// P32 iter6: post-loop C1 backstop. The for loop can exit by hitting
+	// `maxAgentTurns` while still iterating with tool calls (i.e.
+	// before the agent ever stopped to let the no-tool-calls C1 gate
+	// run). Eval-loop iter6/L7 surfaced this — agent did 9+ tool calls
+	// including write_file → verify (PASS) → write_file → write_file
+	// without a final verify, but the loop hit turn=8 and exited
+	// silently. needsVerify was true but the gate never fired.
+	//
+	// If we exited the for loop via the turn cap and a code-changing
+	// tool call is still un-verified, surface the same
+	// FailedPrecondition the no-tool-calls path would have.
+	if needsVerify {
+		// P50: more actionable message. When verify was attempted at
+		// least once and failed, surface a truncated tail of the
+		// failure so the user re-prompts with concrete context. When
+		// verify was never attempted, keep the existing generic line.
+		msg := "agent turn cap reached but a code-changing tool call (write_file/edit_file/apply_patch) " +
+			"was never followed by a successful verify; turn aborted"
+		if lastVerifyErr != "" {
+			tail := lastVerifyErr
+			if len(tail) > 400 {
+				tail = "…" + tail[len(tail)-400:]
+			}
+			tail = strings.ReplaceAll(tail, "\n", " · ")
+			msg = "agent turn cap reached with a failing verify. Last verify output: " + tail
+		}
+		_ = stream.Send(&gilv1.Part{
+			Body: &gilv1.Part_Text{Text: &gilv1.TextDelta{Content: "[system] verify_missing: " + msg}},
+		})
+		_ = stream.Send(&gilv1.Part{
+			Body: &gilv1.Part_Done{
+				Done: &gilv1.DonePart{StopReason: "verify_missing", ErrorMessage: msg},
+			},
+		})
+		return status.Errorf(codes.FailedPrecondition, "%s", msg)
+	}
+
+	// 6. Metrics + Done. P49: include cost_usd so the chat surface
+	// can show running spend instead of just token counts. Best-effort
+	// — unknown models (not in the embedded catalog) just return 0
+	// and the surface degrades gracefully to tokens-only.
+	costCalc := cost.NewCalculator()
+	turnCost, _ := costCalc.Estimate(modelID, cost.Usage{
+		InputTokens:  totalTokensIn,
+		OutputTokens: totalTokensOut,
+	})
 	if err := stream.Send(&gilv1.Part{
 		Body: &gilv1.Part_Metrics{Metrics: &gilv1.PromptMetrics{
 			TokensIn:  totalTokensIn,
 			TokensOut: totalTokensOut,
+			CostUsd:   turnCost,
 			LatencyMs: totalLatency.Milliseconds(),
 		}},
 	}); err != nil {
@@ -517,18 +966,274 @@ func dispatchTool(ctx context.Context, registry *chatToolRegistry, sessionID str
 	}
 	r, err := tool.run(ctx, sessionID, call.Input)
 	r.ToolUseID = call.ID
+	// iter18a (L18): tool Content goes onto the gRPC stream as a proto
+	// `string` field, which protobuf rejects with "marshaling: string
+	// field contains invalid UTF-8" if any tool returned bytes that
+	// aren't valid UTF-8 (read_file on a file truncated mid-multibyte,
+	// run_bash on a binary). Sanitize once at the dispatch boundary so
+	// every tool inherits the protection. Replacement chars preserve
+	// the agent's ability to reason about the rest of the content.
+	if !utf8.ValidString(r.Content) {
+		r.Content = strings.ToValidUTF8(r.Content, "�")
+	}
+	// iter36a: redact known credential values from tool output so a
+	// run_bash `cat ~/.config/gil/auth.json` (or any equivalent indirect
+	// read) doesn't leak the api_key into chat history → next provider
+	// turn → user-visible response. read_file is sandboxed to the
+	// session working dir, but run_bash isn't — and the threat model
+	// includes prompt-injection via webfetched content (eval-loop
+	// iter34/iter36). Single chokepoint protection rather than
+	// trying to constrain run_bash, which preserves agent freedom.
+	r.Content = redactKnownSecrets(r.Content)
 	return r, err
+}
+
+// knownSecrets is the daemon-wide set of credential values to redact
+// from tool output. Loaded lazily on first dispatchTool call from the
+// process env (~/.config/gil/auth.json, ~/.env, GIL_*_KEY env vars).
+var (
+	knownSecretsOnce sync.Once
+	knownSecretsList []string
+)
+
+func redactKnownSecrets(s string) string {
+	knownSecretsOnce.Do(loadKnownSecrets)
+	if len(knownSecretsList) > 0 {
+		for _, secret := range knownSecretsList {
+			if secret == "" {
+				continue
+			}
+			s = strings.ReplaceAll(s, secret, "[REDACTED-SECRET]")
+		}
+	}
+	// iter156: also catch secret-shape values that aren't in the
+	// daemon-wide registry — projects regularly ship config files with
+	// their own keys, and the registry only sees ~/.env + auth.json.
+	// Same prefix set as iter93a's value-shape fallback. Run the inline
+	// scan after the registry pass so legitimate registry values that
+	// happen to also match a prefix are still replaced with the same
+	// [REDACTED-SECRET] sentinel and don't get a duplicate replacement.
+	return redactInlineSecretShapes(s)
+}
+
+// redactInlineSecretShapes scans the string for tokens matching known
+// provider-key prefixes and replaces them with [REDACTED-SECRET]. Tight
+// shape so the function doesn't gnaw on prose: a "token" is a maximal
+// run of [A-Za-z0-9._-] starting with one of the known prefixes and
+// at least 16 chars long. iter156.
+func redactInlineSecretShapes(s string) string {
+	const minLen = 16
+	const sentinel = "[REDACTED-SECRET]"
+	if s == "" {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	i := 0
+	for i < len(s) {
+		// Find the next prefix match.
+		matched := -1
+		var matchPrefix string
+		for _, p := range secretValuePrefixes {
+			if strings.HasPrefix(s[i:], p) {
+				matched = i
+				matchPrefix = p
+				break
+			}
+		}
+		if matched < 0 {
+			b.WriteByte(s[i])
+			i++
+			continue
+		}
+		// Extend through the secret-token charset.
+		end := matched + len(matchPrefix)
+		for end < len(s) && isSecretChar(s[end]) {
+			end++
+		}
+		token := s[matched:end]
+		if len(token) >= minLen {
+			b.WriteString(sentinel)
+			i = end
+			continue
+		}
+		// Not long enough — keep verbatim.
+		b.WriteString(token)
+		i = end
+	}
+	return b.String()
+}
+
+func isSecretChar(c byte) bool {
+	switch {
+	case c >= 'a' && c <= 'z':
+		return true
+	case c >= 'A' && c <= 'Z':
+		return true
+	case c >= '0' && c <= '9':
+		return true
+	case c == '_' || c == '-' || c == '.':
+		return true
+	}
+	return false
+}
+
+func loadKnownSecrets() {
+	// Best-effort. Failures here mean less redaction, not a daemon
+	// crash — secrets just stay on the wire as before this fix.
+	addSecretsFromAuthJSON("/home/ubuntu/.config/gil/auth.json")
+	if home, err := os.UserHomeDir(); err == nil {
+		addSecretsFromAuthJSON(filepath.Join(home, ".config", "gil", "auth.json"))
+		addSecretsFromAuthJSON(filepath.Join(home, ".codex", "auth.json"))
+		addSecretsFromDotenv(filepath.Join(home, ".env"))
+	}
+	for _, k := range []string{
+		"OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GITHUB_TOKEN",
+		"AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
+	} {
+		if v := os.Getenv(k); len(v) >= 8 {
+			knownSecretsList = append(knownSecretsList, v)
+		}
+	}
+}
+
+func addSecretsFromAuthJSON(path string) {
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	// Parse loosely — auth.json schema is "providers": {name: {api_key, ...}}.
+	var doc map[string]any
+	if err := json.Unmarshal(body, &doc); err != nil {
+		return
+	}
+	walkSecrets(doc, []string{"api_key", "apiKey", "token", "secret", "password"})
+}
+
+func walkSecrets(node any, secretKeys []string) {
+	switch n := node.(type) {
+	case map[string]any:
+		for k, v := range n {
+			for _, sk := range secretKeys {
+				if strings.EqualFold(k, sk) {
+					if vs, ok := v.(string); ok && len(vs) >= 8 {
+						knownSecretsList = append(knownSecretsList, vs)
+					}
+				}
+			}
+			walkSecrets(v, secretKeys)
+		}
+	case []any:
+		for _, item := range n {
+			walkSecrets(item, secretKeys)
+		}
+	}
+}
+
+// secretValuePrefixes catches credential values whose dotenv KEY does
+// not name a token/secret (e.g. provider-named vars like POLLINATIONS,
+// OPENROUTER). Add real-world prefixes as new providers ship.
+var secretValuePrefixes = []string{
+	"sk-",    // OpenAI, Anthropic, OpenRouter (sk-or-), etc.
+	"sk_",    // Stripe-style, Pollinations
+	"gho_",   // GitHub OAuth
+	"ghp_",   // GitHub personal
+	"ghs_",   // GitHub server
+	"ghu_",   // GitHub user-to-server
+	"glpat-", // GitLab PAT
+	"AIza",   // Google API key
+	"xoxb-",  // Slack bot
+	"xoxp-",  // Slack user
+	"xoxa-",  // Slack app
+	"ya29.",  // Google OAuth
+	"eyJ",    // JWT
+}
+
+func looksLikeSecretValue(val string) bool {
+	if len(val) < 16 {
+		return false
+	}
+	for _, p := range secretValuePrefixes {
+		if strings.HasPrefix(val, p) {
+			return true
+		}
+	}
+	return false
+}
+
+func addSecretsFromDotenv(path string) {
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	for _, line := range strings.Split(string(body), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		eq := strings.IndexByte(line, '=')
+		if eq < 0 {
+			continue
+		}
+		key := strings.TrimSpace(line[:eq])
+		val := strings.TrimSpace(line[eq+1:])
+		val = strings.Trim(val, "\"'")
+		// Two-pass: credential-shaped key OR value with a known
+		// secret-prefix. Either match qualifies for redaction.
+		k := strings.ToLower(key)
+		keyMatches := strings.Contains(k, "key") || strings.Contains(k, "token") ||
+			strings.Contains(k, "secret") || strings.Contains(k, "password") ||
+			strings.Contains(k, "credential")
+		if !keyMatches && !looksLikeSecretValue(val) {
+			continue
+		}
+		if len(val) >= 8 {
+			knownSecretsList = append(knownSecretsList, val)
+		}
+	}
+}
+
+// chatStuckSig returns a short stable signature for a chat-side
+// tool call so the P39 chat stuck detector can compare consecutive
+// invocations without storing the full input JSON. Uses sha256
+// truncated to 8 bytes (16 hex chars) — collision risk is negligible
+// at the 3-call window we check against.
+func chatStuckSig(name string, input []byte) string {
+	h := sha256.Sum256(append([]byte(name+"\x00"), input...))
+	return hex.EncodeToString(h[:8])
+}
+
+// chatStuckCheck reports whether the trailing window of sigs all
+// match — i.e., the same tool-call signature has fired `window`
+// times consecutively. Pure function; tests pin the behavior
+// without spinning up a full chat agent loop.
+func chatStuckCheck(sigs []string, window int) bool {
+	if window <= 0 || len(sigs) < window {
+		return false
+	}
+	tail := sigs[len(sigs)-window:]
+	for _, s := range tail[1:] {
+		if s != tail[0] {
+			return false
+		}
+	}
+	return true
 }
 
 // chatHistory lazily allocates the message log map. Stored on the
 // service struct via a method-level singleton instead of constructor
 // wiring so existing test setups (NewSessionService(repo, nil)) keep
-// compiling without churn.
+// compiling without churn. P34: when the SessionService has a Repo,
+// the store is auto-wired with the underlying *sql.DB on first
+// allocation so append/get/reset survive a daemon restart.
 func (s *SessionService) chatHistory() *chatHistory {
 	s.chatHistMu.Lock()
 	defer s.chatHistMu.Unlock()
 	if s.chatHist == nil {
 		s.chatHist = newChatHistory()
+		if s.repo != nil {
+			s.chatHist.SetDB(s.repo.DB())
+		}
 	}
 	return s.chatHist
 }
@@ -583,7 +1288,16 @@ func firstTextPart(parts []*gilv1.PromptPart) string {
 // truncateHint helper but lives here so the daemon's session row
 // stays compact regardless of whether the request came from cli or
 // tui.
+//
+// iter71a: strip control characters (anything below 0x20 except
+// printable whitespace) so a prompt containing ANSI escape sequences
+// (`\x1b[2J\x1b[H`) can't poison the welcome-banner display in the
+// next `gil chat` session. Without this, an attacker who can drop a
+// prompt (or a teammate sharing a daemon, or a script writing past
+// session names) could takeover the user's terminal via injected
+// escape codes.
 func truncateGoalHint(s string, max int) string {
+	s = sanitizeHintControlChars(s)
 	if max <= 0 || len(s) <= max {
 		return s
 	}
@@ -592,6 +1306,24 @@ func truncateGoalHint(s string, max int) string {
 		return s
 	}
 	return string(r[:max-1]) + "…"
+}
+
+func sanitizeHintControlChars(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		// Keep printable + standard whitespace (space + tab + newline);
+		// collapse newlines to space so the hint stays one line.
+		switch {
+		case r == '\n' || r == '\r' || r == '\t':
+			b.WriteByte(' ')
+		case r < 0x20 || r == 0x7f:
+			// Drop control chars (ESC = 0x1b, etc.).
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 // resolveWorkspaceLLM reads the layered workspace config (global +

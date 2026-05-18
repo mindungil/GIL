@@ -22,20 +22,27 @@ under temperature, cost-meter accuracy. Need:
   — verify Retry / compact / stuck-detect / verify-loop discipline
   all behave under genuine model output, not mock turns.
 
-**Surface — Option B/C decision.** The chat surface currently
-displays as single-column transcript. The Agent Tree only lives in
-giltui (mission-control). Real users using `gil` (not `giltui`) don't
-see the per-turn tree; they only see the textual transcript. Decision
-on M6 Option B (chat redesign) or Option C (both surfaces share a
-tree pane) gates roughly 600-1500 LOC of TUI work. The longer this
-stays open, the more chat surface code accumulates that the redesign
-will have to migrate.
+**Surface — Option B/C decision.** *Resolved 2026-05-16 in
+[`docs/design/chat-surface-decision.md`](../design/chat-surface-decision.md):*
+Both B and C rejected. The actual user pain is narrower than the
+multi-pane framing assumed — bare `gil` Renderer has no
+ToolCall/ToolResult methods at all, so tool calls happen invisibly on
+the daemon. Adopted narrow alternative: ~340 LOC chat tool-call
+narration layer (additive, no pane redesign, no snapshot churn). See
+the decision doc for rationale and the implementation outline. The
+narration layer moves to Severity 2 below.
 
 ### Severity 2 — substantive user-visible gaps
 
-**Persistent working set.** `add_to_workingset` is in-memory per
-daemon lifetime; restart = empty. For a multi-day session this is
-silently wrong. Persist to spec dir or sessions DB. Probably v0.2.1.
+**Persistent working set.** *Resolved 2026-05-15: P30 schema v4 +
+write-through pattern landed on `feat/p30-workingset-persist`.* The
+in-memory `workingSet` now writes through `workingset_entries` and
+re-hydrates on first access after a daemon restart.
+
+**Chat tool-call narration.** Per the surface decision above, bare
+`gil` chat needs ToolCall/ToolResult Renderer methods so the user can
+see what the agent is doing during a turn. ~340 LOC, single PR,
+additive. Sits independently of any future Option B revisit.
 
 **Workspace rollback safety net.** `restore_checkpoint` refuses while
 a run is active; OK. But after a restore there's no automatic

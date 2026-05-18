@@ -33,6 +33,12 @@ type toolSpawnAgent struct {
 	rs       *RunService
 	registry *subagentRegistry
 	base     string // sessionsBase
+	// iter39a: parent's provider/model so the subagent inherits the
+	// same backend instead of falling back to the daemon's "anthropic"
+	// default. Without this, a chat session running on vllm would spawn
+	// a child that immediately fails with "no credentials for anthropic".
+	parentProvider string
+	parentModel    string
 }
 
 func (t *toolSpawnAgent) name() string { return "spawn_agent" }
@@ -43,9 +49,11 @@ func (t *toolSpawnAgent) description() string {
 		"frozen spec (workspace, tools, models, verification inherited unless the " +
 		"parent spec restricts them). Returns the child agent_id + label so the " +
 		"parent can call wait_agent later. Subject to daemon-wide concurrency and " +
-		"depth limits — at the V1 cap, parents are root only (children cannot spawn " +
-		"further children). Use for parallel exploration, isolated experiments, or " +
-		"work that benefits from a fresh context."
+		"depth limits — current cap is depth=2 (root → child → grandchild), so a " +
+		"depth=1 child CAN spawn a depth=2 grandchild for deeper decomposition, " +
+		"but depth=2 cannot spawn further. Per-root total is capped at 8 active " +
+		"subagents across the whole tree. Use for parallel exploration, isolated " +
+		"experiments, or work that benefits from a fresh context."
 }
 
 func (t *toolSpawnAgent) schema() json.RawMessage {
@@ -112,6 +120,15 @@ func (t *toolSpawnAgent) run(ctx context.Context, parentSessionID string, argsJS
 	}
 	if strings.TrimSpace(args.Task) == "" {
 		return provider.ToolResult{Content: "spawn_agent requires a non-empty task", IsError: true}, nil
+	}
+	// iter102a: strip control chars from Label before it lands in DB,
+	// agent_status, spawn_agent confirmation, and subagentHint. Without
+	// this, an agent (or an upstream prompt-injection vector) could plant
+	// ESC sequences that repaint the terminal anywhere SubagentLabel
+	// surfaces. Same defense as iter71a applied to a different field.
+	args.Label = sanitizeHintControlChars(args.Label)
+	if strings.TrimSpace(args.Label) == "" {
+		return provider.ToolResult{Content: "spawn_agent label became empty after stripping control chars", IsError: true}, nil
 	}
 
 	parentSess, err := t.sess.repo.Get(ctx, parentSessionID)
@@ -182,12 +199,16 @@ func (t *toolSpawnAgent) run(ctx context.Context, parentSessionID string, argsJS
 	// S8 — child runner's system_prompt picks up Goal.Detailed via the
 	// standard spec-injection path, so we encode the subagent context
 	// here instead of plumbing a parallel hint slot through AgentLoop.
+	childDepth := parentSess.SubagentDepth + 1
+	spawnHint := "You can spawn one more layer of subagents (depth cap is 2)."
+	if childDepth >= subagentMaxDepth {
+		spawnHint = "Do not call spawn_agent — you are at the depth cap and cannot spawn further children."
+	}
 	subagentHint := fmt.Sprintf(
-		"You are a subagent of session %s (label=%s, depth=%d). "+
+		"You are a subagent of session %s (label=%s, depth=%d of max %d). "+
 			"You do not have access to the parent's conversation. "+
-			"Complete the task below and report a terse summary in your final message. "+
-			"Do not call spawn_agent — subagents cannot spawn further children (V1 depth cap).",
-		parentSess.ID, args.Label, parentSess.SubagentDepth+1,
+			"Complete the task below and report a terse summary in your final message. %s",
+		parentSess.ID, args.Label, childDepth, subagentMaxDepth, spawnHint,
 	)
 	childSpec.Goal = &gilv1.Goal{
 		OneLiner: args.Task,
@@ -223,6 +244,8 @@ func (t *toolSpawnAgent) run(ctx context.Context, parentSessionID string, argsJS
 	// session.Status.
 	startResp, startErr := t.rs.Start(ctx, &gilv1.StartRunRequest{
 		SessionId: childSess.ID,
+		Provider:  t.parentProvider,
+		Model:     t.parentModel,
 		Detach:    true,
 	})
 	if startErr != nil {
@@ -326,7 +349,7 @@ func (t *toolWaitAgent) run(ctx context.Context, parentSessionID string, argsJSO
 		}
 		if isTerminalStatus(child.Status) {
 			t.sess.releaseSubagent(childID)
-			return provider.ToolResult{Content: renderSubagentFinal(child)}, nil
+			return provider.ToolResult{Content: renderSubagentFinal(child, t.sess.progress, t.sess.budgets)}, nil
 		}
 		if time.Now().After(deadline) {
 			return provider.ToolResult{Content: fmt.Sprintf(
@@ -410,10 +433,29 @@ func isTerminalStatus(s string) bool {
 // renderSubagentFinal builds the wait_agent return text. Keep it terse
 // so the parent agent can include it in its own summary without
 // blowing the context window.
-func renderSubagentFinal(s session.Session) string {
+//
+// iter133a: session.TotalTokens/TotalCostUSD on the row are never
+// written by the run path (token + cost live in the in-memory
+// progress/budgets trackers on SessionService, not on the persisted
+// row), so reading them always produced "tokens=0 cost=$0.0000".
+// Read from the live trackers when available — falling back to the
+// row values keeps backwards-compatibility for the legacy code path.
+func renderSubagentFinal(s session.Session, prog ProgressGetter, bg BudgetGetter) string {
+	tokens := s.TotalTokens
+	costUSD := s.TotalCostUSD
+	if prog != nil {
+		if _, t, ok := prog.Progress(s.ID); ok && t > tokens {
+			tokens = t
+		}
+	}
+	if bg != nil {
+		if c, _, _, ok := bg.Budget(s.ID); ok && c > costUSD {
+			costUSD = c
+		}
+	}
 	return fmt.Sprintf(
 		"subagent finished · label=%s · agent_id=%s · status=%s · tokens=%d · cost=$%.4f",
-		s.SubagentLabel, s.ID, s.Status, s.TotalTokens, s.TotalCostUSD,
+		s.SubagentLabel, s.ID, s.Status, tokens, costUSD,
 	)
 }
 

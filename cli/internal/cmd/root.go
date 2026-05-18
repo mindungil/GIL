@@ -170,10 +170,6 @@ func Root() *cobra.Command {
 	// Off by default so the conversational surface ships as the new
 	// front door.
 	root.PersistentFlags().BoolVar(&noChat, "no-chat", false, "skip the chat REPL on bare gil; always render the summary")
-	// --no-intent-router: bypass the §2.6(b) natural-language verb router
-	// in the chat REPL, forwarding every prompt directly to the daemon.
-	// Useful for debugging / regression-testing the pre-26.6 behavior.
-	root.PersistentFlags().BoolVar(&noIntentRouter, "no-intent-router", false, "disable natural-language verb routing (always forward prompts)")
 	// Phase 25 A2 — surface a stage-based grouping in `gil --help` so
 	// the dump-of-25-commands maps onto the user's mental model: setup
 	// once, then run sessions, then diagnose / maintain. Cobra renders
@@ -203,6 +199,8 @@ func Root() *cobra.Command {
 	// which is gone. Spec inspection moves into the chat agent's
 	// show_spec tool.
 	addCmd(runCmd(), "advanced")
+	addCmd(resumeCmd(), "advanced")
+	addCmd(dogfoodCmd(), "advanced")
 	addCmd(watchCmd(), "advanced")
 	addCmd(eventsCmd(), "advanced")
 	// specCmd removed (see comment above interview/resume).
@@ -218,6 +216,7 @@ func Root() *cobra.Command {
 
 	addCmd(mcpCmd(), "tools")
 	addCmd(permissionsCmd(), "tools")
+	addCmd(memoryCmd(), "tools")
 
 	addCmd(daemonCmd(), "maint")
 	addCmd(updateCmd(), "maint")

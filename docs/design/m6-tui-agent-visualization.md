@@ -274,3 +274,18 @@ B만 단독 진입은 권하지 않음 — chat surface 캐릭터를 바꾸는�
 
 Estimated ordering not committed — 위 옵션은 surface 결정 후 사용자가 phase
 번호 부여.
+
+## 11. Decision (P31, 2026-05-16)
+
+Option B와 Option C는 **둘 다 reject**. 자세한 결정 근거와 채택한
+narrow alternative(=chat surface에 inline tool-call narration만 추가)는
+[`chat-surface-decision.md`](chat-surface-decision.md)에 별도 문서.
+
+핵심 발견은 §10 framing이 놓친 부분: bare `gil` Renderer interface
+(`cli/internal/chat/render/renderer.go:66`)가 ToolCall/ToolResult 메서드
+자체가 없다 — daemon이 Part 흘려보내도 chat surface는 받기만 하고 안 그린다.
+이게 실제 user pain의 본체. multi-pane redesign이 아니라 두 줄짜리
+narration만 더하면 해결.
+
+→ Option A only는 V1 final. chat surface에는 ~340 LOC 분량의
+narration layer가 별도 phase로 들어옴 (B/C가 아니라).

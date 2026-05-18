@@ -7,33 +7,36 @@ package render
 type Phase string
 
 const (
-	PhaseIdle            Phase = "idle"
-	PhaseInterview       Phase = "interview"
-	PhaseAwaitingConfirm Phase = "awaiting-confirm"
-	PhaseRun             Phase = "run"
-	PhaseStuck           Phase = "stuck"
-	PhaseDone            Phase = "done"
+	PhaseIdle  Phase = "idle"
+	PhaseRun   Phase = "run"
+	PhaseStuck Phase = "stuck"
+	PhaseDone  Phase = "done"
 )
+
+// PhaseInterview / PhaseAwaitingConfirm removed in iter211 — the
+// interview engine that produced those phase transitions was deleted
+// in M3; the chat agent's freeze_spec tool now drives spec assembly
+// inside the natural-language stream, so the strip never needs to
+// surface "interview" or "awaiting-confirm" as distinct phases.
 
 type NoteKind string
 
 const (
-	NoteSpec       NoteKind = "spec"
-	NoteAdversary  NoteKind = "adversary"
-	NoteSaturation NoteKind = "saturation"
-	NoteQueued     NoteKind = "note"
-	NoteV11        NoteKind = "v11"
-	NoteSystem     NoteKind = "system"
+	NoteSpec      NoteKind = "spec"
+	NoteAdversary NoteKind = "adversary"
+	NoteQueued    NoteKind = "note"
+	NoteV11       NoteKind = "v11"
+	NoteSystem    NoteKind = "system"
 )
+
+// NoteSaturation removed in iter211 — was only emitted by the
+// interview.ready_to_freeze handler in loop.go, which had no producer
+// after the M3 interview-engine deletion.
 
 type SessionState struct {
 	SessionID    string
 	DisplayName  string
 	Phase        Phase
-	SlotsFilled  int
-	SlotsTotal   int
-	Saturation   float64
-	AdvFindings  int
 	Iter         int
 	MaxIter      int
 	CostUSD      float64
@@ -66,6 +69,14 @@ type SpecView struct {
 type Renderer interface {
 	Banner(state SessionState)
 	AssistantText(chunk string)
+	// AssistantReasoning surfaces upstream-separated chain-of-thought
+	// (e.g. vLLM `reasoning`, DeepSeek `reasoning_content`, Anthropic
+	// extended-thinking) with distinct styling from AssistantText so
+	// the user can tell the model's internal monologue apart from its
+	// final reply. Implementations may dim, indent, or hide reasoning
+	// behind a toggle; the contract is "do not let it be mistaken for
+	// the actual answer". P33.
+	AssistantReasoning(chunk string)
 	SystemNote(kind NoteKind, msg string)
 	StatusStrip(state SessionState)
 	PromptCue()

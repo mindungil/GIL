@@ -11,50 +11,60 @@ import (
 	"github.com/mindungil/gil/cli/internal/chat/render"
 )
 
-// fakeClient simulates the M2-narrowed SessionClient. The chat surface
-// only sends prompts and drains chunks/events now — verb dispatch is
-// gone (the agent calls tools server-side).
+// fakeClient simulates the M2-narrowed SessionClient. iter14a: drains
+// a single ordered Message queue (text + events interleaved by the
+// test) so order assertions match the production wire-order contract.
 type fakeClient struct {
-	assistantChunks []string
-	events          []TrackerInput
-	sentPrompts     []string
-	eventErr        error
-	sessionID       string
-	sessionList     []SessionSummary
+	messages    []Message
+	sentPrompts []string
+	streamErr   error
+	sessionID   string
+	sessionList []SessionSummary
+}
+
+// queueChunks is a convenience helper for tests that previously passed
+// assistantChunks=[a,b,c]: equivalent to appending three text Messages.
+func (f *fakeClient) queueChunks(chunks ...string) {
+	for _, c := range chunks {
+		f.messages = append(f.messages, Message{Kind: "text", Text: c})
+	}
+}
+
+// queueEvents appends events at the end of the message queue (used by
+// tests that previously set events: ...).
+func (f *fakeClient) queueEvents(evs ...TrackerInput) {
+	for _, e := range evs {
+		f.messages = append(f.messages, Message{Kind: "event", Event: e})
+	}
 }
 
 func (f *fakeClient) SendPrompt(_ context.Context, prompt string) error {
 	f.sentPrompts = append(f.sentPrompts, prompt)
 	return nil
 }
-func (f *fakeClient) NextAssistantChunk(_ context.Context) (string, bool, error) {
-	if len(f.assistantChunks) == 0 {
-		return "", false, nil
+
+func (f *fakeClient) NextMessage(_ context.Context) (Message, bool, error) {
+	if f.streamErr != nil {
+		err := f.streamErr
+		f.streamErr = nil
+		return Message{}, false, err
 	}
-	c := f.assistantChunks[0]
-	f.assistantChunks = f.assistantChunks[1:]
-	return c, len(f.assistantChunks) > 0, nil
+	if len(f.messages) == 0 {
+		return Message{}, false, nil
+	}
+	m := f.messages[0]
+	f.messages = f.messages[1:]
+	return m, true, nil
 }
-func (f *fakeClient) NextEvent(_ context.Context) (TrackerInput, bool, error) {
-	if f.eventErr != nil {
-		err := f.eventErr
-		f.eventErr = nil
-		return TrackerInput{}, false, err
-	}
-	if len(f.events) == 0 {
-		return TrackerInput{}, false, nil
-	}
-	e := f.events[0]
-	f.events = f.events[1:]
-	return e, true, nil
-}
+
 func (f *fakeClient) Close() error                                             { return nil }
 func (f *fakeClient) ActiveSessionID() string                                  { return f.sessionID }
 func (f *fakeClient) ListSessions(_ context.Context) ([]SessionSummary, error) { return f.sessionList, nil }
 
 func TestLoop_BarePrompt_SendsAndRendersAssistant(t *testing.T) {
 	mock := render.NewMockRenderer()
-	fc := &fakeClient{assistantChunks: []string{"hello ", "world"}}
+	fc := &fakeClient{}
+	fc.queueChunks("hello ", "world")
 	in := strings.NewReader("hi there\nquit\n")
 	err := Run(context.Background(), Config{In: in, Renderer: mock, Client: fc})
 	require.NoError(t, err)
@@ -65,13 +75,29 @@ func TestLoop_BarePrompt_SendsAndRendersAssistant(t *testing.T) {
 }
 
 func TestLoop_TerminalExit_BareWordExits(t *testing.T) {
-	for _, word := range []string{"quit", "exit", "bye", "QUIT", "/quit", "/exit"} {
+	for _, word := range []string{"quit", "exit", "bye", "QUIT"} {
 		mock := render.NewMockRenderer()
 		fc := &fakeClient{}
 		in := strings.NewReader(word + "\n")
 		err := Run(context.Background(), Config{In: in, Renderer: mock, Client: fc})
 		require.NoError(t, err, "exit word %q should clean-quit", word)
 		require.Empty(t, fc.sentPrompts, "exit word %q must not be sent to the daemon", word)
+	}
+}
+
+// iter210: slash-prefixed exit forms were dropped — the natural-language
+// single-surface contract has no slash escape hatch. They now forward
+// to the daemon like any other input. Users who used to type /quit can
+// type quit (bare) or hit Ctrl+D (EOF).
+func TestLoop_SlashExitForms_ForwardLikeAnyText(t *testing.T) {
+	for _, slash := range []string{"/quit", "/exit"} {
+		mock := render.NewMockRenderer()
+		fc := &fakeClient{}
+		in := strings.NewReader(slash + "\n")
+		err := Run(context.Background(), Config{In: in, Renderer: mock, Client: fc})
+		require.NoError(t, err)
+		require.Equal(t, []string{slash}, fc.sentPrompts,
+			"slash exit %q must forward to daemon — no client-side recognition", slash)
 	}
 }
 
@@ -90,7 +116,8 @@ func TestLoop_NL_AlwaysForwards_NoSlashDispatch(t *testing.T) {
 		"한국어 입력",
 	} {
 		mock := render.NewMockRenderer()
-		fc := &fakeClient{assistantChunks: []string{"ok"}}
+		fc := &fakeClient{}
+		fc.queueChunks("ok")
 		in := strings.NewReader(phrase + "\nquit\n")
 		err := Run(context.Background(), Config{In: in, Renderer: mock, Client: fc})
 		require.NoError(t, err)
@@ -101,7 +128,8 @@ func TestLoop_NL_AlwaysForwards_NoSlashDispatch(t *testing.T) {
 
 func TestLoop_StatusStripOnlyRedrawsOnPhaseChange(t *testing.T) {
 	mock := render.NewMockRenderer()
-	fc := &fakeClient{assistantChunks: []string{"hello"}}
+	fc := &fakeClient{}
+	fc.queueChunks("hello")
 	in := strings.NewReader("hi\n\nquit\n")
 	err := Run(context.Background(), Config{In: in, Renderer: mock, Client: fc})
 	require.NoError(t, err)
@@ -122,4 +150,270 @@ func TestLoop_ContextCancelled_ReturnsErr(t *testing.T) {
 	cancel()
 	err := Run(ctx, Config{In: strings.NewReader("hello\n"), Renderer: mock, Client: fc})
 	require.True(t, errors.Is(err, context.Canceled))
+}
+
+// L2 inline-drain regression (now iter14a-strengthened): tool events
+// must render in WIRE order with assistant text. With unified msgCh,
+// "in wire order" means literal queue order — events first when queued
+// first, interleaved when interleaved.
+func TestLoop_ToolEventsInterleaveWithAssistantText(t *testing.T) {
+	mock := render.NewMockRenderer()
+	fc := &fakeClient{}
+	fc.queueEvents(
+		TrackerInput{Kind: "tool.call", ToolName: "read_file", ToolInput: `{"path":"x"}`},
+		TrackerInput{Kind: "tool.result", ToolContent: "ok"},
+	)
+	fc.queueChunks("hello ", "world")
+	in := strings.NewReader("hi\nquit\n")
+	err := Run(context.Background(), Config{In: in, Renderer: mock, Client: fc})
+	require.NoError(t, err)
+	seq := mock.MethodSequence()
+	firstSystemNote := indexOf(seq, "SystemNote")
+	firstAssistant := indexOf(seq, "AssistantText")
+	require.NotEqual(t, -1, firstSystemNote)
+	require.NotEqual(t, -1, firstAssistant)
+	require.Less(t, firstSystemNote, firstAssistant,
+		"events queued before text must render first; got sequence %v", seq)
+}
+
+// iter14a regression: wire order is preserved even when text appears
+// BETWEEN two events. Pre-fix, drainPendingEvents drained all pending
+// events before each NextAssistantChunk, which inverted this ordering
+// (e1, e2, text1, text2 instead of text1, e1, text2, e2). With unified
+// msgCh, the consumer pulls items strictly in producer order.
+func TestLoop_PreservesWireOrder_TextBetweenEvents(t *testing.T) {
+	mock := render.NewMockRenderer()
+	// Non-empty sessionID skips the welcome disclosure SystemNote so we
+	// only observe renders from the message queue under test.
+	fc := &fakeClient{sessionID: "01TEST"}
+	// Wire order: text1, event1, text2, event2.
+	fc.messages = []Message{
+		{Kind: "text", Text: "first "},
+		{Kind: "event", Event: TrackerInput{
+			Kind: "tool.call", ToolName: "read_file", ToolInput: `{"path":"a"}`,
+		}},
+		{Kind: "text", Text: "second"},
+		{Kind: "event", Event: TrackerInput{
+			Kind: "tool.result", ToolContent: "ok",
+		}},
+	}
+	in := strings.NewReader("hi\nquit\n")
+	err := Run(context.Background(), Config{In: in, Renderer: mock, Client: fc})
+	require.NoError(t, err)
+	seq := mock.MethodSequence()
+	// Strip the framing methods we don't care about for ordering: keep
+	// only AssistantText (text chunks) and SystemNote (event renders).
+	var rendered []string
+	for _, m := range seq {
+		if m == "AssistantText" || m == "SystemNote" {
+			rendered = append(rendered, m)
+		}
+	}
+	// Pre-fix this would be [SystemNote, SystemNote, AssistantText,
+	// AssistantText, AssistantText(\n)] — events drained first.
+	// With unified msgCh, expect interleaved order matching the queue:
+	// AssistantText("first "), SystemNote(event), AssistantText("second"),
+	// SystemNote(event), plus the trailing AssistantText("\n") and
+	// possibly an inline newline-separator AssistantText between text
+	// and event.
+	require.GreaterOrEqual(t, len(rendered), 4,
+		"expected at least 4 rendered items; got %v", rendered)
+	// First rendered item must be AssistantText (text1 came first on the wire).
+	require.Equal(t, "AssistantText", rendered[0],
+		"first item on wire was text; must render first. got %v", rendered)
+	// First SystemNote must come AFTER the first AssistantText.
+	firstNote := indexOf(rendered, "SystemNote")
+	firstText := indexOf(rendered, "AssistantText")
+	require.Less(t, firstText, firstNote,
+		"text1 must render before event1; got %v", rendered)
+}
+
+// P33: a "reasoning" Message dispatches to AssistantReasoning, not
+// AssistantText. Order matters — reasoning streamed before final
+// answer must render in the same wire order.
+func TestLoop_Reasoning_DispatchesToAssistantReasoning(t *testing.T) {
+	mock := render.NewMockRenderer()
+	fc := &fakeClient{sessionID: "01TEST"}
+	fc.messages = []Message{
+		{Kind: "reasoning", Text: "let me think through this..."},
+		{Kind: "text", Text: "the answer is 42"},
+	}
+	in := strings.NewReader("hi\nquit\n")
+	err := Run(context.Background(), Config{In: in, Renderer: mock, Client: fc})
+	require.NoError(t, err)
+
+	var reasoningIdx, textIdx int = -1, -1
+	for i, c := range mock.Calls {
+		if c.Method == "AssistantReasoning" && reasoningIdx == -1 {
+			reasoningIdx = i
+			require.Equal(t, "let me think through this...", c.Text)
+		}
+		if c.Method == "AssistantText" && c.Text == "the answer is 42" && textIdx == -1 {
+			textIdx = i
+		}
+	}
+	require.NotEqual(t, -1, reasoningIdx, "AssistantReasoning never called")
+	require.NotEqual(t, -1, textIdx, "AssistantText for answer never called")
+	require.Less(t, reasoningIdx, textIdx,
+		"reasoning must render before final answer; got order %v", mock.MethodSequence())
+}
+
+// P33: ESC bytes in reasoning chunks get stripped at the same chokepoint
+// as text — a hostile file echoed into the model's reasoning could still
+// repaint the terminal otherwise.
+func TestLoop_Reasoning_StripsEscSequences(t *testing.T) {
+	mock := render.NewMockRenderer()
+	fc := &fakeClient{sessionID: "01TEST"}
+	fc.messages = []Message{
+		{Kind: "reasoning", Text: "step\x1b[2K1\nstep\x072"},
+	}
+	in := strings.NewReader("hi\nquit\n")
+	err := Run(context.Background(), Config{In: in, Renderer: mock, Client: fc})
+	require.NoError(t, err)
+	for _, c := range mock.Calls {
+		if c.Method != "AssistantReasoning" {
+			continue
+		}
+		require.NotContains(t, c.Text, "\x1b")
+		require.NotContains(t, c.Text, "\x07")
+	}
+}
+
+// iter118a regression: assistant text chunks must have ESC + DEL
+// stripped before reaching the renderer. Newlines must survive.
+func TestLoop_AssistantText_StripsEscSequences(t *testing.T) {
+	mock := render.NewMockRenderer()
+	fc := &fakeClient{sessionID: "01TEST"}
+	fc.messages = []Message{
+		{Kind: "text", Text: "line1\x1b[2Kspoofed\nline2\x07ok\n"},
+	}
+	in := strings.NewReader("hi\nquit\n")
+	err := Run(context.Background(), Config{In: in, Renderer: mock, Client: fc})
+	require.NoError(t, err)
+	for _, c := range mock.Calls {
+		if c.Method != "AssistantText" {
+			continue
+		}
+		require.NotContains(t, c.Text, "\x1b",
+			"AssistantText must not carry ESC bytes; got %q", c.Text)
+		require.NotContains(t, c.Text, "\x07",
+			"AssistantText must not carry BEL bytes; got %q", c.Text)
+	}
+}
+
+// iter91a regression: tool.result body and tool.call input must be
+// stripped of control chars before SystemNote. Pre-fix, an attacker-
+// controlled file echoed via read_file's ToolContent could emit raw
+// ESC sequences that repaint the terminal.
+func TestLoop_ToolEventDisplay_StripsControlChars(t *testing.T) {
+	mock := render.NewMockRenderer()
+	fc := &fakeClient{sessionID: "01TEST"}
+	fc.messages = []Message{
+		{Kind: "event", Event: TrackerInput{
+			Kind: "tool.call", ToolName: "read_file",
+			ToolInput: "{\"path\":\"a\x1b[31mEVIL\x1b[0m\"}",
+		}},
+		{Kind: "event", Event: TrackerInput{
+			Kind:        "tool.result",
+			ToolContent: "ok\x1b[2K\x1b[1Aspoofed",
+		}},
+	}
+	in := strings.NewReader("hi\nquit\n")
+	err := Run(context.Background(), Config{In: in, Renderer: mock, Client: fc})
+	require.NoError(t, err)
+	for _, c := range mock.Calls {
+		if c.Method != "SystemNote" {
+			continue
+		}
+		require.NotContains(t, c.Text, "\x1b",
+			"SystemNote must not carry ESC bytes; got %q", c.Text)
+	}
+}
+
+func indexOf(s []string, needle string) int {
+	for i, v := range s {
+		if v == needle {
+			return i
+		}
+	}
+	return -1
+}
+
+// P53: when SendPrompt returns a "daemon disappeared" error
+// (Unavailable / connection refused / socket gone), the REPL must
+// exit cleanly with a single system note. Without this, the loop
+// kept hitting send-failed for every subsequent input.
+type daemonGoneClient struct {
+	fakeClient
+	sendErr error
+}
+
+func (d *daemonGoneClient) SendPrompt(_ context.Context, prompt string) error {
+	d.sentPrompts = append(d.sentPrompts, prompt)
+	return d.sendErr
+}
+
+func TestLoop_SendPrompt_DaemonGone_ExitsCleanly(t *testing.T) {
+	for _, errMsg := range []string{
+		"rpc error: code = Unavailable desc = connection error",
+		"dial unix /tmp/gild.sock: connect: connection refused",
+		"transport: error while dialing: socket no such file or directory",
+		"write: broken pipe",
+	} {
+		t.Run(errMsg, func(t *testing.T) {
+			mock := render.NewMockRenderer()
+			fc := &daemonGoneClient{sendErr: errors.New(errMsg)}
+			// Send a prompt; SendPrompt will return the daemon-gone error.
+			in := strings.NewReader("hi\n")
+			err := Run(context.Background(), Config{In: in, Renderer: mock, Client: fc})
+			require.Error(t, err, "loop must return an error on daemon-gone")
+			require.Contains(t, err.Error(), "daemon unavailable")
+			// Exactly ONE SendPrompt attempted (no loop-forever).
+			require.Len(t, fc.sentPrompts, 1)
+		})
+	}
+}
+
+func TestLoop_SendPrompt_OtherError_KeepsLooping(t *testing.T) {
+	// Non-daemon errors (e.g. validation) should still note + continue,
+	// matching the pre-P53 behavior for everything except the
+	// daemon-disappeared signal.
+	mock := render.NewMockRenderer()
+	fc := &daemonGoneClient{sendErr: errors.New("bad request: empty prompt")}
+	// Provide stdin with one input then EOF; the loop should attempt
+	// SendPrompt, note the error, then read EOF and exit clean (nil err).
+	in := strings.NewReader("hi\n")
+	err := Run(context.Background(), Config{In: in, Renderer: mock, Client: fc})
+	require.NoError(t, err, "non-daemon errors should not terminate the loop with an error")
+}
+
+// P59: --once mode exits after the first prompt's stream drains
+// successfully. Without --once, the loop blocks on scanner.Scan()
+// waiting for the next user input. With --once + stdin holding 2
+// lines, ONLY the first line is processed; the second is left
+// unread.
+func TestLoop_OnceMode_ExitsAfterFirstTurn(t *testing.T) {
+	mock := render.NewMockRenderer()
+	fc := &fakeClient{}
+	// Two prompts queued; --once should only consume the first.
+	in := strings.NewReader("first\nsecond\n")
+	err := Run(context.Background(), Config{
+		In: in, Renderer: mock, Client: fc, Once: true,
+	})
+	require.NoError(t, err)
+	require.Equal(t, []string{"first"}, fc.sentPrompts,
+		"--once must consume exactly 1 prompt; got %v", fc.sentPrompts)
+}
+
+func TestLoop_DefaultMode_ConsumesAllInputUntilEOF(t *testing.T) {
+	// Sanity: without --once, the loop should drain both prompts.
+	mock := render.NewMockRenderer()
+	fc := &fakeClient{}
+	in := strings.NewReader("first\nsecond\n")
+	err := Run(context.Background(), Config{
+		In: in, Renderer: mock, Client: fc,
+	})
+	require.NoError(t, err)
+	require.Equal(t, []string{"first", "second"}, fc.sentPrompts,
+		"default mode must drain all input until EOF")
 }

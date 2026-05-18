@@ -12,26 +12,18 @@ import (
 // We declare a minimal local enum so this test stays decoupled from
 // the proto package while we wire the real types.
 type fakeEvent struct {
-	Kind        string
-	SlotsFilled int
-	SlotsTotal  int
-	Saturation  float64
-	AdvFindings int
-	Iter        int
-	MaxIter     int
-	CostUSD     float64
-	Status      string
-	ChecksOK    int
-	ChecksTot   int
+	Kind      string
+	Iter      int
+	MaxIter   int
+	CostUSD   float64
+	Status    string
+	ChecksOK  int
+	ChecksTot int
 }
 
 func (f fakeEvent) ToTrackerInput() TrackerInput {
 	return TrackerInput{
 		Kind:         f.Kind,
-		SlotsFilled:  f.SlotsFilled,
-		SlotsTotal:   f.SlotsTotal,
-		Saturation:   f.Saturation,
-		AdvFindings:  f.AdvFindings,
 		Iter:         f.Iter,
 		MaxIter:      f.MaxIter,
 		CostUSD:      f.CostUSD,
@@ -46,29 +38,12 @@ func TestTracker_StartsIdle(t *testing.T) {
 	require.Equal(t, render.PhaseIdle, tr.State().Phase)
 }
 
-func TestTracker_InterviewSlotProgress(t *testing.T) {
-	tr := NewTracker()
-	tr.Apply(fakeEvent{Kind: "interview.slot_filled", SlotsFilled: 4, SlotsTotal: 11, Saturation: 0.36}.ToTrackerInput())
-	s := tr.State()
-	require.Equal(t, render.PhaseInterview, s.Phase)
-	require.Equal(t, 4, s.SlotsFilled)
-	require.Equal(t, 11, s.SlotsTotal)
-	require.InDelta(t, 0.36, s.Saturation, 0.001)
-}
-
-func TestTracker_AdversaryFindingAccumulates(t *testing.T) {
-	tr := NewTracker()
-	tr.Apply(fakeEvent{Kind: "interview.adversary", AdvFindings: 1}.ToTrackerInput())
-	require.Equal(t, 1, tr.State().AdvFindings)
-	tr.Apply(fakeEvent{Kind: "interview.adversary", AdvFindings: 3}.ToTrackerInput())
-	require.Equal(t, 3, tr.State().AdvFindings, "tracker overwrites with latest count")
-}
-
-func TestTracker_SaturationReadyTransitionsToAwaitingConfirm(t *testing.T) {
-	tr := NewTracker()
-	tr.Apply(fakeEvent{Kind: "interview.ready_to_freeze"}.ToTrackerInput())
-	require.Equal(t, render.PhaseAwaitingConfirm, tr.State().Phase)
-}
+// iter211: the interview engine was deleted in M3, so the tracker no
+// longer recognizes interview.* event kinds. The tests that used to
+// pin slot_filled / adversary / ready_to_freeze / started / resumed
+// transitions are gone with the producers — the goal-assembly path is
+// the freeze_spec tool inside the chat agent's natural-language stream
+// now, not a separate phase the strip needs to surface.
 
 func TestTracker_RunStartsAndIters(t *testing.T) {
 	tr := NewTracker()
@@ -87,21 +62,6 @@ func TestTracker_StuckSignal(t *testing.T) {
 	tr.Apply(fakeEvent{Kind: "run.started", MaxIter: 100}.ToTrackerInput())
 	tr.Apply(fakeEvent{Kind: "run.stuck", Iter: 45, MaxIter: 100}.ToTrackerInput())
 	require.Equal(t, render.PhaseStuck, tr.State().Phase)
-}
-
-func TestTracker_InterviewStarted_FlipsToInterviewPhase(t *testing.T) {
-	// sensing → conversation transition. Before #39's fix this was
-	// silently dropped; now it must flip the phase so the strip
-	// stops saying "idle" while the engine is actively interviewing.
-	tr := NewTracker()
-	tr.Apply(TrackerInput{Kind: "interview.started", Reason: "domain=cli-tooling confidence=0.85"})
-	require.Equal(t, render.PhaseInterview, tr.State().Phase)
-}
-
-func TestTracker_InterviewResumed_FlipsToInterviewPhase(t *testing.T) {
-	tr := NewTracker()
-	tr.Apply(TrackerInput{Kind: "interview.resumed"})
-	require.Equal(t, render.PhaseInterview, tr.State().Phase)
 }
 
 func TestTracker_RecoveredFlipsBackToRun(t *testing.T) {

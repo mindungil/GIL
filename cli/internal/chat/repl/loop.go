@@ -12,15 +12,43 @@ import (
 	"github.com/mindungil/gil/cli/internal/errmap"
 )
 
+// isDaemonGoneErr reports whether err looks like the daemon went
+// away mid-session (gild process gone, socket missing, gRPC channel
+// errored as Unavailable). Used by the REPL loop to exit cleanly
+// rather than spinning forever on every subsequent input. Match
+// strings rather than typed errors to avoid pulling in grpc/codes
+// at this layer (the loop is decoupled from the SDK boundary).
+func isDaemonGoneErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	for _, sig := range []string{
+		"unavailable",
+		"connection refused",
+		"connection reset",
+		"no such file or directory", // socket gone
+		"broken pipe",
+		"transport: error while dialing",
+	} {
+		if strings.Contains(msg, sig) {
+			return true
+		}
+	}
+	return false
+}
+
 // isTerminalExit reports whether a bare line should exit the REPL.
-// Per docs/design/chat-architecture.md §3.1, terminal exit is the
-// ONE client-side recognition that survives the slash-removal pass —
-// the chat surface never matches strings to verbs otherwise. Slash-
-// prefixed forms (`/quit`, `/exit`) also exit so users with the
-// muscle memory don't get punished.
+// Per docs/design/chat-architecture.md §3.1 (and the user-stated rule
+// "슬래시 escape hatch도 없음"), terminal exit is the ONE client-side
+// recognition that survives the slash-removal pass — the chat surface
+// never matches strings to verbs otherwise. No slash-prefixed forms:
+// the recognition is on the bare English word so the natural-language
+// posture stays intact. Users with slash muscle memory can still type
+// the bare word or hit Ctrl+D (EOF).
 func isTerminalExit(line string) bool {
 	switch strings.ToLower(strings.TrimSpace(line)) {
-	case "quit", "exit", "bye", "/quit", "/exit":
+	case "quit", "exit", "bye":
 		return true
 	}
 	return false
@@ -44,10 +72,13 @@ type SessionSummary struct {
 // Verb dispatch (Spec/Status/Diff/Merge/StartRun/Compact/SwitchSession/
 // NewSession) was removed — the agent calls those as tools server-side.
 // ListSessions stays for the pre-first-turn entry disclosure.
+//
+// iter14a: NextAssistantChunk + NextEvent collapsed into NextMessage
+// to enforce wire-order rendering. The dual-channel design raced when
+// text arrived between tool events (eval-loop iter14 L9 / iter15 L15).
 type SessionClient interface {
 	SendPrompt(ctx context.Context, prompt string) error
-	NextAssistantChunk(ctx context.Context) (chunk string, more bool, err error)
-	NextEvent(ctx context.Context) (in TrackerInput, ok bool, err error)
+	NextMessage(ctx context.Context) (msg Message, more bool, err error)
 
 	ActiveSessionID() string
 	ListSessions(ctx context.Context) ([]SessionSummary, error)
@@ -59,15 +90,15 @@ type Config struct {
 	In       io.Reader
 	Renderer render.Renderer
 	Client   SessionClient
-	// Router was a §2.6(b) verb classifier on the client; M2 removed
-	// it (see core/intent/router.go header). Field stays here (always
-	// nil) to keep the cobra wiring in cli/internal/cmd/chat.go from
-	// breaking until M3 deletes both sides. Effectively dead.
-	Router *struct{}
+	// Once, when true, exits the REPL after the first prompt's
+	// stream drains successfully. Use for non-interactive piped
+	// invocation (gil chat --once < spec.txt) so the loop doesn't
+	// block waiting for a second prompt that will never come. P59.
+	Once bool
 }
 
-// Run executes the chat REPL until the user types /quit, EOF, or an
-// unrecoverable client error.
+// Run executes the chat REPL until the user types a bare exit word
+// (quit / exit / bye), hits EOF, or hits an unrecoverable client error.
 func Run(ctx context.Context, cfg Config) error {
 	if cfg.Renderer == nil {
 		return fmt.Errorf("repl.Run: Renderer required")
@@ -76,7 +107,7 @@ func Run(ctx context.Context, cfg Config) error {
 	cfg.Renderer.Banner(tr.State())
 
 	// §2.6 self-disclose: surface recent sessions inline at entry so the
-	// user doesn't need to know /sessions to find prior work. Soft-fails
+	// user can resume by name without first having to ask. Soft-fails
 	// on errors — the status strip still prints the idle hint.
 	if cfg.Client != nil && cfg.Client.ActiveSessionID() == "" {
 		emitWelcomeDisclosure(ctx, cfg)
@@ -97,11 +128,8 @@ func Run(ctx context.Context, cfg Config) error {
 			return err
 		}
 
-		// Drain any pending events into the tracker before deciding
-		// whether to repaint. This may emit system notes that are
-		// orthogonal to the strip — those still print regardless.
-		drainEvents(ctx, cfg, tr)
-
+		// iter14a: per-turn msgCh resets each turn, so there's nothing
+		// to drain between turns — cross-turn event leakage is gone.
 		state := tr.State()
 		if state.Phase != lastStripPhase {
 			cfg.Renderer.StatusStrip(state)
@@ -130,69 +158,106 @@ func Run(ctx context.Context, cfg Config) error {
 			return nil
 		}
 		if err := cfg.Client.SendPrompt(ctx, line); err != nil {
+			// P53: if the daemon has disappeared mid-session (UDS
+			// socket gone / Unavailable / connection refused), exit
+			// cleanly instead of looping the prompt forever. Without
+			// this, a `pkill gild` while a chat is open produced
+			// thousands of "send failed" lines until stdin EOF.
+			if isDaemonGoneErr(err) {
+				cfg.Renderer.SystemNote(render.NoteSystem,
+					"daemon disappeared mid-session — exiting. Restart gild and re-run gil chat to resume.")
+				return fmt.Errorf("daemon unavailable: %w", err)
+			}
 			cfg.Renderer.SystemNote(render.NoteSystem,
 				"send failed: "+errmap.FormatForChat(err))
 			continue
 		}
 		{
-			// Stream assistant chunks until the client signals done.
+			// iter14a: single ordered NextMessage consumer. Text chunks
+			// and tool events arrive on one channel in wire order, so
+			// the rendered sequence matches what the daemon emitted —
+			// no race, no out-of-order verify_missing mid-tool-sequence.
 			// A 30s watchdog converts a silent hang (gild waiting on a
-			// dead provider, no events ever) into a visible note so the
-			// user knows to ctrl+c rather than staring at an idle prompt.
-			gotAnyChunk := false
+			// dead provider) into a visible note.
+			gotAny := false
 			streamErrored := false
 			turnStart := time.Now()
 			warned := false
+			lastEndedWithNewline := true
 			for {
-				chunk, more, err := cfg.Client.NextAssistantChunk(ctx)
+				msg, more, err := cfg.Client.NextMessage(ctx)
 				if err != nil {
+					// P53: daemon-gone on the stream side too. The
+					// SendPrompt path catches the first attempt after
+					// the daemon dies; this catches the case where the
+					// daemon dies mid-stream (after SendPrompt returned
+					// fine). Exit cleanly instead of continuing the
+					// outer prompt loop just to fail SendPrompt next.
+					if isDaemonGoneErr(err) {
+						cfg.Renderer.SystemNote(render.NoteSystem,
+							"daemon disappeared mid-stream — exiting. Restart gild and re-run gil chat to resume.")
+						return fmt.Errorf("daemon unavailable mid-stream: %w", err)
+					}
 					cfg.Renderer.SystemNote(render.NoteSystem,
 						"stream error: "+humanizeStreamErr(err))
 					streamErrored = true
-					// #30: drainInterviewStream captures the error into
-					// streamErr; surface the wrapped form (with Hint when
-					// available) instead of dropping it on the floor.
 					break
-				}
-				if chunk != "" {
-					cfg.Renderer.AssistantText(chunk)
-					gotAnyChunk = true
 				}
 				if !more {
 					break
 				}
-				if !warned && !gotAnyChunk && time.Since(turnStart) > 30*time.Second {
+				switch msg.Kind {
+				case "text":
+					if msg.Text != "" {
+						// iter118a: an LLM influenced by hostile file content
+						// could echo ESC sequences in its reply. Strip ESC + DEL
+						// + other dangerous control bytes while preserving the
+						// whitespace humans actually want (\n \r \t).
+						clean := sanitizeAssistantChunk(msg.Text)
+						cfg.Renderer.AssistantText(clean)
+						gotAny = true
+						lastEndedWithNewline = strings.HasSuffix(clean, "\n")
+					}
+				case "reasoning":
+					// P33: separated chain-of-thought from the upstream.
+					// Same ESC-strip as final text (model could echo bytes
+					// from a hostile file into its reasoning trace too).
+					if msg.Text != "" {
+						clean := sanitizeAssistantChunk(msg.Text)
+						cfg.Renderer.AssistantReasoning(clean)
+						gotAny = true
+						lastEndedWithNewline = strings.HasSuffix(clean, "\n")
+					}
+				case "event":
+					if !lastEndedWithNewline {
+						cfg.Renderer.AssistantText("\n")
+						lastEndedWithNewline = true
+					}
+					prev := tr.State()
+					tr.Apply(msg.Event)
+					emitDeltaNotes(cfg.Renderer, prev, tr.State(), msg.Event)
+					gotAny = true
+				}
+				if !warned && !gotAny && time.Since(turnStart) > 30*time.Second {
 					cfg.Renderer.SystemNote(render.NoteSystem,
 						"no response after 30s — daemon may be hung on a provider call. check `tail /tmp/gild.log`, ctrl+c to abort")
 					warned = true
 				}
 			}
-			if !gotAnyChunk && !streamErrored {
-				// Clean stream close with no events — daemon path
-				// completed silently. Surface so the user knows their
-				// turn produced nothing rather than staring at idle.
+			if !gotAny && !streamErrored {
 				cfg.Renderer.SystemNote(render.NoteSystem,
 					"empty stream — interview produced no output (provider misconfigured or auth missing?)")
 			}
 			cfg.Renderer.AssistantText("\n")
 		}
-	}
-}
-
-func drainEvents(ctx context.Context, cfg Config, tr *Tracker) {
-	for {
-		in, ok, err := cfg.Client.NextEvent(ctx)
-		if err != nil {
-			cfg.Renderer.SystemNote(render.NoteSystem,
-				"event stream error: "+errmap.FormatForChat(err))
-			return
+		// P59: --once mode exits after the first prompt's stream
+		// drains successfully. Use for piped/scripted invocation
+		// where the agent's "are you done?"-style trailing question
+		// would otherwise hang the loop waiting on a second stdin
+		// line that never comes.
+		if cfg.Once {
+			return nil
 		}
-		if !ok {
-			return
-		}
-		prev := tr.State()
-		tr.Apply(in)
-		emitDeltaNotes(cfg.Renderer, prev, tr.State(), in)
 	}
 }
 
@@ -215,9 +280,9 @@ func emitDeltaNotes(r render.Renderer, prev, cur render.SessionState, ev Tracker
 		if len(input) > 80 {
 			input = input[:80] + "…"
 		}
-		msg := "⚒ " + ev.ToolName
+		msg := "⚒ " + sanitizeDisplayString(ev.ToolName)
 		if input != "" && input != "{}" {
-			msg += "  " + input
+			msg += "  " + sanitizeDisplayString(input)
 		}
 		r.SystemNote(render.NoteSystem, msg)
 	case "tool.result":
@@ -230,35 +295,23 @@ func emitDeltaNotes(r render.Renderer, prev, cur render.SessionState, ev Tracker
 			body = body[:200] + "…"
 		}
 		body = strings.ReplaceAll(body, "\n", " · ")
+		// Strip control chars (incl. ESC) so a tool result echoing
+		// attacker-controlled file content can't poison the terminal.
+		// Same defense as the session-row label sanitizer (iter71a).
+		body = sanitizeDisplayString(body)
 		r.SystemNote(render.NoteSystem, glyph+"  "+body)
 	case "prompt.metrics":
 		// Tokens / latency are reflected in the strip via
 		// Tracker.Apply — no need for a system note. Left as a
 		// no-op case to document where the kind comes from.
-	case "interview.slot_filled":
-		if cur.SlotsFilled > prev.SlotsFilled {
-			r.SystemNote(render.NoteSpec,
-				fmt.Sprintf("slot filled (%d/%d, sat %d%%)",
-					cur.SlotsFilled, cur.SlotsTotal, int(cur.Saturation*100+0.5)))
-		}
-	case "interview.adversary":
-		if cur.AdvFindings != prev.AdvFindings {
-			r.SystemNote(render.NoteAdversary,
-				fmt.Sprintf("%d finding(s)", cur.AdvFindings))
-		}
-	case "interview.started":
-		// Sensing → conversation. The Reason payload looks like
-		// "domain=cli-tooling confidence=0.85" — show it so the user
-		// knows what the engine inferred about their request.
-		msg := "interview started"
-		if ev.Reason != "" {
-			msg += " — " + ev.Reason
-		}
-		r.SystemNote(render.NoteSystem, msg)
-	case "interview.resumed":
-		r.SystemNote(render.NoteSystem, "resumed in-progress interview")
-	case "interview.ready_to_freeze":
-		r.SystemNote(render.NoteSaturation, "ready to freeze — /run to start")
+
+	// interview.slot_filled / adversary / started / resumed /
+	// ready_to_freeze handlers removed in iter211 — the M3 interview-
+	// engine deletion left no producer for any of those event kinds,
+	// so the case bodies were dead code. The chat surface assembles a
+	// spec via the freeze_spec tool inside the natural-language stream
+	// now; no separate phase to surface.
+
 	case "run.stuck":
 		// Surface WHICH pattern fired so the user can decide whether
 		// to wait for the auto-recovery strategy or step in. Reads
@@ -435,17 +488,64 @@ func truncateRetryReason(s string) string {
 // both the entry self-disclosure and /sessions. Single source of truth
 // for the row layout: short ID (10 chars covers full ms-precision ULID
 // timestamp), relative age, phase tag, label.
+//
+// iter71a defense-in-depth: legacy session rows in sessions.db may
+// contain raw control chars (ESC, etc.) from before the write-side
+// sanitization fix. Strip them at display time so even dirty rows
+// can't poison the terminal.
 func formatSessionRow(n int, s SessionSummary) string {
 	short := s.ID
 	if len(short) > 10 {
 		short = short[:10]
 	}
-	label := s.Name
+	label := sanitizeDisplayString(s.Name)
 	if label == "" {
 		label = "—"
 	}
 	return fmt.Sprintf("%d. %-10s  %-6s  [%s]  %s",
 		n, short, formatAge(s.CreatedAt), s.Phase, label)
+}
+
+// sanitizeDisplayString strips control characters from text destined
+// for the terminal. Mirrors truncateHint's filter on the write side;
+// applied at the render boundary as a belt-and-suspenders against
+// legacy data and any path that bypassed the write sanitizer.
+func sanitizeDisplayString(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		switch {
+		case r == '\t':
+			b.WriteByte(' ')
+		case r < 0x20 || r == 0x7f:
+			// drop
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// sanitizeAssistantChunk strips control bytes that drive terminal escape
+// sequences (ESC, DEL, BEL, etc.) while keeping \n \r \t — assistant
+// text is multiline, so collapsing whitespace like sanitizeDisplayString
+// does would mangle every reply. iter118a: same threat as iter71a /
+// iter91a but on the assistant stream itself, in case the model echoes
+// hostile bytes back from a file it just read.
+func sanitizeAssistantChunk(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		switch {
+		case r == '\n' || r == '\r' || r == '\t':
+			b.WriteRune(r)
+		case r < 0x20 || r == 0x7f:
+			// drop ESC, BEL, backspace, DEL, etc.
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 // emitWelcomeDisclosure prints a one-line lead-in plus up to topN recent
@@ -467,13 +567,18 @@ func emitWelcomeDisclosure(ctx context.Context, cfg Config) {
 	if len(shown) > topN {
 		shown = shown[:topN]
 	}
+	// iter61: M3 removed client-side session resume dispatch, so the
+	// previous "pick one below" / "resume one" copy was misleading —
+	// users had no actual way to resume from chat. Banner is now
+	// purely informational ("recent work for context"); a new task
+	// always starts a fresh session.
 	var lead string
 	if len(list) == 1 {
-		lead = "1 past session — pick it below or describe a new task"
+		lead = "1 past session — context only; describe a new task"
 	} else if len(list) <= topN {
-		lead = fmt.Sprintf("%d past sessions — pick one below or describe a new task", len(list))
+		lead = fmt.Sprintf("%d past sessions — context only; describe a new task", len(list))
 	} else {
-		lead = fmt.Sprintf("%d past sessions — most recent %d below, describe a new task or resume one",
+		lead = fmt.Sprintf("%d past sessions — most recent %d below (context only); describe a new task",
 			len(list), topN)
 	}
 	cfg.Renderer.SystemNote(render.NoteSystem, lead)

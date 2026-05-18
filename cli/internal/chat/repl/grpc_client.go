@@ -15,46 +15,51 @@ import (
 	"github.com/mindungil/gil/cli/internal/errmap"
 )
 
+// Message is one item from a Prompt stream turn, delivered in wire
+// order. Kind is "text" for an assistant text chunk (carried in Text)
+// or "event" for a server-emitted tracker event (carried in Event).
+// Producers emit Messages onto a single ordered channel so consumers
+// render them in the order they arrived from the daemon. Replaces the
+// pre-iter14a split chunkCh/eventCh whose two-goroutine demux raced
+// when text arrived between two tool events, surfacing verify_missing
+// mid-tool-sequence (eval-loop iter14 L9, iter15 L15).
+type Message struct {
+	Kind  string // "text" | "event"
+	Text  string
+	Event TrackerInput
+}
+
 // GRPCClient adapts sdk.Client to the SessionClient interface.
 //
 // Streaming model:
-//   - Each user turn opens an interview server stream (StartInterview on
-//     the first turn; ReplyInterview on subsequent turns). SendPrompt
-//     allocates a fresh chunkCh and chunkDone for the turn, then launches
-//     drainInterviewStream with those channels captured by value.
-//     AgentTurn payloads flow through chunkCh; other proto events become
-//     TrackerInput on eventCh; chunkDone is closed when the stream ends.
-//     Per-turn channels prevent stale chunks from leaking across turns
-//     and stop a dying goroutine from closing the new turn's done channel.
-//   - Run progress events come from RunService.Tail. startTailLoop runs
-//     until the context is cancelled or the stream ends.
+//   - Each user turn opens a SessionService.Prompt server stream.
+//     SendPrompt allocates a fresh msgCh + msgDone for the turn, then
+//     launches drainPromptStream pushing all Parts (text + tool events
+//     + session.allocated + metrics) onto msgCh in wire order. Done
+//     closes msgDone. Per-turn channels prevent stale items from
+//     leaking across turns.
 //
-// Known limitation: drainInterviewStream does not observe ctx; its
+// Known limitation: drainPromptStream does not observe ctx; its
 // goroutine outlives /quit until the underlying stream closes. Acceptable
-// for V1 dogfood since process exit closes the gRPC connection. T13/T14
-// follow-up may plumb a per-turn ctx to enable eager cancellation.
+// for V1 dogfood since process exit closes the gRPC connection.
 type GRPCClient struct {
 	sdk        *sdk.Client
 	activeSess string
 	workingDir string
 
-	// providerName / model are forwarded to StartInterview when set.
-	// Empty values fall through to the daemon's workspace-config
-	// defaults (server/internal/service/interview.go applies layered
-	// workspace.Resolve when both are empty).
 	providerName string
 	model        string
 
-	// chunkCh receives assistant text chunks for the current turn.
-	chunkCh chan string
-	// chunkDone is closed when the current interview stream ends.
-	chunkDone chan struct{}
-	// streamErr captures the terminating error from the interview
-	// stream (non-EOF only). Read after chunkDone closes.
+	// msgCh receives all Prompt stream items for the current turn in
+	// wire order: text chunks AND tool events flow through the same
+	// channel so the consumer cannot interleave them out of order.
+	msgCh chan Message
+	// msgDone is closed when the current Prompt stream ends.
+	msgDone chan struct{}
+	// streamErr captures the terminating error from the Prompt stream
+	// (non-EOF only). Read after msgDone closes.
 	streamErrMu sync.Mutex
 	streamErr   error
-	// eventCh receives tracker events from both interview and run streams.
-	eventCh chan TrackerInput
 }
 
 // NewGRPCClient constructs a GRPCClient. workingDir is used when
@@ -63,9 +68,8 @@ func NewGRPCClient(s *sdk.Client, workingDir string) *GRPCClient {
 	return &GRPCClient{
 		sdk:        s,
 		workingDir: workingDir,
-		chunkCh:    make(chan string, 64),
-		chunkDone:  make(chan struct{}),
-		eventCh:    make(chan TrackerInput, 64),
+		msgCh:      make(chan Message, 64),
+		msgDone:    make(chan struct{}),
 	}
 }
 
@@ -105,8 +109,26 @@ func (g *GRPCClient) newSession(ctx context.Context, hint string) error {
 
 // truncateHint trims a free-form prompt to fit a single listing column.
 // Whitespace-collapses then cuts at max runes with an ellipsis when needed.
+//
+// iter71a: strip control characters before any further processing so
+// a prompt containing ANSI escape sequences can't poison the welcome-
+// banner display in subsequent `gil chat` sessions. strings.Fields
+// only splits on Unicode whitespace; ESC (0x1B) is NOT whitespace so
+// it would otherwise survive intact.
 func truncateHint(s string, max int) string {
-	s = strings.Join(strings.Fields(s), " ")
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		switch {
+		case r == '\n' || r == '\r' || r == '\t':
+			b.WriteByte(' ')
+		case r < 0x20 || r == 0x7f:
+			// drop control chars
+		default:
+			b.WriteRune(r)
+		}
+	}
+	s = strings.Join(strings.Fields(b.String()), " ")
 	if max <= 0 || len(s) <= max {
 		return s
 	}
@@ -157,9 +179,9 @@ func (g *GRPCClient) ListSessions(ctx context.Context) ([]SessionSummary, error)
 // on subsequent calls it calls ReplyInterview. If no session is active
 // one is auto-created.
 //
-// Each turn allocates fresh chunkCh/chunkDone so chunks cannot leak
-// between turns and the previous goroutine cannot close the new turn's
-// done channel.
+// Each turn allocates fresh msgCh/msgDone so items cannot leak between
+// turns and the previous goroutine cannot close the new turn's done
+// channel.
 //
 // Per docs/design/chat-architecture.md M2 this routes through the
 // single SessionService.Prompt RPC. Verb dispatch (diff, merge,
@@ -167,35 +189,34 @@ func (g *GRPCClient) ListSessions(ctx context.Context) ([]SessionSummary, error)
 // as separate RPCs. session_id may be empty for the first turn — the
 // first streamed Part carries SessionAllocatedPart with the new id.
 func (g *GRPCClient) SendPrompt(ctx context.Context, prompt string) error {
-	// Allocate fresh per-turn channels and snapshot for the goroutine.
-	g.chunkCh = make(chan string, 64)
-	g.chunkDone = make(chan struct{})
-	chunkCh := g.chunkCh
-	done := g.chunkDone
+	g.msgCh = make(chan Message, 64)
+	g.msgDone = make(chan struct{})
+	msgCh := g.msgCh
+	done := g.msgDone
 
 	stream, err := g.sdk.Prompt(ctx, sdk.PromptOptions{
-		SessionID: g.activeSess,
-		Text:      prompt,
-		Provider:  g.providerName,
-		Model:     g.model,
+		SessionID:  g.activeSess,
+		Text:       prompt,
+		Provider:   g.providerName,
+		Model:      g.model,
+		WorkingDir: g.workingDir,
 	})
 	if err != nil {
 		return errmap.WrapRPCError(err)
 	}
-	go g.drainPromptStream(stream, chunkCh, done)
+	go g.drainPromptStream(stream, msgCh, done)
 	return nil
 }
 
 // drainPromptStream consumes the SessionService.Prompt Part stream
-// for one turn. TextDelta parts feed chunkCh; ToolCallPart and
-// ToolResultPart become TrackerInput events the loop renders inline;
-// SessionAllocatedPart pins g.activeSess; PromptMetrics + DonePart
-// signal end-of-turn. Same per-turn snapshotting pattern as the old
-// drainInterviewStream — done is the snapshot taken at goroutine
-// launch, not whatever g.chunkDone happens to be later.
+// for one turn and pushes Messages onto msgCh in wire order. Text
+// Parts become Kind="text"; tool events, SessionAllocated, and Metrics
+// become Kind="event" with a TrackerInput payload. DonePart closes the
+// stream. Single channel = order-preserving by construction; the prior
+// dual-channel demux raced when text arrived between events.
 func (g *GRPCClient) drainPromptStream(
 	stream gilv1.SessionService_PromptClient,
-	chunkCh chan<- string,
+	msgCh chan<- Message,
 	done chan struct{},
 ) {
 	defer close(done)
@@ -212,49 +233,55 @@ func (g *GRPCClient) drainPromptStream(
 		switch b := ev.GetBody().(type) {
 		case *gilv1.Part_Text:
 			if b.Text != nil && b.Text.GetContent() != "" {
-				chunkCh <- b.Text.GetContent()
+				msgCh <- Message{Kind: "text", Text: b.Text.GetContent()}
+			}
+		case *gilv1.Part_Reasoning:
+			// P33: upstream-separated reasoning. Render as a distinct
+			// message kind so the loop can style it differently from
+			// the final answer (default: dim prefix, no persistence).
+			if b.Reasoning != nil && b.Reasoning.GetContent() != "" {
+				msgCh <- Message{Kind: "reasoning", Text: b.Reasoning.GetContent()}
 			}
 		case *gilv1.Part_ToolCall:
 			if b.ToolCall != nil {
-				g.eventCh <- TrackerInput{
+				msgCh <- Message{Kind: "event", Event: TrackerInput{
 					Kind:      "tool.call",
 					SessionID: g.activeSess,
 					ToolName:  b.ToolCall.GetName(),
 					ToolID:    b.ToolCall.GetId(),
 					ToolInput: b.ToolCall.GetInputJson(),
-				}
+				}}
 			}
 		case *gilv1.Part_ToolResult:
 			if b.ToolResult != nil {
-				g.eventCh <- TrackerInput{
+				msgCh <- Message{Kind: "event", Event: TrackerInput{
 					Kind:        "tool.result",
 					SessionID:   g.activeSess,
 					ToolID:      b.ToolResult.GetCallId(),
 					ToolContent: b.ToolResult.GetContent(),
 					ToolIsError: b.ToolResult.GetIsError(),
-				}
+				}}
 			}
 		case *gilv1.Part_SessionAllocated:
 			if b.SessionAllocated != nil {
 				g.activeSess = b.SessionAllocated.GetSessionId()
-				g.eventCh <- TrackerInput{
+				msgCh <- Message{Kind: "event", Event: TrackerInput{
 					Kind:      "session.allocated",
 					SessionID: g.activeSess,
-				}
+				}}
 			}
 		case *gilv1.Part_Metrics:
 			if b.Metrics != nil {
-				g.eventCh <- TrackerInput{
+				msgCh <- Message{Kind: "event", Event: TrackerInput{
 					Kind:      "prompt.metrics",
 					SessionID: g.activeSess,
 					Tokens:    b.Metrics.GetTokensIn() + b.Metrics.GetTokensOut(),
+					CostUSD:   b.Metrics.GetCostUsd(),
 					LatencyMs: b.Metrics.GetLatencyMs(),
-				}
+				}}
 			}
 		case *gilv1.Part_Done:
 			if b.Done != nil && b.Done.GetStopReason() == "error" {
-				// Stream-level error signal; surface via streamErr so
-				// the chat surface renders rather than silently EOFing.
 				g.streamErrMu.Lock()
 				g.streamErr = errors.New(b.Done.GetErrorMessage())
 				g.streamErrMu.Unlock()
@@ -264,76 +291,32 @@ func (g *GRPCClient) drainPromptStream(
 	}
 }
 
-// startTailLoop launches a background goroutine that subscribes to run
-// events via RunService.Tail and forwards them as TrackerInput to eventCh.
-// The goroutine runs until the ctx is cancelled or the stream ends.
-func (g *GRPCClient) startTailLoop(ctx context.Context) {
-	go func() {
-		stream, err := g.sdk.TailRun(ctx, g.activeSess)
-		if err != nil {
-			return
-		}
-		for {
-			ev, err := stream.Recv()
-			if err != nil {
-				return
-			}
-			in := mapRunEventToTracker(g.activeSess, ev)
-			if in.Kind != "" {
-				select {
-				case g.eventCh <- in:
-				case <-ctx.Done():
-					return
-				}
-			}
-		}
-	}()
-}
-
-// NextAssistantChunk returns the next text chunk from the current
-// interview turn. The caller pulls in a loop until more==false.
+// NextMessage returns the next item from the current Prompt stream
+// turn. Items arrive in wire order, so the caller renders them in the
+// order received.
 //
 // Contract:
-//   - A chunk received from chunkCh always returns more=true. The caller
-//     keeps pulling.
-//   - When chunkDone is closed AND chunkCh is drained, NextAssistantChunk
-//     returns ("", false, nil) — the turn is over.
-//   - On context cancellation, returns ("", false, ctx.Err()).
-func (g *GRPCClient) NextAssistantChunk(ctx context.Context) (string, bool, error) {
+//   - A Message received from msgCh returns (msg, true, nil).
+//   - When msgDone is closed AND msgCh is drained, returns
+//     (Message{}, false, streamErr) — the turn is over.
+//   - On context cancellation, returns (Message{}, false, ctx.Err()).
+func (g *GRPCClient) NextMessage(ctx context.Context) (Message, bool, error) {
 	select {
 	case <-ctx.Done():
-		return "", false, ctx.Err()
-	case chunk := <-g.chunkCh:
-		// We don't know if more chunks are coming; the producer signals
-		// completion by closing chunkDone, not by emptying chunkCh.
-		return chunk, true, nil
-	case <-g.chunkDone:
-		// Producer is done. Drain any chunk that arrived between the
-		// last receive and the close, then surface any captured stream
-		// error so chat REPL can render it instead of silently looping.
+		return Message{}, false, ctx.Err()
+	case msg := <-g.msgCh:
+		return msg, true, nil
+	case <-g.msgDone:
 		select {
-		case chunk := <-g.chunkCh:
-			return chunk, true, nil
+		case msg := <-g.msgCh:
+			return msg, true, nil
 		default:
 		}
 		g.streamErrMu.Lock()
 		serr := g.streamErr
 		g.streamErr = nil
 		g.streamErrMu.Unlock()
-		return "", false, serr
-	}
-}
-
-// NextEvent returns the next pending TrackerInput event without blocking.
-// Returns (zero, false, nil) when the eventCh is empty.
-func (g *GRPCClient) NextEvent(ctx context.Context) (TrackerInput, bool, error) {
-	select {
-	case <-ctx.Done():
-		return TrackerInput{}, false, ctx.Err()
-	case ev := <-g.eventCh:
-		return ev, true, nil
-	default:
-		return TrackerInput{}, false, nil
+		return Message{}, false, serr
 	}
 }
 

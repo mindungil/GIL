@@ -250,3 +250,40 @@ func TestToolApplyPatch_RejectsEscape(t *testing.T) {
 	res, _ := tool.run(context.Background(), sid, body)
 	require.True(t, res.IsError, "escaping path must be rejected")
 }
+
+// iter9: pre-image-not-found error includes the expected text + nearest
+// match hint so the agent can see indentation/whitespace mismatches
+// without re-reading the file.
+func TestApplyHunks_PreImageMissingErrorHasHintAndExpected(t *testing.T) {
+	src := "package x\n\nfunc Foo() {\n\treturn // tab indent\n}\n"
+	hunks := []patchHunk{
+		{
+			header: "",
+			lines: []patchLine{
+				{op: ' ', text: "func Foo() {"},
+				{op: ' ', text: "    return // wrong indent (4 spaces)"},
+				{op: '-', text: "}"},
+				{op: '+', text: "} // changed"},
+			},
+		},
+	}
+	_, _, _, err := applyHunks(src, hunks)
+	require.Error(t, err)
+	msg := err.Error()
+	require.Contains(t, msg, "pre-image not found")
+	require.Contains(t, msg, "Expected this exact text")
+	// nearestLineHint should kick in because trimmed "func Foo() {" matches
+	// the source line.
+	require.Contains(t, msg, "Closest match in file at line 3")
+	require.Contains(t, msg, "fall back to write_file")
+}
+
+func TestNearestLineHint(t *testing.T) {
+	hay := []string{"package x", "", "func Foo() {", "\treturn", "}"}
+	require.Contains(t, nearestLineHint(hay, "    func Foo() {"),
+		"line 3", "should find the trimmed match for 'func Foo()'")
+	require.Empty(t, nearestLineHint(hay, "totally unrelated"),
+		"no match, no hint")
+	require.Empty(t, nearestLineHint(hay, ""),
+		"empty target, no hint")
+}

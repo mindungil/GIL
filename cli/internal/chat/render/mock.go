@@ -22,6 +22,9 @@ func (m *MockRenderer) Banner(s SessionState) {
 func (m *MockRenderer) AssistantText(c string) {
 	m.Calls = append(m.Calls, MockCall{Method: "AssistantText", Text: c})
 }
+func (m *MockRenderer) AssistantReasoning(c string) {
+	m.Calls = append(m.Calls, MockCall{Method: "AssistantReasoning", Text: c})
+}
 func (m *MockRenderer) SystemNote(k NoteKind, msg string) {
 	m.Calls = append(m.Calls, MockCall{Method: "SystemNote", Kind: k, Text: msg})
 }

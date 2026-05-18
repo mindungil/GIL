@@ -11,6 +11,7 @@ type nopRenderer struct{}
 
 func (nopRenderer) Banner(SessionState)              {}
 func (nopRenderer) AssistantText(string)             {}
+func (nopRenderer) AssistantReasoning(string)        {}
 func (nopRenderer) SystemNote(NoteKind, string)      {}
 func (nopRenderer) StatusStrip(SessionState)         {}
 func (nopRenderer) PromptCue()                       {}

@@ -113,3 +113,24 @@ func TestClient_Close_Idempotent(t *testing.T) {
 	require.NoError(t, c.Close())
 	require.NoError(t, c.Close()) // second call is a no-op
 }
+
+// P47 — IsAlive reports false once the readPump has exited or Close
+// has been called. True while the subprocess is still running. Used
+// by RunService.ensureSessionMCPTools to evict dead cache entries.
+
+func TestClient_IsAlive_FalseAfterCloseChannel(t *testing.T) {
+	pr, pw := io.Pipe()
+	c := &Client{stdin: pw, stdout: pr, done: make(chan struct{})}
+	require.True(t, c.IsAlive(), "fresh client must be alive")
+	close(c.done)
+	require.False(t, c.IsAlive(), "client must be dead after readPump exit")
+}
+
+func TestClient_IsAlive_FalseAfterClose(t *testing.T) {
+	pr, pw := io.Pipe()
+	c := &Client{stdin: pw, stdout: pr, done: make(chan struct{})}
+	require.True(t, c.IsAlive())
+	close(c.done)         // simulate readPump exit so Close doesn't hang
+	require.NoError(t, c.Close())
+	require.False(t, c.IsAlive(), "client must be dead after Close")
+}

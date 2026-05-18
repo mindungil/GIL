@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -114,7 +115,7 @@ func (r *chatToolRegistry) filterByName(allow []string) *chatToolRegistry {
 // call. Returns the FULL registry; agent profiles' tool whitelists are
 // applied separately via filterByName so we have one canonical list of
 // what the daemon supports.
-func (s *SessionService) buildChatToolRegistry(runSvc *RunService) *chatToolRegistry {
+func (s *SessionService) buildChatToolRegistry(runSvc *RunService, parentProvider, parentModel string) *chatToolRegistry {
 	return &chatToolRegistry{
 		tools: []chatTool{
 			// Read-only meta tools (V1 baseline).
@@ -155,13 +156,16 @@ func (s *SessionService) buildChatToolRegistry(runSvc *RunService) *chatToolRegi
 			// with InterviewService in M3; without it the system_prompt's
 			// spec slot stays empty.
 			&toolFreezeSpec{sess: s, base: s.sessionsBase},
-			&toolStartRun{rs: runSvc},
+			&toolStartRun{rs: runSvc, parentProvider: parentProvider, parentModel: parentModel},
 			&toolApplyDiff{rs: runSvc, tracker: s.diffTracker},
 			// Subagent delegation (G5) — see agent_tools_subagent.go.
 			// spawn_agent creates a child session with a sliced spec
 			// and detached run; wait_agent blocks until terminal;
 			// agent_status peeks without blocking.
-			&toolSpawnAgent{sess: s, rs: runSvc, registry: s.subagentRegistry, base: s.sessionsBase},
+			&toolSpawnAgent{
+				sess: s, rs: runSvc, registry: s.subagentRegistry, base: s.sessionsBase,
+				parentProvider: parentProvider, parentModel: parentModel,
+			},
 			&toolWaitAgent{sess: s},
 			&toolAgentStatus{sess: s},
 			// §2.6 verb-tool wave — see agent_tools_verbs.go.
@@ -179,8 +183,28 @@ func (s *SessionService) buildChatToolRegistry(runSvc *RunService) *chatToolRegi
 			&toolShowInstructions{sess: s},
 			&toolExportSession{sess: s},
 			&toolResetSession{sess: s},
+			// P55 cross-session memory bank — see agent_tools_memory.go.
+			// Lazy-wires the DB from the repo at registration time so
+			// test setups without a repo silently degrade (the tool
+			// returns "noted (no durable storage wired)").
+			&toolRemember{db: rememberDB(s)},
+			// P63 explicit user-input pause — see agent_tools_clarify.go.
+			// Lets the agent halt the autonomous loop when it genuinely
+			// needs human direction rather than guessing for the rest
+			// of the (now lifted) maxAgentTurns budget.
+			&toolRequestUserInput{},
 		},
 	}
+}
+
+// rememberDB extracts the *sql.DB for the toolRemember wiring. Wrapped
+// in a tiny helper so test code can pass a SessionService with nil
+// repo without panicking.
+func rememberDB(s *SessionService) *sql.DB {
+	if s == nil || s.repo == nil {
+		return nil
+	}
+	return s.repo.DB()
 }
 
 // runRegistryRunService fetches the daemon's RunService instance.
@@ -265,7 +289,7 @@ func (t *toolShowSpec) name() string { return "show_spec" }
 
 func (t *toolShowSpec) description() string {
 	return "Read the frozen spec for the current session. " +
-		"Returns 'no spec frozen yet' when the session hasn't completed an interview. " +
+		"Returns 'no spec frozen yet' when freeze_spec hasn't been called. " +
 		"Use when the user asks to see the spec, the plan, the brief, or what was agreed."
 }
 
@@ -363,7 +387,17 @@ func (t *toolListSessions) run(ctx context.Context, _ string, _ json.RawMessage)
 		if hint == "" {
 			hint = "(no description)"
 		}
-		fmt.Fprintf(&b, "%d. %s · %s · %s\n", i+1, sess.ID[:10], sess.Status, hint)
+		// iter151a: surface persisted token / cost totals (iter133c
+		// writes these on run completion) so list_sessions is useful
+		// for spotting expensive vs cheap past runs without needing
+		// show_status on each one. Skip when both are zero so fresh
+		// or never-ran sessions stay terse.
+		extra := ""
+		if sess.TotalTokens > 0 || sess.TotalCostUSD > 0 {
+			extra = fmt.Sprintf(" · tokens=%d cost=$%.4f",
+				sess.TotalTokens, sess.TotalCostUSD)
+		}
+		fmt.Fprintf(&b, "%d. %s · %s · %s%s\n", i+1, sess.ID[:10], sess.Status, hint, extra)
 	}
 	return provider.ToolResult{Content: strings.TrimRight(b.String(), "\n")}, nil
 }

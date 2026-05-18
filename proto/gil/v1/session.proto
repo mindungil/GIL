@@ -138,6 +138,13 @@ message PromptRequest {
   // through to the daemon's layered config (global + project +
   // factory default).
   ModelChoice model = 4;
+  // working_dir, when session_id is empty, seeds the auto-created
+  // session's working directory so the agent's run_bash / write_file
+  // tools have a place to operate. Ignored when session_id is set
+  // (the existing session's working_dir wins). Empty falls through
+  // to "no working dir" — write/exec tools then refuse with a clear
+  // error rather than silently writing to /tmp.
+  string working_dir = 5;
 }
 
 // PromptPart is a single piece of the user message. V1 ships only the
@@ -152,9 +159,11 @@ message PromptPart {
 // (ModelChoice is reused from spec.proto — no redefinition here.)
 
 // Part is a single streamed event from the agent loop. The oneof
-// distinguishes assistant text deltas, tool invocations, tool
-// results, the just-allocated session id (when PromptRequest had no
-// session_id), per-event metrics, and the turn-end sentinel.
+// distinguishes assistant text deltas, separated reasoning deltas
+// (vLLM `reasoning`, DeepSeek `reasoning_content`, Anthropic extended
+// thinking), tool invocations, tool results, the just-allocated
+// session id (when PromptRequest had no session_id), per-event
+// metrics, and the turn-end sentinel.
 message Part {
   oneof body {
     TextDelta text = 1;
@@ -163,12 +172,24 @@ message Part {
     SessionAllocatedPart session_allocated = 4;
     PromptMetrics metrics = 5;
     DonePart done = 6;
+    ReasoningDelta reasoning = 7;
   }
 }
 
 // TextDelta is one streamed assistant text chunk. The chat surface
 // coalesces consecutive deltas onto the same transcript line.
 message TextDelta {
+  string content = 1;
+}
+
+// ReasoningDelta carries the upstream-separated chain-of-thought text
+// (e.g. vLLM `reasoning` field, DeepSeek-R1 `reasoning_content`,
+// Anthropic extended-thinking blocks). The chat surface renders these
+// distinctly from final-answer text so the user can see what the model
+// was working through without confusing it with the actual reply. Not
+// persisted to chat history — the model regenerates fresh reasoning
+// each turn, so feeding old reasoning back wastes tokens.
+message ReasoningDelta {
   string content = 1;
 }
 

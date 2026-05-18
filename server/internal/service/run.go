@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -56,6 +57,13 @@ type runProgressSnap struct {
 	cost           float64
 	budgetExceeded bool
 	budgetReason   string
+	// lastHeartbeat tracks when the agent loop last reported progress.
+	// Used by P38's mid-session orphan detector to flag runs whose
+	// goroutine died silently (panic recovered into errgroup, hung
+	// system call, OOM-killed child). Refreshed on each event the
+	// run's subscriber receives; zero value means "not yet heartbeat
+	// since Start began."
+	lastHeartbeat time.Time
 }
 
 // pendingAsk records everything AnswerPermission needs to dispatch a
@@ -155,6 +163,131 @@ func NewRunService(repo *session.Repo, sessionsBase string, factory ProviderFact
 	}
 }
 
+// staleHeartbeatThreshold is how long without a heartbeat refresh a
+// run can sit before the P38 sweeper flags it as mid-session orphan.
+// Picked to be well above any normal LLM call duration (Anthropic
+// streaming on a long turn rarely exceeds 2 minutes) but well below
+// a "user walked away for hours" threshold. 10 minutes gives strong
+// signal without false positives.
+const staleHeartbeatThreshold = 10 * time.Minute
+
+// sweepInterval is how often the mid-session sweeper wakes to scan
+// for stale heartbeats. 2 minutes is a good balance — frequent
+// enough to catch a hung run within a few minutes, infrequent enough
+// to be invisible in profiling.
+const sweepInterval = 2 * time.Minute
+
+// StartMidSessionOrphanSweeper launches a long-lived goroutine that
+// periodically scans running sessions for stale heartbeats and reaps
+// any whose runProgress entry was dropped OR whose lastHeartbeat is
+// older than staleHeartbeatThreshold. Called once at daemon startup
+// after ReapOrphanRuns. The returned cancel func stops the sweeper
+// on daemon shutdown.
+//
+// Why this exists (P38): P36 reaping fires only at daemon startup.
+// A run goroutine that panic-recovers into a hung state, OOMs into
+// a dead state, or whose containing process becomes unresponsive
+// will leave the DB in status='running' but the sweeper here flags
+// it and flips to stopped within ~staleHeartbeatThreshold of the
+// last heartbeat.
+//
+// Best-effort: errors are logged but the loop keeps ticking.
+func (s *RunService) StartMidSessionOrphanSweeper(ctx context.Context) context.CancelFunc {
+	cctx, cancel := context.WithCancel(ctx)
+	go func() {
+		t := time.NewTicker(sweepInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-cctx.Done():
+				return
+			case <-t.C:
+				if reaped := s.sweepStaleHeartbeats(cctx); reaped > 0 {
+					log.Printf("INFO P38 mid-session orphan sweep reaped count=%d", reaped)
+				}
+			}
+		}
+	}()
+	return cancel
+}
+
+// sweepStaleHeartbeats does one pass. Returns count of reaped sessions.
+func (s *RunService) sweepStaleHeartbeats(ctx context.Context) int {
+	if s.repo == nil {
+		return 0
+	}
+	runs, err := s.repo.List(ctx, session.ListOptions{
+		StatusFilter: "running",
+		Limit:        1000,
+	})
+	if err != nil {
+		log.Printf("WARN P38 sweep list: %v", err)
+		return 0
+	}
+	if len(runs) == 0 {
+		return 0
+	}
+	cutoff := time.Now().Add(-staleHeartbeatThreshold)
+	reaped := 0
+	now := time.Now().UTC()
+	for _, sess := range runs {
+		s.mu.Lock()
+		snap, hasProgress := s.runProgress[sess.ID]
+		var stale bool
+		switch {
+		case !hasProgress:
+			// runProgress entry was never created or got dropped —
+			// either way no live goroutine is feeding it.
+			stale = true
+		case snap.lastHeartbeat.IsZero():
+			// Snap exists but never seeded — shouldn't happen post-P38
+			// since Start now seeds with time.Now(), but defensively
+			// treat as stale rather than panicking.
+			stale = true
+		case snap.lastHeartbeat.Before(cutoff):
+			stale = true
+		}
+		s.mu.Unlock()
+		if !stale {
+			continue
+		}
+		// Flip status; the goroutine is dead in some sense even if
+		// the OS thread is still alive. Manual `gil run` re-trigger
+		// is the recovery path.
+		if uerr := s.repo.UpdateStatus(ctx, sess.ID, "stopped"); uerr != nil {
+			log.Printf("WARN P38 reap stale %s: UpdateStatus: %v", sess.ID, uerr)
+			continue
+		}
+		// Audit row mirrors P36's run_orphaned shape but with a
+		// distinct reason so consumers can distinguish startup-reap
+		// from mid-session-reap.
+		if p, perr := event.NewPersister(filepath.Join(s.sessionDir(sess.ID), "events")); perr == nil {
+			_ = p.Write(event.Event{
+				Timestamp: now,
+				Source:    event.SourceSystem,
+				Kind:      event.KindNote,
+				Type:      "run_orphaned",
+				Data:      []byte(`{"reason":"stale_heartbeat","prior_status":"running","auto_resume":false}`),
+			})
+			_ = p.Sync()
+			_ = p.Close()
+		}
+		// Clear in-memory entries so a future Start on the same
+		// session id rebuilds them cleanly.
+		s.mu.Lock()
+		delete(s.runProgress, sess.ID)
+		delete(s.runLoops, sess.ID)
+		if cancel, ok := s.runCancels[sess.ID]; ok && cancel != nil {
+			cancel()
+		}
+		delete(s.runCancels, sess.ID)
+		s.mu.Unlock()
+		reaped++
+		metrics.OrphanRunsReapedTotal.WithLabelValues("stale_heartbeat").Inc()
+	}
+	return reaped
+}
+
 // ensureSessionMCPTools resolves the spec allowlist + global/project
 // MCP registries and lazily launches the named MCP servers for this
 // session. Returns the surfaced tool.Tool slice (empty when the spec
@@ -175,10 +308,53 @@ func (s *RunService) ensureSessionMCPTools(ctx context.Context, sessionID string
 	}
 	s.mu.Lock()
 	if cached, ok := s.mcpClientCache[sessionID]; ok && cached != nil {
+		// P47: check that every cached client is still alive. If any
+		// died (subprocess crashed, stdout closed, killed by OOM), the
+		// whole cache entry is stale — evict and relaunch. Detecting
+		// a single dead client and surgically restarting just it would
+		// be richer but adds complexity; the simpler "all-or-nothing"
+		// reset gets the user unstuck.
+		allAlive := true
+		var deadNames []string
+		for i, cli := range cached.Clients {
+			if !cli.IsAlive() {
+				allAlive = false
+				name := ""
+				if i < len(cached.Launched) {
+					name = cached.Launched[i]
+				}
+				deadNames = append(deadNames, name)
+			}
+		}
+		if allAlive {
+			s.mu.Unlock()
+			return cached.Tools
+		}
+		// Dead entry — drop cached, close survivors, then fall through
+		// to the relaunch path. Emit an audit event so the surface can
+		// surface "MCP server X restarted mid-session".
+		delete(s.mcpClientCache, sessionID)
+		for _, cli := range cached.Clients {
+			_ = cli.Close() // best-effort; dead ones are no-ops
+		}
 		s.mu.Unlock()
-		return cached.Tools
+		if stream != nil {
+			data, _ := json.Marshal(map[string]any{
+				"dead_servers":  deadNames,
+				"action":        "relaunching_on_next_access",
+			})
+			_, _ = stream.Append(event.Event{
+				Timestamp: time.Now().UTC(),
+				Source:    event.SourceSystem,
+				Kind:      event.KindNote,
+				Type:      "mcp_server_died",
+				Data:      data,
+			})
+		}
+		log.Printf("INFO P47 mcp_server_died sessionID=%s dead=%v — evicting cache, will relaunch", sessionID, deadNames)
+	} else {
+		s.mu.Unlock()
 	}
-	s.mu.Unlock()
 
 	// Resolve global + project registries the same way executeRun's
 	// MCP block does so the chat path produces an identical merged
@@ -265,6 +441,119 @@ func (s *RunService) Budget(sessionID string) (cost float64, exceeded bool, reas
 
 func (s *RunService) sessionDir(sessionID string) string {
 	return filepath.Join(s.sessionsBase, sessionID)
+}
+
+// ReapOrphanRuns marks any session left in status="running" as
+// "stopped" and appends a `run_orphaned` event to that session's
+// events.jsonl. Called once at daemon startup, after NewRunService
+// has been wired but before grpc serving begins.
+//
+// Why this exists (P36): the in-flight run state — the agent loop
+// goroutine, runProgress counters, in-memory tool registry — lives
+// only on the RunService struct. When gild process exits (intentional
+// stop, OOM kill, host reboot), every session in DB with
+// status="running" is an orphan: the goroutine is gone but the DB
+// status would say "running" forever. Users polling `gil status` or
+// list_sessions would see ghost progress that never advances. Reaping
+// gives the system an explicit, audit-trailed "this run was
+// interrupted" signal in both DB (status flip) and events.jsonl
+// (audit row).
+//
+// P37 extension: when the orphan's frozen spec has Risk.ResumeOnRestart
+// set, the reaper additionally calls s.Start with a synthetic
+// StartRunRequest so the agent picks up the task on a fresh agent loop.
+// The new run inherits the same FrozenSpec from disk and the same
+// workspace (P5 checkpoint state), so it converges on the verifier
+// checks where the prior process died.
+//
+// Best-effort: errors on individual sessions don't stop the sweep,
+// and a missing events directory just skips the event-append.
+// Returns the number of sessions reaped.
+func (s *RunService) ReapOrphanRuns(ctx context.Context) (int, error) {
+	if s.repo == nil {
+		return 0, nil
+	}
+	runs, err := s.repo.List(ctx, session.ListOptions{
+		StatusFilter: "running",
+		Limit:        1000,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("ReapOrphanRuns list: %w", err)
+	}
+	if len(runs) == 0 {
+		return 0, nil
+	}
+	now := time.Now().UTC()
+	reaped := 0
+	for _, sess := range runs {
+		if uerr := s.repo.UpdateStatus(ctx, sess.ID, "stopped"); uerr != nil {
+			// Best-effort: skip this one, log a warning but keep sweeping.
+			log.Printf("WARN reap orphan run %s: UpdateStatus: %v", sess.ID, uerr)
+			continue
+		}
+		// P37: check the spec's resume_on_restart flag. Best-effort: if
+		// the spec can't be loaded (no spec frozen, dir missing, …) the
+		// session just stays stopped — no auto-resume is attempted.
+		autoResume := false
+		if spec, lerr := specstore.NewStore(s.sessionDir(sess.ID)).Load(); lerr == nil &&
+			spec != nil && spec.Risk != nil && spec.Risk.ResumeOnRestart {
+			autoResume = true
+		}
+		// Append a single run_orphaned event so the surface has an audit
+		// trail (events.jsonl readers, `gil events`, the chat surface's
+		// past-session disclosure). Skip silently if the events dir is
+		// missing — old sessions may pre-date that pattern.
+		eventData := []byte(`{"reason":"daemon_restart","prior_status":"running","auto_resume":false}`)
+		if autoResume {
+			eventData = []byte(`{"reason":"daemon_restart","prior_status":"running","auto_resume":true}`)
+		}
+		if p, perr := event.NewPersister(filepath.Join(s.sessionDir(sess.ID), "events")); perr == nil {
+			_ = p.Write(event.Event{
+				Timestamp: now,
+				Source:    event.SourceSystem,
+				Kind:      event.KindNote,
+				Type:      "run_orphaned",
+				Data:      eventData,
+			})
+			_ = p.Sync()
+			_ = p.Close()
+		}
+		reaped++
+		metrics.OrphanRunsReapedTotal.WithLabelValues("daemon_restart").Inc()
+		// P37: if the spec opted in, kick off a fresh run for this
+		// session. We just flipped status to "stopped" above for the
+		// P36 audit trail, but Start requires status="frozen" before
+		// it'll accept the request. Briefly flip the row back to
+		// "frozen" (the session has a frozen spec, that's exactly
+		// the right semantic state), then Start moves it to "running"
+		// on success. The audit-trail event has already been written
+		// against the orphan's prior "running" status; the brief
+		// "stopped" gap before re-flip to "frozen" is invisible to
+		// outside readers because no clients are connected yet at
+		// daemon startup (this runs before grpc serving begins).
+		//
+		// Errors from Start are logged but don't roll back — the
+		// user can always re-trigger manually with `gil run`.
+		if autoResume {
+			if uerr := s.repo.UpdateStatus(ctx, sess.ID, "frozen"); uerr != nil {
+				log.Printf("WARN P37 auto-resume %s: pre-Start status restore: %v", sess.ID, uerr)
+				continue
+			}
+			metrics.AutoResumeKickedTotal.Inc()
+			go func(sid string) {
+				_, serr := s.Start(context.Background(), &gilv1.StartRunRequest{
+					SessionId: sid,
+					Detach:    true,
+				})
+				if serr != nil {
+					log.Printf("WARN P37 auto-resume %s: %v", sid, serr)
+				} else {
+					log.Printf("INFO P37 auto-resume %s: kicked", sid)
+				}
+			}(sess.ID)
+		}
+	}
+	return reaped, nil
 }
 
 // ensureSessionStream returns the long-lived event stream associated
@@ -401,11 +690,12 @@ func (s *RunService) Start(ctx context.Context, req *gilv1.StartRunRequest) (*gi
 	}
 
 	// Apply layered workspace defaults BEFORE we resolve provider /
-	// build tools, so that fields the interview left blank (provider,
-	// model, autonomy, backend) inherit from `<workspace>/.gil/config.toml`
-	// or `$XDG_CONFIG_HOME/gil/config.toml`. Spec values that ARE set
-	// always win — the interview is the source of truth, the layered
-	// config is only a backstop for what the user did not pin.
+	// build tools, so that fields the agent's freeze_spec call left
+	// blank (provider, model, autonomy, backend) inherit from
+	// `<workspace>/.gil/config.toml` or `$XDG_CONFIG_HOME/gil/config.toml`.
+	// Spec values that ARE set always win — the frozen spec is the
+	// source of truth, the layered config is only a backstop for what
+	// the agent did not pin.
 	workspaceDir := sess.WorkingDir
 	if spec.Workspace != nil && spec.Workspace.Path != "" {
 		workspaceDir = spec.Workspace.Path
@@ -965,9 +1255,11 @@ func (s *RunService) executeRun(
 	stream := s.ensureSessionStream(sessionID)
 
 	// Register progress snap under the lock. The stream is already
-	// registered by ensureSessionStream.
+	// registered by ensureSessionStream. P38: seed lastHeartbeat with
+	// "now" so the mid-session sweeper doesn't mis-flag a run that
+	// hasn't emitted its first event yet.
 	s.mu.Lock()
-	s.runProgress[sessionID] = &runProgressSnap{}
+	s.runProgress[sessionID] = &runProgressSnap{lastHeartbeat: time.Now()}
 	s.mu.Unlock()
 
 	// Wire provider retry observability. The provider was wrapped in
@@ -1006,7 +1298,19 @@ func (s *RunService) executeRun(
 	// the run → chat handoff. Streams are reaped only when the
 	// daemon shuts down.
 	defer func() {
+		// iter133c: snapshot final tokens / cost to the persisted row
+		// BEFORE deleting the in-memory tracker so post-run readers
+		// (wait_agent, list_sessions, gil status) see real values rather
+		// than zeros. Best-effort — a write error here is not fatal to
+		// the run-completion flow.
 		s.mu.Lock()
+		snap := s.runProgress[sessionID]
+		var finalTokens int64
+		var finalCost float64
+		if snap != nil {
+			finalTokens = snap.tokens
+			finalCost = snap.cost
+		}
 		delete(s.runProgress, sessionID)
 		delete(s.runLoops, sessionID)
 		delete(s.runCancels, sessionID)
@@ -1017,6 +1321,11 @@ func (s *RunService) executeRun(
 			delete(s.pendingClarifications, sessionID)
 		}
 		s.mu.Unlock()
+		if finalTokens > 0 || finalCost > 0 {
+			// Use a fresh ctx so the persist isn't cancelled by the
+			// parent run ctx that just expired.
+			_ = s.repo.UpdateTotals(context.Background(), sessionID, finalTokens, finalCost)
+		}
 		metrics.SessionsRunning.Dec()
 	}()
 
@@ -1048,6 +1357,11 @@ func (s *RunService) executeRun(
 			s.mu.Lock()
 			snap := s.runProgress[sessionID]
 			if snap != nil {
+				// P38 heartbeat: every event the run emits refreshes
+				// the timestamp. The mid-session sweeper compares
+				// against time.Now() to detect goroutines that died
+				// or hung without writing the status flip.
+				snap.lastHeartbeat = time.Now()
 				if evt.Type == "iteration_start" {
 					snap.iters++
 				}
@@ -1626,13 +1940,35 @@ func (s *RunService) Restore(ctx context.Context, req *gilv1.RestoreRequest) (*g
 			"step %d out of range (have %d checkpoints)", req.Step, len(commits))
 	}
 	target := commits[idx]
+	// P32: enumerate files that will actually flip under the agent —
+	// the diff between the *current working tree* and the target commit,
+	// not HEAD-vs-target. `git checkout <sha> -- .` (in Restore) updates
+	// the workspace without moving HEAD, so a prior Restore call could
+	// leave HEAD claiming we're at sha2 while the visible files match
+	// sha1. The agent cares about what changes on disk, so compare
+	// workspace against target. Non-fatal on error.
+	preChanged, _ := sg.FilesDiffFromWorktree(ctx, target.SHA)
 	if err := sg.Restore(ctx, target.SHA); err != nil {
 		return nil, status.Errorf(codes.Internal, "restore: %v", err)
 	}
+	// Cap so a huge rollback doesn't bloat the agent's tool result past
+	// the loop's context budget. 50 paths is enough for the agent to
+	// spot patterns; truncation is signaled separately.
+	const changedFilesCap = 50
+	var changed []string
+	var truncated bool
+	if len(preChanged) > changedFilesCap {
+		changed = preChanged[:changedFilesCap]
+		truncated = true
+	} else {
+		changed = preChanged
+	}
 	return &gilv1.RestoreResponse{
-		CommitSha:        target.SHA,
-		CommitMessage:    target.Message,
-		TotalCheckpoints: int32(len(commits)),
+		CommitSha:             target.SHA,
+		CommitMessage:         target.Message,
+		TotalCheckpoints:      int32(len(commits)),
+		ChangedFiles:          changed,
+		ChangedFilesTruncated: truncated,
 	}, nil
 }
 

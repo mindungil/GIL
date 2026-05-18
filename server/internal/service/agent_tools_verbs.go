@@ -2,8 +2,10 @@ package service
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -27,8 +29,10 @@ import (
 // dispatch survives.
 //
 // Working-set state is per-session and lives on the SessionService
-// receiver (in-memory). Persistence across daemon restart is a
-// follow-up; the V1 contract is "useful within a single chat".
+// receiver. P30 added durable backing via the workingset_entries
+// table (schema v4): the in-memory bag writes through on add/drop and
+// re-hydrates on first access after a daemon restart, so the user's
+// curated context survives across runs.
 
 // --- working set --------------------------------------------------
 
@@ -39,15 +43,37 @@ import (
 type workingSet struct {
 	mu      sync.Mutex
 	entries map[string]map[string]struct{}
+	// db is the optional durable backing. When nil the store behaves
+	// as the pre-P30 in-memory version — tests that don't care about
+	// persistence keep working untouched.
+	db *sql.DB
+	// loaded tracks which session IDs have been hydrated from DB so
+	// add/drop/list skip the SELECT after the first hit. Presence-only.
+	loaded map[string]struct{}
 }
 
 func newWorkingSet() *workingSet {
-	return &workingSet{entries: map[string]map[string]struct{}{}}
+	return &workingSet{
+		entries: map[string]map[string]struct{}{},
+		loaded:  map[string]struct{}{},
+	}
+}
+
+// SetDB attaches a *sql.DB to the store. Pass nil to detach (tests).
+// Safe to call multiple times.
+func (w *workingSet) SetDB(db *sql.DB) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.db = db
+	// Reset loaded set so the next access rehydrates against the
+	// new backing.
+	w.loaded = map[string]struct{}{}
 }
 
 func (w *workingSet) add(sid string, paths []string) (added, alreadyPresent []string) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	w.ensureLoadedLocked(sid)
 	bag, ok := w.entries[sid]
 	if !ok {
 		bag = map[string]struct{}{}
@@ -65,12 +91,16 @@ func (w *workingSet) add(sid string, paths []string) (added, alreadyPresent []st
 		bag[p] = struct{}{}
 		added = append(added, p)
 	}
+	if len(added) > 0 {
+		w.persistAddLocked(sid, added)
+	}
 	return added, alreadyPresent
 }
 
 func (w *workingSet) drop(sid string, paths []string) (dropped, notPresent []string) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	w.ensureLoadedLocked(sid)
 	bag := w.entries[sid]
 	for _, p := range paths {
 		p = strings.TrimSpace(p)
@@ -84,12 +114,16 @@ func (w *workingSet) drop(sid string, paths []string) (dropped, notPresent []str
 			notPresent = append(notPresent, p)
 		}
 	}
+	if len(dropped) > 0 {
+		w.persistDropLocked(sid, dropped)
+	}
 	return dropped, notPresent
 }
 
 func (w *workingSet) list(sid string) []string {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	w.ensureLoadedLocked(sid)
 	bag := w.entries[sid]
 	out := make([]string, 0, len(bag))
 	for p := range bag {
@@ -99,14 +133,97 @@ func (w *workingSet) list(sid string) []string {
 	return out
 }
 
+// ensureLoadedLocked hydrates w.entries[sid] from DB on first hit
+// after a SetDB call. Caller holds w.mu. When db is nil this is a
+// no-op.
+func (w *workingSet) ensureLoadedLocked(sid string) {
+	if w.loaded == nil {
+		w.loaded = map[string]struct{}{}
+	}
+	if w.db == nil {
+		return
+	}
+	if _, done := w.loaded[sid]; done {
+		return
+	}
+	rows, err := w.db.Query(`SELECT path FROM workingset_entries
+        WHERE session_id = ? ORDER BY path ASC`, sid)
+	if err != nil {
+		// Silent failure — pre-restart state is unrecoverable for
+		// this session, but the in-memory store stays consistent.
+		return
+	}
+	defer rows.Close()
+	bag, ok := w.entries[sid]
+	if !ok {
+		bag = map[string]struct{}{}
+		w.entries[sid] = bag
+	}
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return
+		}
+		bag[p] = struct{}{}
+	}
+	w.loaded[sid] = struct{}{}
+}
+
+// persistAddLocked inserts the new paths. Caller holds w.mu. Failures
+// are silent — durability is best-effort and the in-memory store
+// remains authoritative within the daemon's lifetime. Uses INSERT OR
+// IGNORE so a stale duplicate row can't fail the whole batch.
+func (w *workingSet) persistAddLocked(sid string, paths []string) {
+	if w.db == nil {
+		return
+	}
+	tx, err := w.db.Begin()
+	if err != nil {
+		return
+	}
+	defer func() { _ = tx.Rollback() }()
+	for _, p := range paths {
+		if _, err := tx.Exec(`INSERT OR IGNORE INTO workingset_entries
+            (session_id, path) VALUES (?, ?)`, sid, p); err != nil {
+			return
+		}
+	}
+	_ = tx.Commit()
+}
+
+// persistDropLocked deletes the given paths for sid. Caller holds w.mu.
+// Silent failure (same rationale as persistAddLocked).
+func (w *workingSet) persistDropLocked(sid string, paths []string) {
+	if w.db == nil {
+		return
+	}
+	tx, err := w.db.Begin()
+	if err != nil {
+		return
+	}
+	defer func() { _ = tx.Rollback() }()
+	for _, p := range paths {
+		if _, err := tx.Exec(`DELETE FROM workingset_entries
+            WHERE session_id = ? AND path = ?`, sid, p); err != nil {
+			return
+		}
+	}
+	_ = tx.Commit()
+}
+
 // chatWorkingSet returns the per-service working-set store, allocating
 // on first access so existing constructors (NewSessionService) keep
-// compiling without churn.
+// compiling without churn. When the SessionService has a Repo, the
+// store is auto-wired with the underlying *sql.DB on first allocation
+// so add/drop/list survive a daemon restart (P30).
 func (s *SessionService) chatWorkingSet() *workingSet {
 	s.workingSetMu.Lock()
 	defer s.workingSetMu.Unlock()
 	if s.workingSet == nil {
 		s.workingSet = newWorkingSet()
+		if s.repo != nil {
+			s.workingSet.SetDB(s.repo.DB())
+		}
 	}
 	return s.workingSet
 }
@@ -124,7 +241,7 @@ func (t *toolAddToWorkingSet) description() string {
 func (t *toolAddToWorkingSet) schema() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{"paths":{"type":"array","items":{"type":"string"}}},"required":["paths"]}`)
 }
-func (t *toolAddToWorkingSet) run(_ context.Context, sessionID string, argsJSON json.RawMessage) (provider.ToolResult, error) {
+func (t *toolAddToWorkingSet) run(ctx context.Context, sessionID string, argsJSON json.RawMessage) (provider.ToolResult, error) {
 	var args struct {
 		Paths []string `json:"paths"`
 	}
@@ -134,13 +251,41 @@ func (t *toolAddToWorkingSet) run(_ context.Context, sessionID string, argsJSON 
 	if len(args.Paths) == 0 {
 		return provider.ToolResult{Content: "no paths supplied"}, nil
 	}
-	added, dup := t.sess.chatWorkingSet().add(sessionID, args.Paths)
+	// iter56a: workingset is scope-bound to the session's working dir,
+	// matching read_file / write_file / edit_file behavior. Without
+	// this gate, the agent (or a prompt-injection chain) could pollute
+	// the workingset DB with absolute paths or `../` escapes — the
+	// list itself is harmless, but future tools that READ from the
+	// workingset would inherit the escape.
+	wd, err := sessionWD(ctx, t.sess.repo, sessionID)
+	if err != nil {
+		return provider.ToolResult{Content: err.Error(), IsError: true}, nil
+	}
+	cleaned := make([]string, 0, len(args.Paths))
+	rejected := make([]string, 0)
+	for _, p := range args.Paths {
+		if _, err := resolveInWD(wd, p); err != nil {
+			rejected = append(rejected, fmt.Sprintf("%s (%s)", p, err.Error()))
+			continue
+		}
+		cleaned = append(cleaned, p)
+	}
+	if len(cleaned) == 0 {
+		return provider.ToolResult{
+			Content: "no paths added; all rejected:\n  " + strings.Join(rejected, "\n  "),
+			IsError: true,
+		}, nil
+	}
+	added, dup := t.sess.chatWorkingSet().add(sessionID, cleaned)
 	out := fmt.Sprintf("added %d file(s) to workingset", len(added))
 	if len(added) > 0 {
 		out += ":\n  " + strings.Join(added, "\n  ")
 	}
 	if len(dup) > 0 {
 		out += fmt.Sprintf("\nalready present (%d): %s", len(dup), strings.Join(dup, ", "))
+	}
+	if len(rejected) > 0 {
+		out += fmt.Sprintf("\nrejected (%d):\n  %s", len(rejected), strings.Join(rejected, "\n  "))
 	}
 	return provider.ToolResult{Content: out}, nil
 }
@@ -247,7 +392,18 @@ func (t *toolListCheckpoints) run(ctx context.Context, sessionID string, _ json.
 	if spec, err := specstore.NewStore(specDir).Load(); err == nil && spec != nil && spec.Workspace != nil && spec.Workspace.Path != "" {
 		workspaceDir = spec.Workspace.Path
 	}
-	sg := checkpoint.New(workspaceDir, filepath.Join(specDir, "shadow"))
+	shadowDir := filepath.Join(specDir, "shadow")
+	// iter31a: shadow git isn't initialized until the first checkpoint
+	// is taken (typically when a run starts). If the shadow dir doesn't
+	// exist yet, ListCommits returns a raw "fatal: not a git repository"
+	// error that both leaks the daemon's internal storage path and
+	// surfaces as IsError to the agent. Treat the pre-init state as
+	// "no checkpoints" — same response as a freshly-initialized but
+	// empty shadow.
+	if _, err := os.Stat(filepath.Join(shadowDir, ".git")); os.IsNotExist(err) {
+		return provider.ToolResult{Content: "no checkpoints yet for this session"}, nil
+	}
+	sg := checkpoint.New(workspaceDir, shadowDir)
 	commits, err := sg.ListCommits(ctx)
 	if err != nil {
 		return provider.ToolResult{Content: "list checkpoints failed: " + err.Error(), IsError: true}, nil
@@ -290,14 +446,59 @@ func (t *toolRestoreCheckpoint) run(ctx context.Context, sessionID string, argsJ
 	}
 	resp, err := t.rs.Restore(ctx, &gilv1.RestoreRequest{SessionId: sessionID, Step: args.Step})
 	if err != nil {
-		return provider.ToolResult{Content: "restore failed: " + err.Error(), IsError: true}, nil
+		// iter65a: same shape as iter31a's list_checkpoints fix. Shadow
+		// git isn't initialized until the first checkpoint, so a fresh
+		// restore call surfaces "fatal: not a git repository: '/home/
+		// ubuntu/.local/share/gil/...'" which leaks the daemon's internal
+		// session storage path. Translate to a clean agent-actionable
+		// message that doesn't expose the path.
+		es := err.Error()
+		if strings.Contains(es, "not a git repository") || strings.Contains(es, "list checkpoints") {
+			return provider.ToolResult{Content: "no checkpoints exist yet for this session; nothing to restore. Take a checkpoint first (e.g. start_run creates one).", IsError: true}, nil
+		}
+		return provider.ToolResult{Content: "restore failed: " + es, IsError: true}, nil
 	}
-	return provider.ToolResult{Content: fmt.Sprintf(
-		"restored to %s · %q (%d total checkpoints)",
-		resp.GetCommitSha()[:min(len(resp.GetCommitSha()), 8)],
-		strings.TrimSpace(resp.GetCommitMessage()),
-		resp.GetTotalCheckpoints(),
-	)}, nil
+	return provider.ToolResult{Content: renderRestoreResult(resp)}, nil
+}
+
+// renderRestoreResult formats the RestoreResponse into the tool result
+// the agent loop sees. Beyond the bare checkpoint header it injects a
+// loud WORKSPACE CHANGED warning + the list of files that flipped, so
+// the agent treats prior conversation assumptions (file contents,
+// freshly-read snippets, plan steps that reference specific lines) as
+// stale instead of acting on them. The agent's next move should be to
+// re-read affected files or, when the goal itself drifted, surface the
+// discontinuity to the user and ask whether to re-freeze the spec.
+// Roadmap S2: "Workspace rollback safety net" (post-v0.2.0).
+func renderRestoreResult(resp *gilv1.RestoreResponse) string {
+	var b strings.Builder
+	sha := resp.GetCommitSha()
+	if len(sha) > 8 {
+		sha = sha[:8]
+	}
+	fmt.Fprintf(&b, "restored to %s · %q (%d total checkpoints)\n\n",
+		sha, strings.TrimSpace(resp.GetCommitMessage()), resp.GetTotalCheckpoints())
+
+	changed := resp.GetChangedFiles()
+	if len(changed) == 0 {
+		// No file delta means the workspace was already at the target
+		// commit; no discontinuity to flag.
+		b.WriteString("workspace tracked content unchanged (target == prior HEAD).")
+		return strings.TrimRight(b.String(), "\n")
+	}
+
+	b.WriteString("**WORKSPACE STATE CHANGED**: Files in the session's working directory were rolled back. ")
+	b.WriteString("Any assumption you made in this conversation about file contents above is now stale. ")
+	b.WriteString("Before any further edit, re-read the affected files. If the user's goal references specific lines or symbols that just shifted, surface the discontinuity and ask whether to re-freeze the spec.\n\n")
+
+	fmt.Fprintf(&b, "changed files (%d):\n", len(changed))
+	for _, f := range changed {
+		fmt.Fprintf(&b, "  %s\n", f)
+	}
+	if resp.GetChangedFilesTruncated() {
+		b.WriteString("  … (more changed files omitted; cap is 50)\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 // --- show_instructions -------------------------------------------

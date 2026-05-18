@@ -47,12 +47,28 @@ const (
 // returns the cleaned absolute path, requiring it lie inside the
 // session's working_dir. Empty workingDir is treated as a hard error
 // rather than a silent escape.
+//
+// iter58a: also follows symlinks via EvalSymlinks and verifies the
+// resolved target is still inside the working dir. Without this, a
+// symlink inside the working dir pointing to /etc/passwd, ~/.config/
+// gil/auth.json, or any other host file would let the agent read /
+// write it via read_file / edit_file (write_file replaces the symlink
+// with a regular file, so it was safe by accident — but edit_file
+// reads through the symlink first, then writes back via .tmp+rename
+// which DOES replace, so it's a confused mix). EvalSymlinks closes
+// the read path entirely.
 func resolveInWD(workingDir, p string) (string, error) {
 	if workingDir == "" {
 		return "", errors.New("session has no working directory configured")
 	}
 	if p == "" {
-		return "", errors.New("path is empty")
+		// P60b: more actionable message — the agent's most common
+		// failure mode here is omitting the `path` key from the JSON
+		// args entirely (qwen3.6-27b chess dogfood showed this 10+
+		// times in one session). The old "path is empty" sent the
+		// agent re-reading its own code looking for an empty
+		// variable. The new message names the JSON-input root cause.
+		return "", errors.New("missing required `path` arg — the tool input JSON must include {\"path\":\"<file>\", ...}")
 	}
 	wd, err := filepath.Abs(workingDir)
 	if err != nil {
@@ -66,6 +82,31 @@ func resolveInWD(workingDir, p string) (string, error) {
 	rel, err := filepath.Rel(wd, abs)
 	if err != nil || strings.HasPrefix(rel, "..") || rel == ".." {
 		return "", fmt.Errorf("path %q escapes working directory", p)
+	}
+	// Symlink check. Walk up to the first existing ancestor and
+	// EvalSymlinks it — handles both "file exists (read path)" and
+	// "file will be created (write path), but its parent must be a
+	// real dir inside wd". TOCTOU is intentionally not addressed:
+	// gil's threat model is honest-but-confused agents under prompt
+	// injection, not racy attackers swapping symlinks mid-call.
+	probe := abs
+	for {
+		if _, err := os.Lstat(probe); err == nil {
+			real, evalErr := filepath.EvalSymlinks(probe)
+			if evalErr == nil {
+				realRel, relErr := filepath.Rel(wd, real)
+				if relErr != nil || strings.HasPrefix(realRel, "..") || realRel == ".." {
+					return "", fmt.Errorf("path %q follows symlink to %q outside working directory", p, real)
+				}
+			}
+			break
+		}
+		// Walk up to parent.
+		parent := filepath.Dir(probe)
+		if parent == probe {
+			break // hit root, give up
+		}
+		probe = parent
 	}
 	return abs, nil
 }
@@ -84,6 +125,148 @@ func sessionWD(ctx context.Context, repo *session.Repo, sessionID string) (strin
 		return "", errors.New("session has no working directory; pass --working-dir on session create")
 	}
 	return s.WorkingDir, nil
+}
+
+// rejectReadonlyTarget returns a non-nil error when abs points at an
+// existing file whose owner-write bit (0o200) is unset. Missing files
+// pass (creation is allowed via writable parent dir, not gated here).
+// Directories pass (callers should resolve to files before calling).
+//
+// Rationale: C3 in docs/design/chat-mode-enforcement.md. write_file /
+// edit_file / apply_patch must not silently chmod through a user-marked
+// readonly file — that erases the user's sandbox intent.
+//
+// P32 iter3 amendment: chmod via run_bash is ALSO gated (see
+// rejectRunBashChmodOnReadonly). The original C3 error message
+// invited the agent to use run_bash + chmod +w as a workaround;
+// failure-floor f8 in eval-loop iter3 confirmed agents take that
+// invitation and bypass C3 within the same turn without any real
+// user consent. Both paths now reject; consent must come from the
+// user, not the agent's own self-asked question.
+func rejectReadonlyTarget(abs string) error {
+	info, err := os.Stat(abs)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("stat target: %w", err)
+	}
+	if info.IsDir() {
+		return nil
+	}
+	if info.Mode().Perm()&0o200 == 0 {
+		return fmt.Errorf("target file %s is read-only (mode 0%o); the user has marked it as protected. "+
+			"If modification is genuinely required, surface the intent to the user and WAIT for their explicit "+
+			"reply (in their own words, not your own assumption) before any modification or chmod. "+
+			"Do not chmod via run_bash to bypass — that path is also gated.",
+			abs, info.Mode().Perm())
+	}
+	return nil
+}
+
+// rejectRunBashChmodOnReadonly returns a non-nil error when cmd is a
+// chmod that grants write to a currently-readonly file in wd.
+// Conservative heuristic — fires only when:
+//   - the leading token of the command's first sub-command is `chmod`
+//   - the chmod has a write-granting mode token (`+w`, `+rw`, `+wx`,
+//     `u+w`, `a+w`, `g+w`, `o+w`, or a numeric mode with owner-write bit)
+//   - any path token resolves to an existing file with mode 0444 (or
+//     similar) in the working directory
+//
+// Compound commands like `chmod +w f && grep ...` are scanned only
+// up to the first chain operator (we trust the agent's intent: the
+// chmod is the bypass attempt, the rest is the follow-up).
+//
+// Adversarial cases (`bash -c "chmod ..."`, glob expansion, etc.)
+// pass — quality scaffold, not sandbox. Same stance as C4.
+func rejectRunBashChmodOnReadonly(cmd, wd string) error {
+	// Trim to the first sub-command — anything after &&/||/;/| is
+	// not the chmod itself.
+	first := cmd
+	for _, sep := range []string{"&&", "||", ";", "|"} {
+		if i := strings.Index(first, sep); i >= 0 {
+			first = first[:i]
+		}
+	}
+	fields := strings.Fields(strings.TrimSpace(first))
+	if len(fields) < 2 || fields[0] != "chmod" {
+		return nil
+	}
+
+	addsWrite := false
+	var paths []string
+	for _, tok := range fields[1:] {
+		if strings.HasPrefix(tok, "-R") || tok == "-v" || tok == "-c" || tok == "-f" || tok == "--" {
+			continue
+		}
+		// Symbolic mode: any `+` op (in any class scope) whose perm
+		// list contains `w`. Catches `+w`, `u+w`, `+rw`, `+wx`,
+		// `ug+rwx`, etc. Excludes `=` ops (assignment to specific
+		// perms — fewer footguns since we'd also need to rule out
+		// `=r` cases). Conservative: `=rwx` would slip through but
+		// agents don't reach for `=` syntax in practice.
+		if i := strings.IndexByte(tok, '+'); i >= 0 {
+			if strings.Contains(tok[i+1:], "w") {
+				addsWrite = true
+				continue
+			}
+		}
+		// Numeric mode: 3-or-4 digit octal where owner-write bit is set.
+		if isNumericModeAddsOwnerWrite(tok) {
+			addsWrite = true
+			continue
+		}
+		// Symbolic mode that explicitly doesn't add write (`-w`, `=r`, `=rx`)
+		if strings.HasPrefix(tok, "-") || strings.HasPrefix(tok, "=") {
+			continue
+		}
+		// Glob — skip (we don't expand)
+		if strings.ContainsAny(tok, "*?[") {
+			continue
+		}
+		paths = append(paths, tok)
+	}
+	if !addsWrite {
+		return nil
+	}
+	for _, p := range paths {
+		abs := p
+		if !filepath.IsAbs(abs) {
+			abs = filepath.Join(wd, abs)
+		}
+		info, err := os.Stat(abs)
+		if err != nil {
+			continue
+		}
+		if info.IsDir() {
+			continue
+		}
+		if info.Mode().Perm()&0o200 == 0 {
+			return fmt.Errorf("refusing to chmod +w on read-only target %s (mode 0%o); "+
+				"the user has marked it as protected. Ask the user explicitly and "+
+				"wait for their reply (in their own words) before chmoding. The agent "+
+				"asking its own '진행할까요?' / 'OK?' question is not user consent.",
+				abs, info.Mode().Perm())
+		}
+	}
+	return nil
+}
+
+// isNumericModeAddsOwnerWrite reports whether tok is a 3-or-4 digit
+// octal mode whose owner-write bit (0o200) is set. e.g. 644, 755,
+// 0664 → true; 444, 555, 0444 → false.
+func isNumericModeAddsOwnerWrite(tok string) bool {
+	if len(tok) < 3 || len(tok) > 4 {
+		return false
+	}
+	for _, ch := range tok {
+		if ch < '0' || ch > '7' {
+			return false
+		}
+	}
+	// Owner digit is index len-3 (3-digit: index 0; 4-digit: index 1).
+	owner := tok[len(tok)-3] - '0'
+	return owner&0o2 != 0
 }
 
 // --- read_file -------------------------------------------------------
@@ -194,6 +377,9 @@ func (t *toolWriteFile) run(ctx context.Context, sessionID string, argsJSON json
 	if err != nil {
 		return provider.ToolResult{Content: err.Error(), IsError: true}, nil
 	}
+	if err := rejectReadonlyTarget(abs); err != nil {
+		return provider.ToolResult{Content: err.Error(), IsError: true}, nil
+	}
 	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
 		return provider.ToolResult{Content: "mkdir: " + err.Error(), IsError: true}, nil
 	}
@@ -256,6 +442,11 @@ func (t *toolRunBash) run(ctx context.Context, sessionID string, argsJSON json.R
 	}
 	wd, err := sessionWD(ctx, t.repo, sessionID)
 	if err != nil {
+		return provider.ToolResult{Content: err.Error(), IsError: true}, nil
+	}
+	// P32 iter3: gate chmod-on-readonly bypass that turned C3 into a
+	// soft barrier in failure-floor f8.
+	if err := rejectRunBashChmodOnReadonly(args.Cmd, wd); err != nil {
 		return provider.ToolResult{Content: err.Error(), IsError: true}, nil
 	}
 	to := defaultBashTO

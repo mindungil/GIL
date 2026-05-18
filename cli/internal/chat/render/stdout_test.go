@@ -27,7 +27,7 @@ func newStdoutAsciiForTest(t *testing.T) (*StdoutChatRenderer, *bytes.Buffer) {
 
 func TestStdout_Banner_PrintsName(t *testing.T) {
 	r, buf := newStdoutForTest(t)
-	r.Banner(SessionState{DisplayName: "add-dark-mode-0428", Phase: PhaseInterview})
+	r.Banner(SessionState{DisplayName: "add-dark-mode-0428", Phase: PhaseIdle})
 	require.Contains(t, buf.String(), "add-dark-mode-0428")
 }
 
@@ -44,26 +44,51 @@ func TestStdout_AssistantText_AppendsAsIs(t *testing.T) {
 	require.Equal(t, "hello world", buf.String())
 }
 
+// P33: AssistantReasoning prefixes every non-empty line with "[think]"
+// so the user can scan the transcript and tell reasoning apart from
+// the final answer. Multi-line input gets the prefix per line; empty
+// chunks are no-ops.
+func TestStdout_AssistantReasoning_PrefixesEveryLine(t *testing.T) {
+	r, buf := newStdoutForTest(t)
+	r.AssistantReasoning("first thought\nsecond thought")
+	got := buf.String()
+	require.Contains(t, got, "[think]")
+	require.Contains(t, got, "first thought")
+	require.Contains(t, got, "second thought")
+	// Both lines must carry the prefix — count occurrences.
+	require.Equal(t, 2, strings.Count(got, "[think]"),
+		"expected [think] on both reasoning lines; got %q", got)
+}
+
+func TestStdout_AssistantReasoning_EmptyIsNoop(t *testing.T) {
+	r, buf := newStdoutForTest(t)
+	r.AssistantReasoning("")
+	require.Empty(t, buf.String())
+}
+
 func TestStdout_StatusStrip_Idle(t *testing.T) {
 	r, buf := newStdoutForTest(t)
 	r.StatusStrip(SessionState{Phase: PhaseIdle})
 	require.Equal(t, "[idle · type a prompt to start a new session]\n", buf.String())
 }
 
-func TestStdout_StatusStrip_Interview(t *testing.T) {
+// P49: idle strip with non-zero spend surfaces tokens + cost so the
+// user sees accumulated cost between turns. Zero values fall back to
+// the default idle text (TestStdout_StatusStrip_Idle above pins that).
+func TestStdout_StatusStrip_Idle_WithSpend(t *testing.T) {
 	r, buf := newStdoutForTest(t)
 	r.StatusStrip(SessionState{
-		Phase: PhaseInterview, SlotsFilled: 4, SlotsTotal: 11,
-		Saturation: 0.36, AdvFindings: 1,
+		Phase:   PhaseIdle,
+		Tokens:  4231,
+		CostUSD: 0.0123,
 	})
-	require.Equal(t, "[interview · 4/11 slots · sat 36% · 1 adv finding]\n", buf.String())
+	require.Equal(t, "[idle · 4.2k · $0.0123 · type a prompt to continue]\n", buf.String())
 }
 
-func TestStdout_StatusStrip_AwaitingConfirm(t *testing.T) {
-	r, buf := newStdoutForTest(t)
-	r.StatusStrip(SessionState{Phase: PhaseAwaitingConfirm})
-	require.Equal(t, "[interview · ready to freeze · /run to start, prompt to keep iterating]\n", buf.String())
-}
+// iter211: PhaseInterview / PhaseAwaitingConfirm removed (interview
+// engine deleted in M3). The strip no longer has dedicated phases for
+// interview / awaiting-confirm; tests for those were dropped with the
+// producers.
 
 func TestStdout_StatusStrip_Run(t *testing.T) {
 	r, buf := newStdoutForTest(t)
@@ -112,7 +137,11 @@ func TestStdout_StatusStrip_Done(t *testing.T) {
 		ChecksPassed: 4, ChecksTotal: 4,
 	})
 	// Unicode mode: ✓ for pass, ✗ for fail.
-	require.Equal(t, "[done · 87 iters · $2.34 · ✓ 4/4 checks · /diff /merge]\n", buf.String())
+	// iter211: the trailing "/diff /merge" hint was dropped — the chat
+	// surface has no slash commands, so dangling /diff /merge in a
+	// natural-language UI was a goal-fit miscue. Users phrase their
+	// next step naturally ("show me the diff", "merge it").
+	require.Equal(t, "[done · 87 iters · $2.34 · ✓ 4/4 checks]\n", buf.String())
 }
 
 func TestStdout_StatusStrip_AsciiCollapsesMiddleDot(t *testing.T) {
@@ -131,25 +160,12 @@ func TestStdout_StatusStrip_AsciiCollapsesMiddleDot(t *testing.T) {
 		Phase: PhaseDone, Iter: 87, CostUSD: 2.34,
 		ChecksPassed: 4, ChecksTotal: 4,
 	})
-	require.Equal(t, "[done | 87 iters | $2.34 | OK 4/4 checks | /diff /merge]\n", buf.String())
+	require.Equal(t, "[done | 87 iters | $2.34 | OK 4/4 checks]\n", buf.String())
 }
 
-// Pluralization: "0 adv finding" should not show, "2 adv findings".
-func TestStdout_StatusStrip_AdvPluralization(t *testing.T) {
-	r, buf := newStdoutForTest(t)
-	r.StatusStrip(SessionState{
-		Phase: PhaseInterview, SlotsFilled: 5, SlotsTotal: 11,
-		Saturation: 0.45, AdvFindings: 0,
-	})
-	require.Equal(t, "[interview · 5/11 slots · sat 45%]\n", buf.String())
-
-	buf.Reset()
-	r.StatusStrip(SessionState{
-		Phase: PhaseInterview, SlotsFilled: 5, SlotsTotal: 11,
-		Saturation: 0.45, AdvFindings: 2,
-	})
-	require.Equal(t, "[interview · 5/11 slots · sat 45% · 2 adv findings]\n", buf.String())
-}
+// iter211: TestStdout_StatusStrip_AdvPluralization removed — its
+// only branch exercised the interview strip's adv-finding pluralization,
+// which is gone with PhaseInterview.
 
 // Done with failing checks should still render.
 func TestStdout_StatusStrip_DoneWithFailures(t *testing.T) {
@@ -158,7 +174,7 @@ func TestStdout_StatusStrip_DoneWithFailures(t *testing.T) {
 		Phase: PhaseDone, Iter: 50, CostUSD: 1.10,
 		ChecksPassed: 2, ChecksTotal: 4,
 	})
-	require.Equal(t, "[done · 50 iters · $1.10 · ✗ 2/4 checks · /diff /merge]\n", buf.String())
+	require.Equal(t, "[done · 50 iters · $1.10 · ✗ 2/4 checks]\n", buf.String())
 }
 
 // Silence "imported and not used" if strings isn't referenced yet
@@ -176,6 +192,20 @@ func TestStdout_SystemNote_PrefixesByKind(t *testing.T) {
 	buf.Reset()
 	r.SystemNote(NoteQueued, "agent will see at iter 24")
 	require.Equal(t, "[note] agent will see at iter 24\n", buf.String())
+}
+
+// iter118a-dod: SystemNote must strip control bytes so a hostile event
+// field that slips into a system note cannot repaint the terminal.
+func TestStdout_SystemNote_StripsControlBytes(t *testing.T) {
+	r, buf := newStdoutForTest(t)
+	r.SystemNote(NoteSystem, "ok\x1b[2J\x07\x7fbeep\nnewline")
+	got := buf.String()
+	require.NotContains(t, got, "\x1b")
+	require.NotContains(t, got, "\x07")
+	require.NotContains(t, got, "\x7f")
+	// Stripping ESC neutralises the escape sequence even though the
+	// trailing literal `[2J` chars remain (printable, harmless).
+	require.Equal(t, "[system] ok[2Jbeepnewline\n", got)
 }
 
 func TestStdout_Confirm_DefaultYes(t *testing.T) {

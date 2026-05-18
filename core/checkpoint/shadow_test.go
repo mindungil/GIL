@@ -146,6 +146,116 @@ func TestShadowGit_Restore_RevertsFile(t *testing.T) {
 	}
 }
 
+// P32: HeadSHA returns the current HEAD or "" when no commits exist.
+func TestShadowGit_HeadSHA(t *testing.T) {
+	if !gitAvailable() {
+		t.Skip("git not in PATH")
+	}
+	workspace := t.TempDir()
+	base := t.TempDir()
+	s := New(workspace, base)
+	ctx := context.Background()
+	if err := s.Init(ctx); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	// Fresh init: no HEAD → "" without error.
+	got, err := s.HeadSHA(ctx)
+	if err != nil {
+		t.Fatalf("HeadSHA on fresh repo: %v", err)
+	}
+	if got != "" {
+		t.Errorf("expected empty HeadSHA on fresh init, got %q", got)
+	}
+
+	if err := os.WriteFile(filepath.Join(workspace, "a.txt"), []byte("v1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sha, err := s.Commit(ctx, "first")
+	if err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	got, err = s.HeadSHA(ctx)
+	if err != nil {
+		t.Fatalf("HeadSHA after commit: %v", err)
+	}
+	if got != sha {
+		t.Errorf("HeadSHA = %q, want %q", got, sha)
+	}
+}
+
+// P32: ChangedFiles enumerates files whose content differs between two
+// commits. Same SHA on both sides is a no-op (empty slice, no error).
+func TestShadowGit_ChangedFiles(t *testing.T) {
+	if !gitAvailable() {
+		t.Skip("git not in PATH")
+	}
+	workspace := t.TempDir()
+	base := t.TempDir()
+	s := New(workspace, base)
+	ctx := context.Background()
+	if err := s.Init(ctx); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	// v1: two files
+	if err := os.WriteFile(filepath.Join(workspace, "a.txt"), []byte("v1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "b.txt"), []byte("v1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	v1, err := s.Commit(ctx, "v1")
+	if err != nil {
+		t.Fatalf("v1 commit: %v", err)
+	}
+
+	// v2: modify a.txt, add c.txt
+	if err := os.WriteFile(filepath.Join(workspace, "a.txt"), []byte("v2"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "c.txt"), []byte("new"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	v2, err := s.Commit(ctx, "v2")
+	if err != nil {
+		t.Fatalf("v2 commit: %v", err)
+	}
+
+	files, err := s.ChangedFiles(ctx, v1, v2)
+	if err != nil {
+		t.Fatalf("ChangedFiles: %v", err)
+	}
+	// Expect a.txt (modified) + c.txt (added). b.txt unchanged.
+	wantSet := map[string]bool{"a.txt": true, "c.txt": true}
+	if len(files) != len(wantSet) {
+		t.Fatalf("changed files = %v, want %v", files, wantSet)
+	}
+	for _, f := range files {
+		if !wantSet[f] {
+			t.Errorf("unexpected changed file %q (want one of %v)", f, wantSet)
+		}
+	}
+
+	// Same SHA → no-op.
+	files, err = s.ChangedFiles(ctx, v2, v2)
+	if err != nil {
+		t.Fatalf("ChangedFiles same-SHA: %v", err)
+	}
+	if len(files) != 0 {
+		t.Errorf("same-SHA ChangedFiles = %v, want empty", files)
+	}
+
+	// Empty from-SHA → no-op (fresh-repo case).
+	files, err = s.ChangedFiles(ctx, "", v2)
+	if err != nil {
+		t.Fatalf("ChangedFiles empty from: %v", err)
+	}
+	if len(files) != 0 {
+		t.Errorf("empty-from ChangedFiles = %v, want empty", files)
+	}
+}
+
 func TestShadowGit_Restore_DeletedFile(t *testing.T) {
 	if !gitAvailable() {
 		t.Skip("git not in PATH")

@@ -70,7 +70,16 @@ func parsePatch(body string) ([]patchOp, error) {
 	lines := strings.Split(strings.TrimSuffix(body, "\n"), "\n")
 
 	if len(lines) == 0 || lines[0] != "*** Begin Patch" {
-		return nil, errors.New("patch must start with '*** Begin Patch'")
+		return nil, errors.New("patch must start with '*** Begin Patch' on its own line. " +
+			"Example envelope:\n" +
+			"*** Begin Patch\n" +
+			"*** Update File: foo.go\n" +
+			"@@\n" +
+			" context line (leading space)\n" +
+			"-old line\n" +
+			"+new line\n" +
+			"*** End Patch\n" +
+			"For tiny edits or full rewrites, write_file is simpler — use apply_patch only for multi-file or multi-hunk changes.")
 	}
 	idx := 1
 
@@ -160,7 +169,9 @@ func parseHunks(lines []string, start int) ([]patchHunk, int, error) {
 			}
 			op := l[0]
 			if op != ' ' && op != '-' && op != '+' {
-				return nil, 0, fmt.Errorf("hunk line %d must start with space/-/+, got %q", idx+1, l)
+				return nil, 0, fmt.Errorf("hunk line %d must start with space (context), '-' (delete), or '+' (add); got %q. "+
+					"Common mistake: context lines (lines that should stay unchanged) need a LEADING SPACE, not just the raw text. "+
+					"If hunk-formatting keeps failing, fall back to write_file for the whole file.", idx+1, l)
 			}
 			hl = append(hl, patchLine{op: op, text: l[1:]})
 			idx++
@@ -328,10 +339,25 @@ func applyHunks(src string, hunks []patchHunk) (string, int, int, error) {
 		}
 		matches := findContiguousMatches(current, oldSeq)
 		if len(matches) == 0 {
-			return "", 0, 0, fmt.Errorf("hunk %d (%q): pre-image not found in file", hi+1, h.header)
+			// Surface what we expected vs what's there so the agent can
+			// see the whitespace/indentation/typo mismatch causing the miss.
+			expected := strings.Join(oldSeq, "\n")
+			if len(expected) > 400 {
+				expected = expected[:400] + "...(truncated)"
+			}
+			// Try a fuzzy hint: find the closest line in the file that
+			// looks like the first oldSeq line, so the agent can compare.
+			hint := nearestLineHint(current, oldSeq[0])
+			return "", 0, 0, fmt.Errorf(
+				"hunk %d (%q): pre-image not found in file. "+
+					"Expected this exact text (with leading-space context lines):\n%s\n"+
+					"%s"+
+					"Common cause: indentation mismatch (tabs vs spaces), trailing whitespace, "+
+					"or stale read. Re-read the file and copy the lines verbatim, OR fall back to write_file.",
+				hi+1, h.header, expected, hint)
 		}
 		if len(matches) > 1 {
-			return "", 0, 0, fmt.Errorf("hunk %d (%q): pre-image matches %d locations; add more context", hi+1, h.header, len(matches))
+			return "", 0, 0, fmt.Errorf("hunk %d (%q): pre-image matches %d locations; add more context lines around the change to disambiguate", hi+1, h.header, len(matches))
 		}
 		at := matches[0]
 		next := make([]string, 0, len(current)+len(newSeq)-len(oldSeq))
@@ -367,6 +393,24 @@ func findContiguousMatches(haystack, needle []string) []int {
 	return hits
 }
 
+// nearestLineHint searches haystack for the line whose trimmed form
+// matches the trimmed form of needle (a typical agent mistake is
+// indentation-only mismatch). Returns a "Closest match in file at
+// line N: <text>" hint, or empty string if no near match found.
+func nearestLineHint(haystack []string, needle string) string {
+	target := strings.TrimSpace(needle)
+	if target == "" {
+		return ""
+	}
+	for i, line := range haystack {
+		if strings.TrimSpace(line) == target {
+			return fmt.Sprintf("Closest match in file at line %d (note the leading whitespace difference): %q\n",
+				i+1, line)
+		}
+	}
+	return ""
+}
+
 func countLines(s string) int {
 	if s == "" {
 		return 0
@@ -392,7 +436,9 @@ func (t *toolApplyPatch) description() string {
 		"with one or more '*** Add File: <path>' (lines prefixed +), '*** Delete File: <path>' (no body), " +
 		"or '*** Update File: <path>' (followed by '@@' hunks containing space/-/+ lines) sections. " +
 		"All hunks must match the current file exactly once; if any hunk fails, NO file is modified. " +
-		"Prefer this over edit_file when changing multiple files or making several edits per file in one call."
+		"Prefer this over edit_file when changing multiple files or making several edits per file in one call. " +
+		"For tiny single-file edits or full rewrites, write_file / edit_file are simpler — apply_patch's hunk format " +
+		"(leading space on context lines, exact whitespace match) is unforgiving."
 }
 
 func (t *toolApplyPatch) schema() json.RawMessage {
@@ -426,6 +472,17 @@ func (t *toolApplyPatch) run(ctx context.Context, sessionID string, argsJSON jso
 	}
 	if len(ops) == 0 {
 		return provider.ToolResult{Content: "patch contains no file ops", IsError: true}, nil
+	}
+
+	// C3: reject patches that would silently chmod through a user-protected file.
+	for _, op := range ops {
+		abs, rerr := resolveInWD(wd, op.path)
+		if rerr != nil {
+			continue // hunk-mismatch errors are caught by applyPatch itself; we only gate readonly here
+		}
+		if err := rejectReadonlyTarget(abs); err != nil {
+			return provider.ToolResult{Content: err.Error(), IsError: true}, nil
+		}
 	}
 
 	// Capture pre-write snapshots BEFORE applying so the tracker has

@@ -170,6 +170,13 @@ nfpms:
 brews:
   - name: gil
     ids: [gil-bundle]
+    # Skipped until the user creates and authorises the
+    # mindungil/homebrew-tap repo. Setting skip_upload: auto would
+    # only suppress upload on snapshot builds; we want a hard skip
+    # on the formula step itself, so we gate via a templated
+    # disable expression that always evaluates true. Remove this
+    # line once the tap repo exists.
+    disable: "true"
     repository:
       owner: mindungil
       name: homebrew-tap

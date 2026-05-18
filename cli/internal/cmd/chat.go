@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -16,21 +17,16 @@ import (
 	"github.com/mindungil/gil/sdk"
 )
 
-// noIntentRouter, when true, bypasses the §2.6(b) verb router and
-// forwards every prompt straight to the daemon. Set by the
-// --no-intent-router flag on bare gil. Defaults false (router on).
-var noIntentRouter bool
-
 // chatCmd returns the explicit `gil chat` entrypoint. It is also the
 // implementation behind bare `gil` invocation when stdout is a TTY (see
 // root.go's RunE shim) — calling it directly is for users who want the
 // chat surface even when their stdout is piped (e.g. tee'd into a log).
 //
-// chat is the V1 chat surface for gil. It collapses the previous
-// verb-routing UI into a single REPL: the user types prompts in free
-// text, slash commands manage session lifecycle (/sessions /switch /new
-// /spec /status /diff /merge /run /quit /help), and a tracker maps
-// daemon events to a one-line status strip rendered between turns.
+// chat is the single natural-language surface for gil. The user types
+// what they want in free text; the daemon-side agent loop owns all
+// verb dispatch via tools (show_diff, freeze_spec, start_run, …).
+// There is no client-side routing and no slash-command escape hatch —
+// every prompt streams straight to the daemon.
 //
 // Pre-daemon onboarding (no-init / no-creds short-circuit) lives in
 // chat_onboarding.go and is gated by detectPreDaemonState BEFORE the
@@ -42,6 +38,7 @@ var noIntentRouter bool
 // off to repl.Run.
 func chatCmd() *cobra.Command {
 	var socket, providerName, model, workingDir string
+	var once bool
 	c := &cobra.Command{
 		Use:     "chat",
 		Aliases: []string{"talk"},
@@ -53,15 +50,22 @@ client-side routing — every prompt streams straight to the daemon.
 
 Bare ` + "`gil`" + ` in a TTY launches the same surface. ` + "`gil chat`" + ` is the
 explicit form for piped/scripted use and for the rare case the user
-wants the chat surface regardless of TTY state.`,
+wants the chat surface regardless of TTY state.
+
+--once exits after the first prompt's stream drains successfully.
+Use for piped/scripted invocation (` + "`gil chat --once < spec.txt`" + `)
+where the agent's "are you done?"-style trailing question would
+otherwise hang the loop waiting on a second stdin line that never
+comes.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runChat(cmd, socket, providerName, model)
+			return runChat(cmd, socket, providerName, model, once)
 		},
 	}
 	c.Flags().StringVar(&socket, "socket", defaultSocket(), "gild UDS socket path")
 	c.Flags().StringVar(&providerName, "provider", "", "LLM provider (anthropic|openai|openrouter|vllm|mock); empty → workspace config")
 	c.Flags().StringVar(&model, "model", "", "LLM model id; empty → provider default or workspace config")
+	c.Flags().BoolVar(&once, "once", false, "exit after the first prompt's stream drains (for piped/scripted use)")
 	// G4 — #32 followup: the chat handler reads --working-dir via
 	// cmd.Flags().GetString but the flag wasn't registered here, so
 	// the value silently fell through to os.Getwd(). Register it so
@@ -79,7 +83,7 @@ wants the chat surface regardless of TTY state.`,
 // SetProvider so they reach the daemon's SessionService.Prompt RPC
 // (InterviewService removed in M3). Empty values defer to the layered
 // workspace-config defaults applied by session_prompt.go.
-func runChat(cmd *cobra.Command, socket, providerName, model string) error {
+func runChat(cmd *cobra.Command, socket, providerName, model string, once bool) error {
 	out := cmd.OutOrStdout()
 	in := cmd.InOrStdin()
 	ctx := cmd.Context()
@@ -113,9 +117,31 @@ func runChat(cmd *cobra.Command, socket, providerName, model string) error {
 
 	workingDir, _ := cmd.Flags().GetString("working-dir")
 	if workingDir == "" {
-		if cwd, err := os.Getwd(); err == nil {
-			workingDir = cwd
+		workingDir = "."
+	}
+	// iter28a: relative paths (`.`, `..`, `sub/dir`) must resolve
+	// against the CLIENT's cwd, not the daemon's. The daemon is a
+	// long-running process in a different directory, so any non-
+	// absolute path sent over the wire would land somewhere the user
+	// did not intend (eval-loop iter28 showed the agent globbing the
+	// daemon's repo instead of the user's `.`).
+	if abs, err := filepath.Abs(workingDir); err == nil {
+		workingDir = abs
+	}
+	// iter182: fail fast when --working-dir points at a missing or
+	// not-a-directory path. Otherwise the session creates fine but
+	// every file-touching tool (read_file, write_file, run_bash with
+	// cmd.Dir, …) fails for the same root cause, and the agent ends
+	// up in a dead state the user has to abandon. Surface it once at
+	// the client so the user can `mkdir` or re-target before sending
+	// a single prompt.
+	if info, err := os.Stat(workingDir); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("working dir %q does not exist (mkdir it first, or pass --working-dir to a real path)", workingDir)
 		}
+		return fmt.Errorf("working dir %q: %w", workingDir, err)
+	} else if !info.IsDir() {
+		return fmt.Errorf("working dir %q is not a directory", workingDir)
 	}
 	grpcClient := repl.NewGRPCClient(cli, workingDir)
 	grpcClient.SetProvider(providerName, model)
@@ -125,15 +151,11 @@ func runChat(cmd *cobra.Command, socket, providerName, model string) error {
 	renderer := render.NewStdoutChatRenderer(out, in, asciiMode, noColor)
 	defer renderer.Close()
 
-	// The intent router is gone (see core/intent/router.go header).
-	// noIntentRouter flag is still parsed for backwards-compatibility
-	// with shell history but has no effect now — every prompt forwards
-	// to the daemon's agent loop.
-	_ = noIntentRouter
 	return repl.Run(ctx, repl.Config{
 		In:       in,
 		Renderer: renderer,
 		Client:   grpcClient,
+		Once:     once,
 	})
 }
 

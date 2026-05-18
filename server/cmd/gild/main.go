@@ -64,6 +64,30 @@ func newServer(dbPath, sockPath, sessionsBase, authFile string, authMW *auth.Mid
 	if err != nil {
 		return nil, err
 	}
+	// iter21a: SQLite defaults serialize all writes and fail immediately
+	// on lock contention. Concurrent Prompt RPCs (each calling
+	// session.Create) surfaced as "database is locked (5) SQLITE_BUSY"
+	// to clients — see eval-loop iter21. Three layered fixes:
+	//   1. WAL mode lets readers run alongside a single writer.
+	//   2. busy_timeout=5000 retries lock-blocked statements internally
+	//      for up to 5s before bubbling the error.
+	//   3. SetMaxOpenConns(1) serializes the write path inside the Go
+	//      driver, so the busy_timeout retry actually has a chance to
+	//      see the lock release instead of multiple pooled connections
+	//      racing each other for the same writer slot.
+	// PRAGMAs are issued via separate Exec calls — modernc.org/sqlite's
+	// driver only honors the first statement when multiple are squashed
+	// into one Exec; that's how iter21's first attempted fix silently
+	// dropped the busy_timeout setting.
+	if _, err := db.Exec(`PRAGMA journal_mode=WAL`); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("set journal_mode=WAL: %w", err)
+	}
+	if _, err := db.Exec(`PRAGMA busy_timeout=5000`); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("set busy_timeout: %w", err)
+	}
+	db.SetMaxOpenConns(1)
 	if err := session.Migrate(db); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -548,6 +572,23 @@ func newServer(dbPath, sockPath, sessionsBase, authFile string, authMW *auth.Mid
 	g := grpc.NewServer(grpcOpts...)
 	repo := session.NewRepo(db)
 	runSvc := service.NewRunService(repo, sessionsBase, factory)
+	// P36: reap any session left in status="running" from the prior
+	// daemon process. The in-flight agent loop goroutine is gone, but
+	// the DB status would otherwise say "running" forever; clients
+	// polling list_sessions / status would see ghost progress. Flip to
+	// "stopped" and append a run_orphaned event for the audit trail.
+	// Best-effort — logs a warning on failure but never blocks startup.
+	if reaped, err := runSvc.ReapOrphanRuns(context.Background()); err != nil {
+		slog.Warn("reap orphan runs", "err", err)
+	} else if reaped > 0 {
+		slog.Info("reaped orphan runs from prior daemon", "count", reaped)
+	}
+	// P38: launch the mid-session orphan sweeper. While the daemon is
+	// running, this catches goroutines that died silently (panic recovered,
+	// hung syscall, OOM-killed child) by checking heartbeat staleness
+	// every sweepInterval. Cancel is wired to ctx via the long-lived
+	// daemon context so the goroutine terminates on shutdown.
+	runSvc.StartMidSessionOrphanSweeper(context.Background())
 	gilv1.RegisterSessionServiceServer(g, service.
 		NewSessionService(repo, runSvc).
 		WithSessionsBase(sessionsBase).

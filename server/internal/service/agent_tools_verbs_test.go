@@ -3,11 +3,14 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
 	"github.com/mindungil/gil/core/provider"
+	"github.com/mindungil/gil/core/session"
+	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
 )
 
 // agent_tools_verbs_test.go covers the §2.6 verb-tool wave at unit
@@ -19,16 +22,18 @@ import (
 // --- working set --------------------------------------------------
 
 func TestToolAddToWorkingSet_AddsAndReportsDuplicates(t *testing.T) {
+	// iter56a: workingset validates paths via session's working dir.
 	sess, _ := newTestSessionService(t)
+	sid := newTestSession(t, sess.repo, t.TempDir())
 	add := &toolAddToWorkingSet{sess: sess}
-	res, err := add.run(context.Background(), "s1", json.RawMessage(`{"paths":["a.go","b.go"]}`))
+	res, err := add.run(context.Background(), sid, json.RawMessage(`{"paths":["a.go","b.go"]}`))
 	require.NoError(t, err)
 	require.False(t, res.IsError)
 	require.Contains(t, res.Content, "added 2")
 	require.Contains(t, res.Content, "a.go")
 
 	// Re-adding b.go reports duplicate; c.go is new.
-	res2, err := add.run(context.Background(), "s1", json.RawMessage(`{"paths":["b.go","c.go"]}`))
+	res2, err := add.run(context.Background(), sid, json.RawMessage(`{"paths":["b.go","c.go"]}`))
 	require.NoError(t, err)
 	require.Contains(t, res2.Content, "added 1")
 	require.Contains(t, res2.Content, "already present")
@@ -54,11 +59,12 @@ func TestToolAddToWorkingSet_EmptyPathsIsNoOpNotError(t *testing.T) {
 
 func TestToolListWorkingSet_SortedAndStable(t *testing.T) {
 	sess, _ := newTestSessionService(t)
+	sid := newTestSession(t, sess.repo, t.TempDir())
 	add := &toolAddToWorkingSet{sess: sess}
 	list := &toolListWorkingSet{sess: sess}
 
-	_, _ = add.run(context.Background(), "s1", json.RawMessage(`{"paths":["z.go","a.go","m.go"]}`))
-	res, err := list.run(context.Background(), "s1", json.RawMessage(`{}`))
+	_, _ = add.run(context.Background(), sid, json.RawMessage(`{"paths":["z.go","a.go","m.go"]}`))
+	res, err := list.run(context.Background(), sid, json.RawMessage(`{}`))
 	require.NoError(t, err)
 	// Sorted output is the user-facing stability contract.
 	require.Contains(t, res.Content, "a.go\n  m.go\n  z.go")
@@ -74,14 +80,15 @@ func TestToolListWorkingSet_EmptySessionIsEmpty(t *testing.T) {
 
 func TestToolDropFromWorkingSet_RoundtripWithList(t *testing.T) {
 	sess, _ := newTestSessionService(t)
+	sid := newTestSession(t, sess.repo, t.TempDir())
 	add := &toolAddToWorkingSet{sess: sess}
 	drop := &toolDropFromWorkingSet{sess: sess}
 	list := &toolListWorkingSet{sess: sess}
 
-	_, _ = add.run(context.Background(), "s1", json.RawMessage(`{"paths":["a.go","b.go","c.go"]}`))
-	_, _ = drop.run(context.Background(), "s1", json.RawMessage(`{"paths":["b.go","ghost.go"]}`))
+	_, _ = add.run(context.Background(), sid, json.RawMessage(`{"paths":["a.go","b.go","c.go"]}`))
+	_, _ = drop.run(context.Background(), sid, json.RawMessage(`{"paths":["b.go","ghost.go"]}`))
 
-	res, _ := list.run(context.Background(), "s1", json.RawMessage(`{}`))
+	res, _ := list.run(context.Background(), sid, json.RawMessage(`{}`))
 	require.Contains(t, res.Content, "a.go")
 	require.NotContains(t, res.Content, "b.go")
 	require.Contains(t, res.Content, "c.go")
@@ -89,15 +96,21 @@ func TestToolDropFromWorkingSet_RoundtripWithList(t *testing.T) {
 
 func TestWorkingSet_PerSessionIsolation(t *testing.T) {
 	// Two sessions must not see each other's working sets.
+	// iter56a: add_to_workingset now validates paths via the session's
+	// working dir, so the test must register real sessions instead of
+	// passing bare "s1"/"s2" strings.
 	sess, _ := newTestSessionService(t)
+	wd := t.TempDir()
+	s1 := newTestSession(t, sess.repo, wd)
+	s2 := newTestSession(t, sess.repo, wd)
 	add := &toolAddToWorkingSet{sess: sess}
 	list := &toolListWorkingSet{sess: sess}
 
-	_, _ = add.run(context.Background(), "s1", json.RawMessage(`{"paths":["s1-only.go"]}`))
-	_, _ = add.run(context.Background(), "s2", json.RawMessage(`{"paths":["s2-only.go"]}`))
+	_, _ = add.run(context.Background(), s1, json.RawMessage(`{"paths":["s1-only.go"]}`))
+	_, _ = add.run(context.Background(), s2, json.RawMessage(`{"paths":["s2-only.go"]}`))
 
-	r1, _ := list.run(context.Background(), "s1", json.RawMessage(`{}`))
-	r2, _ := list.run(context.Background(), "s2", json.RawMessage(`{}`))
+	r1, _ := list.run(context.Background(), s1, json.RawMessage(`{}`))
+	r2, _ := list.run(context.Background(), s2, json.RawMessage(`{}`))
 	require.Contains(t, r1.Content, "s1-only.go")
 	require.NotContains(t, r1.Content, "s2-only.go")
 	require.Contains(t, r2.Content, "s2-only.go")
@@ -220,6 +233,83 @@ func TestToolRestoreCheckpoint_RejectsBadJSON(t *testing.T) {
 	res, err := r.run(context.Background(), "s1", json.RawMessage(`not json`))
 	require.NoError(t, err)
 	require.True(t, res.IsError)
+}
+
+// P32: renderRestoreResult emits a loud WORKSPACE CHANGED warning + a
+// changed-files enumeration so the agent treats prior in-conversation
+// assumptions as stale. No-op restores (target == prior HEAD) skip the
+// warning and report unchanged content instead.
+func TestRenderRestoreResult_WithChangedFiles(t *testing.T) {
+	resp := &gilv1.RestoreResponse{
+		CommitSha:        "abcdef1234567890",
+		CommitMessage:    "checkpoint at iter 5",
+		TotalCheckpoints: 4,
+		ChangedFiles:     []string{"main.go", "calc/calc.go"},
+	}
+	got := renderRestoreResult(resp)
+	require.Contains(t, got, "restored to abcdef12")
+	require.Contains(t, got, `"checkpoint at iter 5"`)
+	require.Contains(t, got, "WORKSPACE STATE CHANGED")
+	require.Contains(t, got, "re-read the affected files")
+	require.Contains(t, got, "main.go")
+	require.Contains(t, got, "calc/calc.go")
+	require.Contains(t, got, "changed files (2)")
+	require.NotContains(t, got, "more changed files omitted")
+}
+
+func TestRenderRestoreResult_TruncatedList(t *testing.T) {
+	resp := &gilv1.RestoreResponse{
+		CommitSha:             "deadbeefcafebabe",
+		CommitMessage:         "big rollback",
+		TotalCheckpoints:      10,
+		ChangedFiles:          []string{"a", "b", "c"},
+		ChangedFilesTruncated: true,
+	}
+	got := renderRestoreResult(resp)
+	require.Contains(t, got, "more changed files omitted")
+}
+
+func TestRenderRestoreResult_NoOpRestore(t *testing.T) {
+	resp := &gilv1.RestoreResponse{
+		CommitSha:        "abcdef12",
+		CommitMessage:    "self-target",
+		TotalCheckpoints: 1,
+		ChangedFiles:     nil,
+	}
+	got := renderRestoreResult(resp)
+	require.Contains(t, got, "restored to abcdef12")
+	require.Contains(t, got, "tracked content unchanged")
+	require.NotContains(t, got, "WORKSPACE STATE CHANGED")
+}
+
+// iter151a: list_sessions surfaces persisted token + cost so the agent
+// (and user) can scan recent runs and spot expensive ones without
+// drilling into each one. Skips the suffix when totals are zero so
+// fresh sessions stay terse.
+func TestToolListSessions_ShowsPersistedTotals(t *testing.T) {
+	ctx := context.Background()
+	repo := newTestRepo(t)
+	wd := t.TempDir()
+
+	// Two sessions: one with persisted totals, one without.
+	withTotals, err := repo.Create(ctx, session.CreateInput{WorkingDir: wd, GoalHint: "ran a job"})
+	require.NoError(t, err)
+	require.NoError(t, repo.UpdateTotals(ctx, withTotals.ID, 7777, 0.0123))
+
+	_, err = repo.Create(ctx, session.CreateInput{WorkingDir: wd, GoalHint: "brand new"})
+	require.NoError(t, err)
+
+	tool := &toolListSessions{repo: repo}
+	res, err := tool.run(ctx, "", json.RawMessage(`{}`))
+	require.NoError(t, err)
+	require.False(t, res.IsError)
+	require.Contains(t, res.Content, "tokens=7777")
+	require.Contains(t, res.Content, "cost=$0.0123")
+	// "brand new" row has no totals, so no suffix.
+	require.Contains(t, res.Content, "brand new")
+	// And there shouldn't be a 'tokens=' for the no-totals row.
+	require.Equal(t, 1, strings.Count(res.Content, "tokens="),
+		"expected exactly one tokens= row; got %q", res.Content)
 }
 
 // --- helpers ------------------------------------------------------

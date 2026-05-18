@@ -33,6 +33,25 @@ func TestToolSpawnAgent_RequiresLabelAndTask(t *testing.T) {
 	require.Contains(t, res.Content, "task")
 }
 
+// iter102a: control chars in args.Label must be stripped before storage.
+// A label of pure control bytes survives TrimSpace (ESC is not unicode
+// whitespace) but becomes empty after sanitizeHintControlChars; the
+// empty-after path is the cleanest observable that the sanitizer ran.
+func TestToolSpawnAgent_RejectsControlCharOnlyLabel(t *testing.T) {
+	sess, base := newTestSessionService(t)
+	rs := NewRunService(sess.repo, base, nil)
+	tool := &toolSpawnAgent{sess: sess, rs: rs, registry: sess.subagentRegistry, base: base}
+
+	wd := t.TempDir()
+	sid := newTestSession(t, sess.repo, wd)
+
+	// Label is only control bytes (ESC + SOH + DEL); sanitizer empties it.
+	res, _ := tool.run(context.Background(), sid,
+		json.RawMessage(`{"label":"\u001b\u0001\u007f","task":"x"}`))
+	require.True(t, res.IsError)
+	require.Contains(t, res.Content, "empty after stripping control chars")
+}
+
 func TestToolSpawnAgent_RejectsUnfrozenParent(t *testing.T) {
 	sess, base := newTestSessionService(t)
 	rs := NewRunService(sess.repo, base, nil)
@@ -124,4 +143,38 @@ func sessionCreateChild(parentID, label string) session.CreateInput {
 		SubagentDepth:   1,
 		SubagentLabel:   label,
 	}
+}
+
+// iter133a: session.TotalTokens / TotalCostUSD on the persisted row
+// are not maintained by the run path, so reading them returned
+// "tokens=0 cost=$0.0000" even after a real run. renderSubagentFinal
+// now consults the live trackers; the row values stay as a fallback.
+type fakeProgress struct{ tokens int64 }
+
+func (f fakeProgress) Progress(string) (int32, int64, bool) { return 0, f.tokens, true }
+
+type fakeBudget struct{ cost float64 }
+
+func (f fakeBudget) Budget(string) (float64, bool, string, bool) {
+	return f.cost, false, "", true
+}
+
+func TestRenderSubagentFinal_ReadsLiveTrackers(t *testing.T) {
+	s := session.Session{
+		ID: "abc", SubagentLabel: "explorer", Status: "done",
+		TotalTokens: 0, TotalCostUSD: 0,
+	}
+	got := renderSubagentFinal(s, fakeProgress{tokens: 1234}, fakeBudget{cost: 0.0123})
+	require.Contains(t, got, "tokens=1234")
+	require.Contains(t, got, "cost=$0.0123")
+}
+
+func TestRenderSubagentFinal_FallsBackToRowWhenTrackersAbsent(t *testing.T) {
+	s := session.Session{
+		ID: "abc", SubagentLabel: "explorer", Status: "done",
+		TotalTokens: 999, TotalCostUSD: 0.5,
+	}
+	got := renderSubagentFinal(s, nil, nil)
+	require.Contains(t, got, "tokens=999")
+	require.Contains(t, got, "cost=$0.5000")
 }
