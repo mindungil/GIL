@@ -377,6 +377,17 @@ Tools — session ops:
 - reset_session: clear the conversation history so the next prompt
   starts fresh. Does NOT touch the workspace, frozen spec, or
   checkpoints. Confirm intent (it cannot be undone) before calling.
+- remember: persist a short note (≤500 chars) into cross-session
+  memory. Recent memories auto-surface in future sessions' system
+  prompt. Use for: project facts, failed approaches, user
+  preferences, gotchas. Do NOT use for: session-local state.
+- request_user_input: pause the autonomous loop and ask the user
+  ONE focused question. Use when the task is genuinely ambiguous
+  (multiple acceptable interpretations / destructive op needing
+  confirmation / missing user-only knowledge). After calling, END
+  THE TURN with no further tool calls so the user can answer in
+  their next prompt. Do NOT use for things you can figure out by
+  reading the code.
 
 Additional tools — MCP servers (dynamic):
 - If the frozen spec lists MCP servers under tools.mcp_servers,
@@ -397,9 +408,13 @@ Workflow guidance:
   overhead; just do the edit and call verify once at the end.
 - Show the user a short summary at the end with what changed and the
   final verify result.
-- For an ambiguous task: ask 1-2 focused clarifying questions
-  (goal, scope, success criteria) before doing destructive work. For
-  obvious tasks just proceed.
+- For an ambiguous task: call request_user_input with ONE focused
+  question (goal, scope, success criteria) BEFORE doing destructive
+  work. For obvious tasks just proceed — don't ask permission for
+  things you can do safely. The agent has up to 30 turns per
+  prompt to drive a task to completion; use them. Each verify
+  failure can be retried up to 8 times before the C1 backstop
+  fires. Iterate fast, fix actual root causes, don't give up.
 - For a question about workspace state: call the matching read-only
   tool (show_diff, list_sessions, …) instead of describing what you'd
   show.
@@ -596,7 +611,15 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 	//    emits tool_calls, we dispatch them, append the results, and
 	//    re-call. The loop terminates when the LLM returns no tool
 	//    calls (StopReason="end_turn") or we hit the iteration cap.
-	const maxAgentTurns = 8
+	// P63: lifted from 8 → 30. Data from P57 chess engine dogfood
+	// showed the agent was actively debugging at turn 8 (manually
+	// tracing piece moves to find a Kiwipete perft bug) and would
+	// have likely converged with another 2-5 turns. md2html and
+	// most bench tasks converge in 2-4 turns, so lifting has no
+	// downside there. P38 heartbeat + P49 cost surfacing bound the
+	// worst-case runaway. Trust agent autonomy within this larger
+	// envelope.
+	const maxAgentTurns = 30
 	systemPrompt := fmt.Sprintf(agent.SystemPrompt, provName, modelID, sessionID)
 	// P55: prepend recent cross-session memories so the agent has
 	// continuity across sessions. Best-effort: nil DB or query
@@ -623,7 +646,12 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 	}
 	needsVerify := false
 	verifyRetries := 0
-	const maxVerifyRetries = 2
+	// P63: lifted from 2 → 8. Real bug-fix cycles often need more than
+	// 2 verify retries — compile error → fix → tests fail → fix → tests
+	// pass is already 4 verifies. 2 was set defensively when chat was
+	// a single-prompt-single-response surface; now it just blocks real
+	// agent driving.
+	const maxVerifyRetries = 8
 	// P50: track the last verify call's error content so the turn-cap
 	// C1 backstop can surface "which check failed" in the
 	// verify_missing message instead of a generic hint. Empty when
@@ -648,6 +676,18 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 	)
 
 	for turn := 0; turn < maxAgentTurns; turn++ {
+		// P63: periodic in-loop compaction. The entry-time check (P35)
+		// runs once before turn 0; in long agent loops the history
+		// grows by tool results + reasoning + assistant turns and can
+		// blow past the threshold mid-loop. Re-check every 5 iterations
+		// so the next provider call doesn't get blasted out of context
+		// window. Idempotent: if not over threshold, no-op + fast path.
+		if turn > 0 && turn%5 == 0 {
+			if compacted, didCompact, cerr := compactChatIfNeeded(ctx, provName, modelID, prov, msgs); cerr == nil && didCompact {
+				msgs = compacted
+				s.chatHistory().ReplaceInMemory(sessionID, compacted)
+			}
+		}
 		t0 := time.Now()
 		resp, err := prov.Complete(ctx, provider.Request{
 			Model:       modelID,

@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -162,16 +163,17 @@ func TestPrompt_WriteVerifyWriteNoVerify_RetriesThenErrors(t *testing.T) {
 // this and emit verify_missing.
 //
 // Sequence: 8 turns each emitting one write_file, never a verify.
-// maxAgentTurns=8 means the for loop exits after turn 7 (0-indexed)
-// without entering the no-tool-calls branch. Backstop must fire.
+// maxAgentTurns=30 (P63 lift). The for loop exits after turn 29
+// (0-indexed) without entering the no-tool-calls branch. Backstop
+// must fire. Use 32 turns to ensure cap is hit.
 func TestPrompt_LoopCapHitWithUnverifiedWrite_BackstopFires(t *testing.T) {
 	var turns []provider.MockTurn
-	for i := 0; i < 9; i++ {
+	for i := 0; i < 32; i++ {
 		turns = append(turns, provider.MockTurn{
 			ToolCalls: []provider.ToolCall{{
-				ID:    "c" + string(rune('0'+i)),
+				ID:    "c" + fmt.Sprintf("%d", i),
 				Name:  "write_file",
-				Input: []byte(`{"path":"f` + string(rune('0'+i)) + `.go","content":"package x\n"}`),
+				Input: []byte(fmt.Sprintf(`{"path":"f%d.go","content":"package x\n"}`, i)),
 			}},
 		})
 	}
@@ -248,18 +250,19 @@ func (f *fakeContentTool) run(_ context.Context, _ string, _ json.RawMessage) (p
 // the situation.
 func TestPrompt_LoopCapHitWithFailedVerify_BackstopIncludesLastOutput(t *testing.T) {
 	// Sequence: write, verify (fails), write, verify (fails), … until cap.
+	// P63: maxAgentTurns=30, so need ≥16 (write+verify) pairs = 32 turns.
 	var turns []provider.MockTurn
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 16; i++ {
 		turns = append(turns,
 			provider.MockTurn{
 				ToolCalls: []provider.ToolCall{{
-					ID: "w" + string(rune('0'+i)), Name: "write_file",
-					Input: []byte(`{"path":"f` + string(rune('0'+i)) + `.go","content":"package x\n"}`),
+					ID: fmt.Sprintf("w%d", i), Name: "write_file",
+					Input: []byte(fmt.Sprintf(`{"path":"f%d.go","content":"package x\n"}`, i)),
 				}},
 			},
 			provider.MockTurn{
 				ToolCalls: []provider.ToolCall{{
-					ID: "v" + string(rune('0'+i)), Name: "verify",
+					ID: fmt.Sprintf("v%d", i), Name: "verify",
 					Input: []byte(`{"command":"false","description":"deliberate fail"}`),
 				}},
 			},

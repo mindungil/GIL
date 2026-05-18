@@ -188,6 +188,11 @@ func (s *SessionService) buildChatToolRegistry(runSvc *RunService, parentProvide
 			// test setups without a repo silently degrade (the tool
 			// returns "noted (no durable storage wired)").
 			&toolRemember{db: rememberDB(s)},
+			// P63 explicit user-input pause — see agent_tools_clarify.go.
+			// Lets the agent halt the autonomous loop when it genuinely
+			// needs human direction rather than guessing for the rest
+			// of the (now lifted) maxAgentTurns budget.
+			&toolRequestUserInput{},
 		},
 	}
 }
