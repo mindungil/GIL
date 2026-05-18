@@ -27,7 +27,13 @@ fi
 
 REPO_ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 TASKS_DIR=$REPO_ROOT/docs/eval/tasks
-PATTERN=${1:-"*"}
+# Each positional arg is a glob expanded against $TASKS_DIR. Defaults
+# to "*" if no args given. Repeated args run all matched tasks in order.
+if [ $# -eq 0 ]; then
+    PATTERNS=("*")
+else
+    PATTERNS=("$@")
+fi
 
 if [ ! -d "$TASKS_DIR" ]; then
     echo "run-suite: $TASKS_DIR does not exist" >&2
@@ -44,7 +50,20 @@ FAIL=0
 SKIP=0
 declare -a FAILED_NAMES
 
-for task in "$TASKS_DIR"/$PATTERN/; do
+seen=""
+declare -a TASK_DIRS
+for pat in "${PATTERNS[@]}"; do
+    for t in "$TASKS_DIR"/$pat/; do
+        [ -d "$t" ] || continue
+        if [[ ":$seen:" == *":$t:"* ]]; then
+            continue
+        fi
+        seen="$seen:$t"
+        TASK_DIRS+=("$t")
+    done
+done
+
+for task in "${TASK_DIRS[@]}"; do
     [ -d "$task" ] || continue
     name=$(basename "$task")
     if [ ! -f "$task/PROMPT.md" ] || [ ! -f "$task/meta.sh" ]; then
@@ -106,7 +125,7 @@ echo "=== suite summary ==="
 echo "PASS: $PASS"
 echo "FAIL: $FAIL"
 echo "SKIP: $SKIP"
-if [ "${#FAILED_NAMES[@]:-0}" -gt 0 ]; then
+if [ "$FAIL" -gt 0 ] && [ "${#FAILED_NAMES[@]}" -gt 0 ]; then
     echo "failed: ${FAILED_NAMES[*]}"
 fi
 echo "traces: $OUT_DIR"

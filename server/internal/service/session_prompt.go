@@ -675,6 +675,17 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 		chatStuckFired bool
 	)
 
+	// P66: consecutive-tool-timeout abort. Eval-loop task17 SPMC
+	// burned 32 minutes in a single turn when the agent's lock-free
+	// SPMC livelocked and `go test -race` hung. Each bash/verify
+	// tool call timed out at its internal 30-60s limit, but the
+	// agent kept retrying — 30+ sequential timeouts in one turn.
+	// maxAgentTurns doesn't help because the whole problem is
+	// inside one turn. Track timeouts across calls (any non-timeout
+	// result resets); abort when we hit a threshold.
+	const maxConsecutiveTimeouts = 3
+	consecutiveTimeouts := 0
+
 	for turn := 0; turn < maxAgentTurns; turn++ {
 		// P63c: removed "every 5 iters compaction" — v4 chess dogfood
 		// data showed this aggressively wiped middle context (failing
@@ -786,6 +797,7 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 
 		// Dispatch each tool call, stream Parts, collect results.
 		toolResults := make([]provider.ToolResult, 0, len(resp.ToolCalls))
+		abortedTimeoutLoop := false
 		for _, call := range resp.ToolCalls {
 			if err := stream.Send(&gilv1.Part{
 				Body: &gilv1.Part_ToolCall{ToolCall: &gilv1.ToolCallPart{
@@ -874,6 +886,20 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 				"content":  result.Content,
 				"is_error": result.IsError,
 			})
+
+			// P66: track consecutive timeout results. Bash returns
+			// `timeout after Ns\n...`; verify returns `[TIMEOUT] ...`.
+			// Any non-timeout result resets the streak (success OR
+			// other errors — the agent did something different).
+			if result.IsError && isToolTimeoutResult(result.Content) {
+				consecutiveTimeouts++
+				if consecutiveTimeouts >= maxConsecutiveTimeouts {
+					abortedTimeoutLoop = true
+					break
+				}
+			} else {
+				consecutiveTimeouts = 0
+			}
 		}
 
 		// Feed the tool results back as a synthetic user turn (per
@@ -885,6 +911,27 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 		}
 		msgs = append(msgs, toolFeedback)
 		s.chatHistory().append(sessionID, toolFeedback)
+
+		// P66: if we hit the consecutive-timeout cap, surface a clear
+		// signal to the client and end this Prompt RPC. The agent
+		// can't recover within this turn (every tool call is hanging);
+		// the user/dogfood runner is the right escalation level.
+		if abortedTimeoutLoop {
+			msg := fmt.Sprintf("agent issued %d consecutive tool calls that timed out — likely a hung subprocess (deadlock, infinite test loop, etc.). Aborting before more budget is wasted.", maxConsecutiveTimeouts)
+			_ = stream.Send(&gilv1.Part{
+				Body: &gilv1.Part_Text{Text: &gilv1.TextDelta{Content: "[system] tool_timeout_loop: " + msg}},
+			})
+			_ = stream.Send(&gilv1.Part{
+				Body: &gilv1.Part_Done{
+					Done: &gilv1.DonePart{StopReason: "tool_timeout_loop", ErrorMessage: msg},
+				},
+			})
+			emitChatEvent("tool_timeout_loop", event.SourceSystem, event.KindNote, map[string]any{
+				"consecutive_timeouts": consecutiveTimeouts,
+				"max":                  maxConsecutiveTimeouts,
+			})
+			return nil
+		}
 	}
 
 	// P32 iter6: post-loop C1 backstop. The for loop can exit by hitting
@@ -1201,6 +1248,27 @@ func addSecretsFromDotenv(path string) {
 func chatStuckSig(name string, input []byte) string {
 	h := sha256.Sum256(append([]byte(name+"\x00"), input...))
 	return hex.EncodeToString(h[:8])
+}
+
+// isToolTimeoutResult reports whether a tool-result Content body
+// indicates a tool-internal timeout (vs a regular error). The two
+// shapes in use (P66):
+//   - bash via agent_tools_write.go run_bash:
+//     `timeout after 30s\n--- partial output ---\n…`
+//   - verify via agent_tools_plan_verify.go:
+//     `[TIMEOUT] description — exit=124, duration=…`
+//
+// Pure function — kept exported-by-test-pattern (lowercase but in
+// the same package) and pinned by tests so the prefix check survives
+// formatter tweaks.
+func isToolTimeoutResult(content string) bool {
+	if strings.HasPrefix(content, "timeout after ") {
+		return true
+	}
+	if strings.HasPrefix(content, "[TIMEOUT] ") {
+		return true
+	}
+	return false
 }
 
 // chatStuckCheck reports whether the trailing window of sigs all
