@@ -212,3 +212,135 @@ cross-model) holds but with adjustments:
    ready to template; wire 9-10 known-PASS tasks into GitHub Actions.
 3. **Cross-model after CI** — compare qwen3.6-27b reorientation behavior
    vs another model on task 11.
+
+---
+
+## Slate 3 (reorientation-required probe)
+
+Tasks where naive design passes basic tests but a later stress test forces
+a design rewrite. Probes whether task 11 SWAP failure is a deep boundary
+or shape-specific.
+
+| #  | Task              | Reorientation trigger                        | Budget | Assert layers |
+|----|-------------------|----------------------------------------------|--------|---------------|
+| 12 | dijkstra-perf     | N=2000 perf test → naive O(V²) times out    | 30m / 25t | 3-layer + perf bar |
+| 13 | atomic-batch      | concurrent read → single-mutex insufficient  | 30m / 25t | 3-layer + -race    |
+| 14 | rate-limiter      | concurrency test → non-atomic counter races  | 30m / 25t | 3-layer + -race    |
+
+| #  | Task              | Verdict | Wall    | Turns | Tokens in/out | Failure surface |
+|----|-------------------|---------|---------|-------|---------------|-----------------|
+| 12 | dijkstra-perf     | PASS    | 1m58s   | 1     | 137k / 6.2k   | trap skipped — agent picked heap from start |
+| 13 | atomic-batch      | PASS    | 3m42s   | 1     | 178k / 12.2k  | trap skipped — copy-on-write snapshot from start |
+| 14 | rate-limiter      | PASS    | 1m4s    | 1     | 68k / 2.9k    | trap skipped — textbook token-bucket from start |
+
+### Slate 3 finding
+
+**Finding #4 — reorientation-required traps fail to trip when textbook
+patterns exist.** All three tasks (Dijkstra, atomic batch, rate limiter)
+have well-known correct designs. qwen3.6-27b knows them and writes them
+from the first turn — heap, copy-on-write snapshot, token bucket — no
+"naive impl → stress test → redesign" cycle observed.
+
+Contrast with task 11 (bytecode-vm): the failure was the agent INVENTING
+a wrong design (factorial using a non-existent SWAP opcode) and being
+unable to reorient out of its own invention. Reorientation pressure
+applies to novel design choices, not textbook patterns.
+
+**Implication for slate 4**: target tasks where there's no obvious
+textbook pattern. The agent must make a novel design call, and the
+constraint must force a redesign if the call was wrong. Constraints
+like: unusual semantics, performance bound that doesn't match standard
+big-O, multi-objective tradeoff.
+
+### Updated tally after slate 3
+
+| Verdict        | Count | Notes |
+|----------------|-------|-------|
+| PASS (real)    | 13    | textbook patterns + multi-stage + chess perft |
+| PASS (1-shot)  | 6     | done in single agent turn |
+| FAIL (model)   | 1     | bytecode-vm SWAP self-trap |
+| INCOMPLETE→PASS| 1     | mini-compiler, P65 fix unblocked |
+| Total          | 14    |       |
+
+---
+
+## Slate 4 (novel-design reorientation probe)
+
+Tasks where there's no obvious textbook pattern. Agent must make a novel
+design call. Constraint forces redesign if the call was wrong.
+
+| #  | Task              | Trap                                          | Budget   | Assert |
+|----|-------------------|-----------------------------------------------|----------|--------|
+| 15 | sliding-dedup     | memory unbounded if no eviction mechanism     | 30m / 25t | 3-layer + -race |
+| 16 | diff-reverse      | reverse needs OldValue captured at Diff time  | 30m / 25t | 3-layer (round-trip properties) |
+| 17 | spmc-queue        | lock-free SPMC requires per-slot seq stamps   | 30m / 25t | 3-layer + -race |
+
+| #  | Task              | Verdict | Wall    | Turns | Tokens in/out | Failure surface |
+|----|-------------------|---------|---------|-------|---------------|-----------------|
+| 15 | sliding-dedup     | PASS    | 3m53s   | 1     | 159k / 8.8k   | trap skipped — min-heap eviction from start |
+| 16 | diff-reverse      | PASS    | 3m25s   | 1     | 367k / 10.9k  | trap skipped — OldValue captured, semantics clean |
+| 17 | spmc-queue        | FAIL    | 43m35s  | 3     | 59k / 4.1k    | livelock + harness 32m verify_missing burn |
+
+### Slate 4 finding
+
+**Finding #5 — first concurrency-bug FAIL + harness time-bound gap.**
+Agent wrote SPMC with `diff := seq - pos` check. Handled diff==0 (free)
+and diff==1 (occupied per current push) but missed diff < 0 (slot has
+older un-popped data from a previous wrap). Producer livelocks waiting
+for diff to become 0 when queue is full mid-wraparound. The agent's
+single-producer assumption blinded them to the queue-full case under
+heavy contention.
+
+Compounding harness fault: `go test -race` hangs for 600s (internal Go
+test timeout) → assert fails → re-engage → agent runs another verify
+that also hangs → turn 2 wall hits **32 minutes** before stream ended.
+Total budget 40m exhausted with only 3 turns done. P63c stall detection
+fired (stalled=2) but max_wall hit first.
+
+The pattern: agent wrote a subtle concurrency bug AND the harness has
+no per-assert (or per-tool-call) timeout to bound the cost of a hung
+test. Combined effect: 43min wall on 3 turns.
+
+**Cheap mitigation (no harness change required)**: wrap test commands
+in `timeout 60s` shell prefix and use `! grep '^--- FAIL:'` for stricter
+asserts. Slate 5+ should use this template. Recorded in
+docs/eval/task-surface.md as the standard template.
+
+**Standard 3-layer assert template (slate 5+)**:
+```
+--assert "find . -name '*_test.go' -type f | grep ."
+--assert "timeout 60s go test -race ./..."
+--assert "! timeout 60s go test -count=1 -race -v ./... 2>&1 | grep -q '^--- FAIL:'"
+```
+
+(For non-concurrent tasks: drop `-race`.)
+
+### Slate 4 tally
+
+| #  | Verdict | Notes                                              |
+|----|---------|----------------------------------------------------|
+| 15 | PASS    | min-heap eviction from start                       |
+| 16 | PASS    | OldValue captured at Diff time — semantics clean   |
+| 17 | FAIL    | wraparound livelock — model + harness time-bound   |
+
+After 17 tasks total: 14 PASS, 2 FAIL (both model-shaped), 1 P65-unblock.
+
+---
+
+## Slate 5 (novel shape probe — non-concurrency)
+
+Shift focus from concurrency to: closures/lexical scope, search/backtracking,
+classic algorithm with non-obvious optimization. Different reasoning shape
+than slates 3-4.
+
+| #  | Task          | Trap                                                  | Budget | Assert template |
+|----|---------------|-------------------------------------------------------|--------|-----------------|
+| 18 | lisp          | closure semantics, lexical scoping consistency        | 30m / 25t | slate-5 (timeout 60s + FAIL-grep) |
+| 19 | sudoku        | plain DFS times out on Norvig hard; need heuristic   | 30m / 25t | slate-5 + perf bar             |
+| 20 | union-find    | need BOTH path compression AND union-by-rank          | 30m / 25t | slate-5 + perf bar             |
+
+| #  | Task          | Verdict | Wall    | Turns | Tokens in/out | Failure surface |
+|----|---------------|---------|---------|-------|---------------|-----------------|
+| 18 | lisp          |         |         |       |               |                 |
+| 19 | sudoku        |         |         |       |               |                 |
+| 20 | union-find    |         |         |       |               |                 |
