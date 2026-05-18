@@ -388,10 +388,98 @@ correctly did NOT fire (real work happening each turn).
 | Harness fixes    | 1     | P65 death-by-verify (commit 84beb62) |
 | Methodology      | 1     | 3-layer assert + timeout wrapper |
 
-**Harness ceiling > model ceiling**, confirmed across 20 tasks of
-varying shape: pure code, modifications, multi-stage pipelines, deep
-state machines, concurrency, novel-design reorientation, search +
+**Harness ceiling ≥ model ceiling** on most tasks, with **boundary
+tasks** where the agent's first design either is or isn't correct
+(non-deterministic across runs). Confirmed across 20 distinct task
+shapes: pure code, modifications, multi-stage pipelines, deep state
+machines, concurrency, novel-design reorientation, search +
 heuristic, classic algorithms.
+
+### Boundary-task discovery — chess perft re-run
+
+Slate 1 ran chess perft (task 07) once and saw PASS (32 turns, 30m).
+Concluded "harness now exceeds model" on this task.
+
+Post-P65/P66 re-run (2026-05-19): chess perft FAILed at 8 turns,
+30m, reason=stalled (P63c abandoned at 3 consecutive empty
+re-engagements). Assertion tail:
+```
+Perft(Kiwipete, 2) = 2043; want 2039
+Perft(Kiwipete, 3) = 98249; want 97862
+```
+
+Move-gen has a real bug — probably en-passant or pin-handling on
+Kiwipete (initial position likely PASSes; the standard catch-bugs
+position fails). Different LLM sampling produced a different (less
+correct) first design than the slate-1 attempt.
+
+**Updated assessment**: chess perft is a **boundary task**, not a
+"harness > model" data point. Aggregate so far:
+
+| Attempt | Outcome | Notes                                      |
+|---------|---------|--------------------------------------------|
+| Pre-P63b/c (×4) | FAIL | budget burned on hung tests / wrong design |
+| Slate 1 (post-P63b/c) | PASS | 32 turns / 30m / 8.4M tokens                |
+| 2026-05-19 #2 (P65/P66) | FAIL | 8 turns / 30m / 2.9M tokens, P63c abandon  |
+| 2026-05-19 #3 (P65/P66) | FAIL | 9 turns / 27m / 0.4M, Kiwipete depth-1 off by 5! |
+
+Pass rate ≈ 1/3 in post-P63b/c attempts (N=3, only one PASS). Note
+that Kiwipete depth-1 = 43 vs 48 in attempt #3 means the first
+design attempt missed FIVE legal moves at depth 1 — agent never
+recovered. P63b/c improvements eliminated
+budget-burn FAILs but didn't move the model ceiling — they enabled
+the model to occasionally land on the right design but also enabled
+the harness to abandon faster when the model doesn't.
+
+This is the more honest framing. The harness drives to completion
+*when the model's first attempt is workable*. When the agent
+picks a wrong design path on first attempt and the path doesn't
+have a clean local fix, no harness improvement makes the model
+re-architect. That's a model-side property.
+
+**Implication for the harness ceiling claim**: the harness is
+strictly better than the underlying model at "drive to completion
+once a workable design is in place". It does NOT compensate for
+the model's design-quality variance on first attempt.
+
+### Task 11 (bytecode-vm) variance re-run
+
+Original FAIL: agent invented `SWAP` opcode in test, couldn't fix.
+
+Re-run (2026-05-19, P65/P66 active): different FAIL mode. Agent
+wrote `vm_test.go` with a syntax error (`expected '}', found 'EOF'`
+at line 215) and couldn't fix it before P63c stalled at 6 turns
+(11.5m wall). N=2: 2 FAILs, each with a distinct self-imposed bug.
+
+Conclusion: task 11 is **firmly below model ceiling** for
+qwen3.6-27b, but the FAILure manifests differently each attempt.
+What varies is *which* self-imposed bug the agent makes; what's
+constant is the model's inability to step back and redesign once
+a bug surfaces.
+
+### Honest tally (post-variance probing)
+
+| Class                                            | Count | Notes |
+|--------------------------------------------------|-------|-------|
+| Distinct tasks with at least 1 PASS              | 18    | Slate 1-5 PASSes |
+| Distinct tasks consistently FAIL across attempts | 2     | task 11 bytecode-vm, task 17 spmc-queue |
+| Boundary tasks (some PASS, some FAIL)            | 1     | task 07 chess-perft (1 PASS / 2 FAIL = ~33%) |
+| Harness fixes applied during measurement         | 2     | P65 (death-by-verify), P66 (timeout-loop) |
+
+The original "harness ceiling > model ceiling" headline was
+overconfident — it was inferred from a single attempt per task.
+With variance data (chess perft N=3, bytecode-vm N=2), the honest
+framing is:
+
+- The harness is robust at "drive to completion once a workable
+  design exists" (18 / 18 distinct PASS-shapes at least once)
+- The harness does not lift the model out of a bad first-attempt
+  design (2 distinct tasks with 100% FAIL rate)
+- Some tasks straddle the boundary (chess perft, possibly others
+  not yet measured)
+- Variance data for the other 17 distinct PASS tasks is not yet
+  collected; treat the 14/14 suite PASS as a single attempt, not
+  a robust baseline.
 
 ---
 
