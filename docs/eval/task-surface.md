@@ -315,6 +315,18 @@ assert wrapper catches post-turn assert hangs that don't go through
 chat tools (e.g. if a future suite extension runs custom external
 checks).
 
+**P66 v3 re-run on task17** (post-fix): still FAIL (model boundary
+unchanged), wall 43m → 40m. P66 didn't trigger in this run because
+the agent's tool calls weren't 3-in-a-row timeouts — the agent's
+in-turn `verify` calls actually PASSed (test ran in 1.7s without
+race conditions surfacing at that scale), but the runner's external
+`--assert "go test -race"` caught a race condition the agent's
+verify didn't. P66 hits the wrong layer here; the bottleneck is
+agent-side reasoning about "my impl LOOKS fine but the -race assert
+disagrees — let me redesign", not tool hangs. The original 32-min
+single-turn pathology is structurally prevented by P66's per-turn
+counter even though it didn't fire on the v3 reproducer.
+
 **Standard 3-layer assert template (slate 5+)**:
 ```
 --assert "find . -name '*_test.go' -type f | grep ."

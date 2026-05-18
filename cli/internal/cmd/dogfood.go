@@ -474,6 +474,13 @@ func recoveryPromptFor(rec *turnRecord) string {
 	case "error":
 		// Hard error — give up.
 		return ""
+	case "tool_timeout_loop":
+		// P66 fired — agent's tools are hanging (deadlock/infinite
+		// test loop). Recovery prompts won't help: the same tool
+		// will hang again. Treat as hard stop; the post-loop
+		// assertion check will record the actual workspace state
+		// and the runner exits with the verdict.
+		return ""
 	default:
 		// Unknown stop reason — assume continue, but don't loop
 		// infinitely if the agent keeps producing nothing.
