@@ -341,6 +341,6 @@ than slates 3-4.
 
 | #  | Task          | Verdict | Wall    | Turns | Tokens in/out | Failure surface |
 |----|---------------|---------|---------|-------|---------------|-----------------|
-| 18 | lisp          |         |         |       |               |                 |
+| 18 | lisp          | PASS    | 23m3s   | 4     | 1.4M / 14k    | turn 3 verify_missing 7.7m, recovered turn 4 |
 | 19 | sudoku        |         |         |       |               |                 |
 | 20 | union-find    |         |         |       |               |                 |
