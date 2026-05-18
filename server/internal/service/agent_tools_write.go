@@ -62,7 +62,13 @@ func resolveInWD(workingDir, p string) (string, error) {
 		return "", errors.New("session has no working directory configured")
 	}
 	if p == "" {
-		return "", errors.New("path is empty")
+		// P60b: more actionable message — the agent's most common
+		// failure mode here is omitting the `path` key from the JSON
+		// args entirely (qwen3.6-27b chess dogfood showed this 10+
+		// times in one session). The old "path is empty" sent the
+		// agent re-reading its own code looking for an empty
+		// variable. The new message names the JSON-input root cause.
+		return "", errors.New("missing required `path` arg — the tool input JSON must include {\"path\":\"<file>\", ...}")
 	}
 	wd, err := filepath.Abs(workingDir)
 	if err != nil {
