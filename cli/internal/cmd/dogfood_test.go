@@ -164,3 +164,14 @@ func TestIsDaemonGoneClient_Patterns(t *testing.T) {
 type stringErr struct{ s string }
 
 func (e *stringErr) Error() string { return e.s }
+
+// P63b: assertionRecoveryPrompt frames the "agent said done but
+// assertion failed" message clearly + includes the failure tail.
+func TestAssertionRecoveryPrompt_ContainsTailAndFraming(t *testing.T) {
+	tail := "Command: go test ./...\nExit: 1\nOutput tail:\nFAIL chess/movegen perft mismatch"
+	got := assertionRecoveryPrompt(tail)
+	require.Contains(t, got, "declared the task complete")
+	require.Contains(t, got, "NOT done")
+	require.Contains(t, got, "FAIL chess/movegen perft mismatch")
+	require.Contains(t, got, "DO NOT ask")
+}

@@ -117,6 +117,7 @@ Termination:
 				maxTurns:   maxTurns,
 				maxWall:    maxWall,
 				initial:    string(initialBytes),
+				assertCmds: assertCmds,
 				trace:      json.NewEncoder(traceW),
 				stdout:     out,
 			}
@@ -157,6 +158,7 @@ type dogfoodRunner struct {
 	maxTurns   int
 	maxWall    time.Duration
 	initial    string
+	assertCmds []string
 
 	trace  *json.Encoder
 	stdout io.Writer
@@ -193,6 +195,12 @@ type assertResult struct {
 // from the loop (daemon-gone, unrecoverable) surface as Go errors;
 // budget-exhaustion or hard-error stop_reasons go through the result
 // without error so the caller can still report the structured trace.
+//
+// P63b assertion-driven recovery: when the agent declares end_turn
+// but the user's --assert commands fail, the runner re-engages with
+// a recovery prompt containing the failing assertion's output tail.
+// This catches the "agent thinks it's done but the load-bearing
+// external check disagrees" pattern observed in P63 chess v3.
 func (r *dogfoodRunner) Run(ctx context.Context) (*dogfoodResult, error) {
 	r.startedAt = time.Now()
 	deadline := r.startedAt.Add(r.maxWall)
@@ -226,7 +234,17 @@ func (r *dogfoodRunner) Run(ctx context.Context) (*dogfoodResult, error) {
 
 		nextPrompt = recoveryPromptFor(turnRec)
 		if nextPrompt == "" {
-			// No recovery needed → agent is done.
+			// Agent says it's done. P63b: before believing it, run the
+			// user's assertions. If any fail, inject a recovery prompt
+			// with the failing tail and continue.
+			if len(r.assertCmds) > 0 {
+				failedTail := r.runAssertCheck(ctx)
+				if failedTail != "" {
+					nextPrompt = assertionRecoveryPrompt(failedTail)
+					fmt.Fprintf(r.stdout, "[dogfood] turn %d agent declared done BUT assertion failed — re-engaging\n", turn)
+					continue
+				}
+			}
 			result.Reason = "end_turn"
 			break
 		}
@@ -240,6 +258,38 @@ func (r *dogfoodRunner) Run(ctx context.Context) (*dogfoodResult, error) {
 	result.TotalInTok = r.totalInTok
 	result.TotalOutTok = r.totalOutTok
 	return result, nil
+}
+
+// runAssertCheck runs each --assert command and returns the
+// combined-output tail of the FIRST failing command. Returns "" when
+// all assertions pass. Best-effort: errors spawning a command count
+// as failure. Used by Run() to decide whether to accept end_turn
+// or re-engage the agent.
+func (r *dogfoodRunner) runAssertCheck(ctx context.Context) string {
+	for _, c := range r.assertCmds {
+		shell := exec.CommandContext(ctx, "bash", "-c", c)
+		shell.Dir = r.workingDir
+		out, err := shell.CombinedOutput()
+		exit := shell.ProcessState.ExitCode()
+		if err != nil && exit == 0 {
+			exit = 1
+		}
+		if exit != 0 {
+			return fmt.Sprintf("Command: %s\nExit: %d\nOutput tail:\n%s", c, exit, tailRunes(string(out), 1200))
+		}
+	}
+	return ""
+}
+
+// assertionRecoveryPrompt builds the recovery prompt body for the
+// "agent thinks done but assertion fails" case.
+func assertionRecoveryPrompt(failedTail string) string {
+	return "You declared the task complete (end_turn with no tool calls), " +
+		"but the user's verification command FAILS. The task is NOT done. " +
+		"Read the failure below carefully, find the actual root cause, fix " +
+		"it, and re-run the verification before declaring done again. DO NOT " +
+		"ask me anything — investigate and fix.\n\n" +
+		"Failing verification output:\n" + failedTail
 }
 
 // turnRecord is one row in the JSONL trace.
