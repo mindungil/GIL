@@ -3,11 +3,14 @@ package service
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/mindungil/gil/core/event"
 	"github.com/mindungil/gil/core/provider"
+	"github.com/mindungil/gil/core/stuck"
 	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
 )
 
@@ -182,4 +185,50 @@ func TestPrompt_StuckWarning_IsTextPart(t *testing.T) {
 		}
 	}
 	t.Fatalf("did not find stuck_detected warning part")
+}
+
+// ---------------------------------------------------------------------
+// P67b — chatEventBuffer (will replace P39 ad-hoc tests in P67e).
+// ---------------------------------------------------------------------
+
+func TestChatEventBuffer_PushSnapshotFIFO(t *testing.T) {
+	buf := newChatEventBuffer(3) // cap 3 to make eviction observable
+	for i := 0; i < 5; i++ {
+		buf.push(event.Event{Type: "tool_call", Data: jsonMust(map[string]any{"i": i})})
+	}
+	snap := buf.snapshot()
+	require.Len(t, snap, 3, "buffer must cap at 3")
+	// Oldest two evicted (i=0,1). snap contains i=2,3,4.
+	require.JSONEq(t, `{"i":2}`, string(snap[0].Data))
+	require.JSONEq(t, `{"i":4}`, string(snap[2].Data))
+}
+
+func TestChatEventBuffer_ResetTurnIncrementsAndClearsSeen(t *testing.T) {
+	buf := newChatEventBuffer(50)
+	require.True(t, buf.markSeen(stuck.PatternNoProgress))
+	require.False(t, buf.markSeen(stuck.PatternNoProgress), "second mark same turn returns false")
+	buf.resetTurn()
+	require.Equal(t, 1, buf.iter, "iter increments to 1 on first reset")
+	require.True(t, buf.markSeen(stuck.PatternNoProgress), "after resetTurn, pattern is fresh again")
+	buf.resetTurn()
+	require.Equal(t, 2, buf.iter)
+}
+
+func TestChatEventBuffer_Concurrent(t *testing.T) {
+	buf := newChatEventBuffer(500)
+	const goroutines = 8
+	const each = 50
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for g := 0; g < goroutines; g++ {
+		go func(gid int) {
+			defer wg.Done()
+			for j := 0; j < each; j++ {
+				buf.push(event.Event{Type: "tool_call", Data: jsonMust(map[string]any{"g": gid, "j": j})})
+			}
+		}(g)
+	}
+	wg.Wait()
+	// All pushes accepted (within cap); no panic on concurrent push/snapshot.
+	require.Equal(t, goroutines*each, len(buf.snapshot()))
 }
