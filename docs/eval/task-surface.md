@@ -631,3 +631,62 @@ right T without affecting interactive chat.
 
 Smoke: `gil dogfood --temperature 0.3` on hello-go PROMPT — PASS
 1 turn / 8.5s / vet clean.
+
+---
+
+## Metric expansion — 3 축 (2026-05-19)
+
+지금까지의 metric은 사실상 pass/fail rate + efficiency 였음. 사용자가
+"agent의 정확도가 하나의 축이면, context 유지도와 완성도도 봐야 한다"고
+지적해서 metric을 3축으로 확장.
+
+### 축 정의
+
+**1. 정확도** (기존)
+- `PASS/N` — N번 attempt 중 모든 assert 통과한 비율.
+
+**2. Context 유지도** — 장기 task에서 model context window를 안 넘기는 능력.
+- `max_turn_tok` — 한 user turn에서 daemon이 누적 보낸 input token의 최대값.
+  - CAVEAT: 이건 한 turn 안에서 N번 Complete() 호출하면서 누적된 값.
+    Single-call window pressure가 아님. 진짜 measurement는 daemon-side
+    per-Complete instrumentation 필요 (별도 work, 아래 TODO 참조).
+- `overflow` — 어떤 turn이라도 stop_reason=error로 종료했는가 (binary).
+  실제 overflow가 터졌는지의 신뢰 가능 signal. 0이어야 정상.
+
+**3. 완성도** — prompt의 모든 요구사항을 끝까지 만족했는가.
+- `recov` — dogfood가 주입한 recovery prompt 횟수 (= turns − 1).
+  많을수록 agent가 한 번에 끝내지 못해서 외부 푸쉬가 더 필요.
+- `premature_stop` — verdict=FAIL이면서 final_stop=end_turn인 케이스.
+  Agent가 "다 했다" 착각하고 종료. 핵심 완성도 실패 패턴.
+
+### N=2 baseline (2026-05-19, T=0.7, qwen3.6-27b)
+
+`bash docs/eval/variance-probe.sh 2 all` 결과:
+
+| Task | PASS/N | turns | wall | max-turn-tok | recov | prem-stop | ovf |
+|---|---|---|---|---|---|---|---|
+| 07-chess | 0/2 | 5-9 | 1051-1647s | 851k-854k | 4-8 | **2/2** | 0/2 |
+| 11-vm | 1/2 | 3-4 | 251-302s | 107k-128k | 2-3 | 1/2 | 0/2 |
+| 17-spmc | 2/2 | 3-4 | 312-591s | 216k-333k | 2-3 | 0/2 | 0/2 |
+
+### Insight
+
+이전에 "boundary task 3개"로 단정했던 게 사실 단순 표본 부족이었음:
+- **chess만 진짜 boundary**. prem-stop 2/2 — agent가 자기가 못 푼 걸
+  자각 못 하고 end_turn으로 종료하는 게 본질. 이 패턴은
+  [[gil-adversary-seam]] 와이어링 (A1)이 정확히 적합.
+- **spmc는 더 이상 boundary 아님**. P66 fix가 32분 hang을 끊어주면서
+  reorient 가능. 2/2 PASS, prem-stop 0 — 진짜 PASS만.
+- **vm은 variance dominated**. 1/2 PASS, 이전 메모리의 "0/3"은 운.
+- **overflow 0 전체** — context overflow는 아직 한 번도 안 터짐.
+  compaction은 작동 중 (안 도는데 안 터지는 게 더 이상함).
+
+### Open metric TODOs
+
+- `compaction_count` — daemon이 compaction 발동 시 `CompactionPart` proto
+  event 추가 필요. 현재 silent.
+- `max_single_call_tokens` — daemon per-Complete instrumentation. 진짜
+  context window pressure 측정.
+- Per-value partial credit — chess처럼 multi-value spec에서 6 perft 값
+  중 N개 PASS 같은 부분 점수. agent test 이름 가변이라 fragile, skip.
+
