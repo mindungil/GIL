@@ -603,3 +603,31 @@ Task 07 (chess-perft, ~30min slow) excluded from default suite run;
 runnable separately via `run-suite.sh "07-*"`. Tasks 11, 17 (known
 model-boundary FAIL) not wired into suite; runnable from
 `/home/ubuntu/eval/task1?-*/` for re-investigation.
+
+---
+
+## Finding #6 close — `--temperature` flag on `gil dogfood` (2026-05-19)
+
+Per-task temperature override shipped as `gil dogfood --temperature
+<float>` (commit `8f02984`). Default 0 falls through to the daemon's
+existing 0.7; values >0 override per request.
+
+Wire path: `PromptRequest.temperature` (proto field 6) → SDK
+`PromptOptions.Temperature` → daemon picks `req.GetTemperature()`
+when >0 in `session_prompt.go`. Chat surface unchanged — only the
+explicit `--temperature` flag changes behaviour.
+
+Recommended usage from probe data:
+- `--temperature 0.3` for precision / "first design must be right"
+  tasks (chess move-gen, lock-free SPMC). One PASS each at T=0.3
+  where T=0.7 fails.
+- Leave unset (0.7 default) for exploration-heavy tasks (bytecode
+  VM where the agent has to invent its own test suite — at T=0.3
+  the agent skipped writing tests).
+
+Did NOT change the global default to 0.3: at small N the 0.3 vs 0.7
+tradeoff cuts both ways. Per-task knob lets dogfood probes use the
+right T without affecting interactive chat.
+
+Smoke: `gil dogfood --temperature 0.3` on hello-go PROMPT — PASS
+1 turn / 8.5s / vet clean.
