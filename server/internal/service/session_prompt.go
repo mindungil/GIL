@@ -433,6 +433,13 @@ System context: provider=%s model=%s session=%s
 func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionService_PromptServer) error {
 	ctx := stream.Context()
 
+	// AdversaryModel for this Prompt — empty disables AdversaryConsult
+	// (P67c hands this to the chatStuckDispatcher; AltToolOrder still
+	// fires regardless). Stashed early so the value survives auto-
+	// create + history hydration below.
+	adversaryModel := req.GetAdversaryModel()
+	_ = adversaryModel // wired into dispatcher in P67c
+
 	// 1. Resolve / auto-create the session.
 	sessionID := req.GetSessionId()
 	if sessionID == "" {
