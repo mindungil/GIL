@@ -232,3 +232,52 @@ func TestChatEventBuffer_Concurrent(t *testing.T) {
 	// All pushes accepted (within cap); no panic on concurrent push/snapshot.
 	require.Equal(t, goroutines*each, len(buf.snapshot()))
 }
+
+func TestChatPrompt_EmitsIterationStartAndVerifyEvents(t *testing.T) {
+	// Drive one user turn that issues a verify tool_call (synthetic
+	// verify_run + verify_result must wrap it) and then a write_file
+	// tool_call (no synthetic wrappers). End_turn closes the turn.
+	turns := []provider.MockTurn{
+		// Turn 1: verify call.
+		{ToolCalls: []provider.ToolCall{{ID: "v1", Name: "verify",
+			Input: []byte(`{}`)}},
+			StopReason: "tool_use"},
+		// Turn 2: agent acknowledges, ends turn.
+		{Text: "done", StopReason: "end_turn"},
+	}
+	svc, sid := newTestSessionServiceWithMockTurns(t, turns)
+	stream := &fakePromptStream{ctx: context.Background()}
+	require.NoError(t, svc.Prompt(promptReq(sid, "run verify"), stream))
+
+	buf := svc.chatEventBufFor(sid)
+	types := eventTypes(buf.snapshot())
+	require.Contains(t, types, "iteration_start")
+	require.Contains(t, types, "verify_run")
+	require.Contains(t, types, "verify_result")
+	require.Contains(t, types, "tool_call")
+	require.Contains(t, types, "tool_result")
+	require.Contains(t, types, "provider_response")
+
+	// Order: iteration_start before tool_call(verify) before verify_run
+	// before tool_result(verify) before verify_result.
+	require.Less(t, indexOf(types, "iteration_start"), indexOf(types, "tool_call"))
+	require.Less(t, indexOf(types, "tool_call"), indexOf(types, "verify_run"))
+	require.Less(t, indexOf(types, "verify_run"), indexOf(types, "tool_result"))
+	require.Less(t, indexOf(types, "tool_result"), indexOf(types, "verify_result"))
+}
+
+func eventTypes(es []event.Event) []string {
+	out := make([]string, len(es))
+	for i, e := range es {
+		out[i] = e.Type
+	}
+	return out
+}
+func indexOf(s []string, v string) int {
+	for i, x := range s {
+		if x == v {
+			return i
+		}
+	}
+	return -1
+}

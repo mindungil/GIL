@@ -440,6 +440,13 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 	adversaryModel := req.GetAdversaryModel()
 	_ = adversaryModel // wired into dispatcher in P67c
 
+	// providerTextLen accumulates streamed assistant text length for
+	// the provider_response event emitted at turn close. Detector's
+	// Monologue check uses length thresholds only — we never store
+	// the actual text in the ring buffer to avoid context bloat.
+	var providerTextLen int
+	_ = providerTextLen // wired in P67b emit sites below
+
 	// 1. Resolve / auto-create the session.
 	sessionID := req.GetSessionId()
 	if sessionID == "" {
@@ -682,6 +689,18 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 		chatStuckFired bool
 	)
 
+	// P67b — per-session event ring buffer fed into core/stuck/Detector.
+	// resetTurn bumps iter and clears per-turn dedup state. Push
+	// iteration_start so the Detector's NoProgress check can mark this
+	// turn's iteration boundary (cross-turn accumulation is what catches
+	// the chess "varied-but-futile" pattern P39 ad-hoc misses).
+	chatBuf := s.chatEventBufFor(sessionID)
+	chatBuf.resetTurn()
+	chatBuf.push(event.Event{
+		Type: "iteration_start",
+		Data: jsonMust(map[string]any{"iter": chatBuf.iter}),
+	})
+
 	// P66: consecutive-tool-timeout abort. Eval-loop task17 SPMC
 	// burned 32 minutes in a single turn when the agent's lock-free
 	// SPMC livelocked and `go test -race` hung. Each bash/verify
@@ -751,6 +770,14 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 				return err
 			}
 		}
+		// P67b — push provider_response with length only (no text body)
+		// so Detector's Monologue check has the per-response signal it
+		// needs without ballooning the ring buffer.
+		providerTextLen += len(resp.Text)
+		chatBuf.push(event.Event{
+			Type: "provider_response",
+			Data: jsonMust(map[string]any{"text_len": len(resp.Text)}),
+		})
 
 		// If no tool calls, the LLM thinks it's done. Apply the C1
 		// verify-gate before letting the turn close.
@@ -830,6 +857,21 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 				"name":  call.Name,
 				"input": string(call.Input),
 			})
+			// P67b — mirror tool_call into the chat Detector ring buffer.
+			// Synthetic verify_run is emitted *before* dispatch when the
+			// agent invokes the verify tool, so Detector's NoProgress
+			// check has the iteration-boundary signal it needs.
+			chatBuf.push(event.Event{
+				Type: "tool_call",
+				Data: jsonMust(map[string]any{
+					"id":    call.ID,
+					"name":  call.Name,
+					"input": string(call.Input),
+				}),
+			})
+			if call.Name == "verify" {
+				chatBuf.push(event.Event{Type: "verify_run"})
+			}
 			// P39 chat stuck detection: hash (name + input) and check
 			// for consecutive identical calls. Single signal per turn
 			// once the streak fires, then quiet — productive calls
@@ -900,6 +942,24 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 				"content":  result.Content,
 				"is_error": result.IsError,
 			})
+			// P67b — mirror tool_result into the chat Detector buffer.
+			// Synthetic verify_result with passed=(!IsError) follows when
+			// the tool name is verify; Detector's NoProgress uses that to
+			// count "verifier still failing" iterations.
+			chatBuf.push(event.Event{
+				Type: "tool_result",
+				Data: jsonMust(map[string]any{
+					"id":      call.ID,
+					"name":    call.Name,
+					"isError": result.IsError,
+				}),
+			})
+			if call.Name == "verify" {
+				chatBuf.push(event.Event{
+					Type: "verify_result",
+					Data: jsonMust(map[string]any{"passed": !result.IsError}),
+				})
+			}
 
 			// P66: track consecutive timeout results. Bash returns
 			// `timeout after Ns\n...`; verify returns `[TIMEOUT] ...`.
