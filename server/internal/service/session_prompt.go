@@ -24,6 +24,7 @@ import (
 	"github.com/mindungil/gil/core/provider"
 	"github.com/mindungil/gil/core/session"
 	"github.com/mindungil/gil/core/specstore"
+	"github.com/mindungil/gil/core/stuck"
 	"github.com/mindungil/gil/core/workspace"
 	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
 )
@@ -701,6 +702,21 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 		Data: jsonMust(map[string]any{"iter": chatBuf.iter}),
 	})
 
+	// P67c — Detector dispatcher. AltToolOrder fires always (chat-only
+	// strategies that don't need an LLM); AdversaryConsult only when
+	// adversaryModel is set (PromptRequest.adversary_model). Provider
+	// and model are already resolved at this point.
+	chatDispatch := &chatStuckDispatcher{
+		detector: &stuck.Detector{},
+		strategies: []stuck.Strategy{
+			stuck.AltToolOrderStrategy{},
+			stuck.AdversaryConsultStrategy{},
+		},
+		provider: prov,
+		model:    modelID,
+		riskAdv:  adversaryModel,
+	}
+
 	// P66: consecutive-tool-timeout abort. Eval-loop task17 SPMC
 	// burned 32 minutes in a single turn when the agent's lock-free
 	// SPMC livelocked and `go test -race` hung. Each bash/verify
@@ -958,6 +974,33 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 				chatBuf.push(event.Event{
 					Type: "verify_result",
 					Data: jsonMust(map[string]any{"passed": !result.IsError}),
+				})
+			}
+
+			// P67c — Detector tick. Each Decision surfaces as a visible
+			// system Part so the agent's next inference sees it inline;
+			// `adversary_consulted` event mirrors for giltui Tail + audit.
+			// Adversary skip-budget sentinel (Explanation prefix) becomes
+			// the `adversary_skipped_budget` event (no Part) — P67d.
+			for _, dec := range chatDispatch.tick(ctx, chatBuf, chatHistoryToProviderMessages(s.chatHistory().get(sessionID), 10)) {
+				if dec.Action == stuck.ActionAdversaryConsult && strings.HasPrefix(dec.Explanation, "ADVERSARY_SKIPPED_BUDGET") {
+					emitChatEvent("adversary_skipped_budget", event.SourceSystem, event.KindNote, map[string]any{
+						"session": sessionID,
+					})
+					continue
+				}
+				prefix := "[system] stuck-recover (" + dec.Action.String() + ")"
+				if dec.Action == stuck.ActionAdversaryConsult {
+					prefix = "[system] adversary"
+				}
+				_ = stream.Send(&gilv1.Part{
+					Body: &gilv1.Part_Text{Text: &gilv1.TextDelta{
+						Content: prefix + ": " + dec.Explanation,
+					}},
+				})
+				emitChatEvent("adversary_consulted", event.SourceSystem, event.KindNote, map[string]any{
+					"action":      dec.Action.String(),
+					"explanation": dec.Explanation,
 				})
 			}
 

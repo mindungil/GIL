@@ -281,3 +281,78 @@ func indexOf(s []string, v string) int {
 	}
 	return -1
 }
+
+// ---------------------------------------------------------------------
+// P67c — chatStuckDispatcher
+// ---------------------------------------------------------------------
+
+// stubLLM is a minimal provider.Provider for dispatcher unit tests.
+// Calls are counted so the tests can assert opt-in/cap/cooldown behavior.
+type stubLLM struct {
+	text  string
+	err   error
+	calls int
+}
+
+func (s *stubLLM) Name() string { return "stub" }
+func (s *stubLLM) Complete(ctx context.Context, _ provider.Request) (provider.Response, error) {
+	s.calls++
+	if s.err != nil {
+		return provider.Response{}, s.err
+	}
+	return provider.Response{Text: s.text}, nil
+}
+
+// populateNoProgressTest builds a NoProgress-shaped buffer with `iters`
+// iterations, each: iteration_start → verify_run → verify_result(false)
+// → write_file tool_call/result (input varies per iter to satisfy
+// "files churning"). Mirrors what the chat agent loop emits.
+func populateNoProgressTest(buf *chatEventBuffer, iters int) {
+	for i := 0; i < iters; i++ {
+		buf.resetTurn()
+		buf.push(event.Event{Type: "iteration_start", Data: jsonMust(map[string]any{"iter": buf.iter})})
+		buf.push(event.Event{Type: "verify_run"})
+		buf.push(event.Event{Type: "verify_result", Data: jsonMust(map[string]any{"passed": false})})
+		buf.push(event.Event{Type: "tool_call", Data: jsonMust(map[string]any{"name": "write_file", "input": `{"path":"a.go","content":"x` + string(rune('0'+i)) + `"}`})})
+		buf.push(event.Event{Type: "tool_result", Data: jsonMust(map[string]any{"name": "write_file", "isError": false})})
+	}
+}
+
+func TestChatStuckDispatcher_NoProgressFiresAdversary(t *testing.T) {
+	buf := newChatEventBuffer(200)
+	populateNoProgressTest(buf, 4)
+	stub := &stubLLM{text: "Read a.go and trace the failing assertion."}
+	disp := &chatStuckDispatcher{
+		detector:   &stuck.Detector{},
+		strategies: []stuck.Strategy{stuck.AdversaryConsultStrategy{}},
+		provider:   stub,
+		model:      "test-model",
+		riskAdv:    "test-model",
+	}
+	decs := disp.tick(context.Background(), buf, nil)
+	require.NotEmpty(t, decs)
+	require.Equal(t, 1, stub.calls, "exactly one adversary LLM call")
+	var advFound bool
+	for _, d := range decs {
+		if d.Action == stuck.ActionAdversaryConsult {
+			require.Contains(t, d.Explanation, "Read a.go")
+			advFound = true
+		}
+	}
+	require.True(t, advFound, "expected ActionAdversaryConsult Decision")
+}
+
+func TestChatStuckDispatcher_NoAdversaryWhenRiskEmpty(t *testing.T) {
+	buf := newChatEventBuffer(200)
+	populateNoProgressTest(buf, 4)
+	stub := &stubLLM{text: "should not be called"}
+	disp := &chatStuckDispatcher{
+		detector:   &stuck.Detector{},
+		strategies: []stuck.Strategy{stuck.AdversaryConsultStrategy{}},
+		provider:   stub,
+		model:      "test-model",
+		riskAdv:    "", // OFF
+	}
+	_ = disp.tick(context.Background(), buf, nil)
+	require.Equal(t, 0, stub.calls, "adversary must not be called when riskAdv is empty")
+}
