@@ -152,6 +152,14 @@ message PromptRequest {
   // and lock-free SPMC. Per-call so chat surface can stay at 0.7
   // while dogfood probes use 0.3.
   double temperature = 6;
+  // adversary_model identifies a model to consult when the daemon's
+  // chat-side stuck Detector returns a signal that StuckStrategy
+  // routes to AdversaryConsultStrategy. Empty string disables the
+  // adversary path (other strategies still fire). 2026-05-19 chess
+  // N=5 @ T=0.3 was 0/5 with 5/5 prem-stop — the boundary is
+  // reorientation-shaped and adversary suggestion is the only known
+  // fix (see docs/superpowers/specs/2026-05-19-a1b-...).
+  string adversary_model = 7;
 }
 
 // PromptPart is a single piece of the user message. V1 ships only the
