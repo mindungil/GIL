@@ -313,6 +313,11 @@ type PromptOptions struct {
 	// stored working_dir wins). Empty means "unrooted" — tools then
 	// refuse with a clear error rather than silently writing to /tmp.
 	WorkingDir string
+	// Temperature overrides the daemon's default sampling temperature
+	// (0.7) for this call. <= 0 means "use default". Surfaced for
+	// dogfood / autonomous-coding runs that want lower variance
+	// (Finding #6, 2026-05-18).
+	Temperature float64
 }
 
 // Prompt opens a streaming chat turn against the daemon's agent
@@ -324,9 +329,10 @@ type PromptOptions struct {
 // finally DonePart. Caller drains the returned stream until EOF.
 func (c *Client) Prompt(ctx context.Context, opt PromptOptions) (gilv1.SessionService_PromptClient, error) {
 	req := &gilv1.PromptRequest{
-		SessionId:  opt.SessionID,
-		Agent:      opt.Agent,
-		WorkingDir: opt.WorkingDir,
+		SessionId:   opt.SessionID,
+		Agent:       opt.Agent,
+		WorkingDir:  opt.WorkingDir,
+		Temperature: opt.Temperature,
 		Parts: []*gilv1.PromptPart{
 			{Body: &gilv1.PromptPart_Text{Text: opt.Text}},
 		},

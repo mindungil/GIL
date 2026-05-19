@@ -30,14 +30,15 @@ import (
 
 func dogfoodCmd() *cobra.Command {
 	var (
-		socket     string
-		workingDir string
-		provider   string
-		model      string
-		maxTurns   int
-		maxWall    time.Duration
-		tracePath  string
-		assertCmds []string
+		socket      string
+		workingDir  string
+		provider    string
+		model       string
+		maxTurns    int
+		maxWall     time.Duration
+		tracePath   string
+		assertCmds  []string
+		temperature float64
 	)
 	c := &cobra.Command{
 		Use:   "dogfood <prompt-file>",
@@ -110,16 +111,17 @@ Termination:
 			}
 
 			runner := &dogfoodRunner{
-				cli:        cli,
-				workingDir: absWD,
-				provider:   provider,
-				model:      model,
-				maxTurns:   maxTurns,
-				maxWall:    maxWall,
-				initial:    string(initialBytes),
-				assertCmds: assertCmds,
-				trace:      json.NewEncoder(traceW),
-				stdout:     out,
+				cli:         cli,
+				workingDir:  absWD,
+				provider:    provider,
+				model:       model,
+				maxTurns:    maxTurns,
+				maxWall:     maxWall,
+				initial:     string(initialBytes),
+				assertCmds:  assertCmds,
+				temperature: temperature,
+				trace:       json.NewEncoder(traceW),
+				stdout:      out,
 			}
 			result, err := runner.Run(ctx)
 			if err != nil {
@@ -146,19 +148,21 @@ Termination:
 	c.Flags().DurationVar(&maxWall, "max-wall", time.Hour, "max wall-clock budget (e.g. 9h, 30m)")
 	c.Flags().StringVar(&tracePath, "trace", "", "path for JSONL trace (default: stdout)")
 	c.Flags().StringArrayVar(&assertCmds, "assert", nil, "shell command run after the loop; failure marks dogfood as failed (may be repeated)")
+	c.Flags().Float64Var(&temperature, "temperature", 0, "sampling temperature override (0 = use daemon default 0.7; try 0.2–0.3 for autonomous-coding tasks per Finding #6)")
 	return c
 }
 
 // dogfoodRunner holds the per-invocation state. One Run() per command.
 type dogfoodRunner struct {
-	cli        *sdk.Client
-	workingDir string
-	provider   string
-	model      string
-	maxTurns   int
-	maxWall    time.Duration
-	initial    string
-	assertCmds []string
+	cli         *sdk.Client
+	workingDir  string
+	provider    string
+	model       string
+	maxTurns    int
+	maxWall     time.Duration
+	initial     string
+	assertCmds  []string
+	temperature float64
 
 	trace  *json.Encoder
 	stdout io.Writer
@@ -364,11 +368,12 @@ func (r *dogfoodRunner) runOneTurn(ctx context.Context, turn int, prompt string)
 		PromptHead: head(prompt, 200),
 	}
 	stream, err := r.cli.Prompt(ctx, sdk.PromptOptions{
-		SessionID:  r.sessionID,
-		Text:       prompt,
-		Provider:   r.provider,
-		Model:      r.model,
-		WorkingDir: r.workingDir,
+		SessionID:   r.sessionID,
+		Text:        prompt,
+		Provider:    r.provider,
+		Model:       r.model,
+		WorkingDir:  r.workingDir,
+		Temperature: r.temperature,
 	})
 	if err != nil {
 		return rec, fmt.Errorf("prompt RPC: %w", err)

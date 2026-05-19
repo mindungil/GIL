@@ -696,13 +696,20 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 		// but only when actually under pressure, not on a cadence.
 		// Compaction is pressure-driven, not cadence-driven.
 		t0 := time.Now()
+		// Temperature: PromptRequest.temperature overrides the default
+		// when > 0 (Finding #6, 2026-05-18 — dogfood probes benefit
+		// from 0.2–0.3). Chat surface stays at 0.7 by default.
+		temperature := 0.7
+		if t := req.GetTemperature(); t > 0 {
+			temperature = t
+		}
 		resp, err := prov.Complete(ctx, provider.Request{
 			Model:       modelID,
 			Messages:    msgs,
 			System:      systemPrompt,
 			Tools:       toolDefs,
 			MaxTokens:   2048,
-			Temperature: 0.7,
+			Temperature: temperature,
 		})
 		totalLatency += time.Since(t0)
 		if err != nil {

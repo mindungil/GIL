@@ -562,7 +562,14 @@ type PromptRequest struct {
 	// (the existing session's working_dir wins). Empty falls through
 	// to "no working dir" — write/exec tools then refuse with a clear
 	// error rather than silently writing to /tmp.
-	WorkingDir    string `protobuf:"bytes,5,opt,name=working_dir,json=workingDir,proto3" json:"working_dir,omitempty"`
+	WorkingDir string `protobuf:"bytes,5,opt,name=working_dir,json=workingDir,proto3" json:"working_dir,omitempty"`
+	// temperature overrides the daemon's default sampling temperature
+	// (0.7) for this call. <= 0 falls through to the default. Surfaced
+	// for dogfood / autonomous-coding tuning — Finding #6 (2026-05-18)
+	// showed lower T (0.2–0.3) lifts boundary tasks like chess perft
+	// and lock-free SPMC. Per-call so chat surface can stay at 0.7
+	// while dogfood probes use 0.3.
+	Temperature   float64 `protobuf:"fixed64,6,opt,name=temperature,proto3" json:"temperature,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -630,6 +637,13 @@ func (x *PromptRequest) GetWorkingDir() string {
 		return x.WorkingDir
 	}
 	return ""
+}
+
+func (x *PromptRequest) GetTemperature() float64 {
+	if x != nil {
+		return x.Temperature
+	}
+	return 0
 }
 
 // PromptPart is a single piece of the user message. V1 ships only the
@@ -1307,7 +1321,7 @@ const file_gil_v1_session_proto_rawDesc = "" +
 	"\x02id\x18\x01 \x01(\tR\x02id\"1\n" +
 	"\x0eDeleteResponse\x12\x1f\n" +
 	"\vfreed_bytes\x18\x01 \x01(\x03R\n" +
-	"freedBytes\"\xba\x01\n" +
+	"freedBytes\"\xdc\x01\n" +
 	"\rPromptRequest\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12(\n" +
@@ -1315,7 +1329,8 @@ const file_gil_v1_session_proto_rawDesc = "" +
 	"\x05agent\x18\x03 \x01(\tR\x05agent\x12)\n" +
 	"\x05model\x18\x04 \x01(\v2\x13.gil.v1.ModelChoiceR\x05model\x12\x1f\n" +
 	"\vworking_dir\x18\x05 \x01(\tR\n" +
-	"workingDir\"*\n" +
+	"workingDir\x12 \n" +
+	"\vtemperature\x18\x06 \x01(\x01R\vtemperature\"*\n" +
 	"\n" +
 	"PromptPart\x12\x14\n" +
 	"\x04text\x18\x01 \x01(\tH\x00R\x04textB\x06\n" +

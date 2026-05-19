@@ -145,6 +145,13 @@ message PromptRequest {
   // to "no working dir" — write/exec tools then refuse with a clear
   // error rather than silently writing to /tmp.
   string working_dir = 5;
+  // temperature overrides the daemon's default sampling temperature
+  // (0.7) for this call. <= 0 falls through to the default. Surfaced
+  // for dogfood / autonomous-coding tuning — Finding #6 (2026-05-18)
+  // showed lower T (0.2–0.3) lifts boundary tasks like chess perft
+  // and lock-free SPMC. Per-call so chat surface can stay at 0.7
+  // while dogfood probes use 0.3.
+  double temperature = 6;
 }
 
 // PromptPart is a single piece of the user message. V1 ships only the
