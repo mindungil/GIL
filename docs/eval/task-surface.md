@@ -690,3 +690,28 @@ Smoke: `gil dogfood --temperature 0.3` on hello-go PROMPT — PASS
 - Per-value partial credit — chess처럼 multi-value spec에서 6 perft 값
   중 N개 PASS 같은 부분 점수. agent test 이름 가변이라 fragile, skip.
 
+
+## Chess T=0.3 probe — 2026-05-19
+
+`bash docs/eval/variance-probe.sh 5 07 0.3` (driver was pre-3축 expansion;
+metrics re-extracted from traces in `/tmp/gil-variance-probe-3310234/`).
+
+| Task | PASS/N | turns | wall | max-turn-tok | recov | prem-stop | ovf |
+|---|---|---|---|---|---|---|---|
+| 07-chess @ T=0.3 | **0/5** | 6-9 | 1370-2291s | 97k-931k | 5-8 | **5/5** | 0/5 |
+
+### Finding
+
+**Temperature는 lever가 아니다.** T=0.7 (2/2 prem-stop) → T=0.3 (5/5 prem-stop).
+온도 낮춰도 chess 한 번도 안 풀림. 더 보수적인 sampling이 첫-디자인 lock-in을 강화할 뿐.
+
+`final_stop=end_turn` × 5/5 + assert FAIL × 5/5 → "agent done 착각" 패턴이
+chess에선 **100% 결정론적**. variance 문제가 아니라 reorientation 부재 문제.
+
+### 결론
+
+[[gil-adversary-seam]] 와이어링 (A1)이 chess boundary의 **유일한** 알려진 fix.
+- temperature flag (Finding #6)는 다른 task엔 lever일 수 있지만 chess엔 아님.
+- 단순 retry/variance로도 안 풀림.
+- 다음 단계: A1 — `session_prompt.go:836-844` stuck_detected emit 시
+  `AdversaryConsultStrategy.Consult()` 호출 추가, Risk.AdversaryModel opt-in.
