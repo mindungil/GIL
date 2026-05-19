@@ -83,6 +83,18 @@ func (b *chatEventBuffer) markSeen(p stuck.Pattern) bool {
 	return true
 }
 
+// truncateForDetector clips a string at 512 bytes. The Detector's
+// pattern checks hash the `content` field, so we keep enough bytes
+// to distinguish observations without ballooning the ring buffer.
+// Matches the cap in core/runner.truncateString.
+func truncateForDetector(s string) string {
+	const cap = 512
+	if len(s) <= cap {
+		return s
+	}
+	return s[:cap]
+}
+
 // jsonMust marshals v; on error returns "{}" so emit sites never
 // panic. Pure helper.
 func jsonMust(v any) []byte {
