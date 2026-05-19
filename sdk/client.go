@@ -318,6 +318,12 @@ type PromptOptions struct {
 	// dogfood / autonomous-coding runs that want lower variance
 	// (Finding #6, 2026-05-18).
 	Temperature float64
+	// AdversaryModel identifies the model to consult when the daemon's
+	// chat-side stuck Detector returns a signal that
+	// AdversaryConsultStrategy can act on. Empty disables the adversary
+	// path; AltToolOrder and other strategies still fire. See A1b spec
+	// (2026-05-19).
+	AdversaryModel string
 }
 
 // Prompt opens a streaming chat turn against the daemon's agent
@@ -329,10 +335,11 @@ type PromptOptions struct {
 // finally DonePart. Caller drains the returned stream until EOF.
 func (c *Client) Prompt(ctx context.Context, opt PromptOptions) (gilv1.SessionService_PromptClient, error) {
 	req := &gilv1.PromptRequest{
-		SessionId:   opt.SessionID,
-		Agent:       opt.Agent,
-		WorkingDir:  opt.WorkingDir,
-		Temperature: opt.Temperature,
+		SessionId:      opt.SessionID,
+		Agent:          opt.Agent,
+		WorkingDir:     opt.WorkingDir,
+		Temperature:    opt.Temperature,
+		AdversaryModel: opt.AdversaryModel,
 		Parts: []*gilv1.PromptPart{
 			{Body: &gilv1.PromptPart_Text{Text: opt.Text}},
 		},
