@@ -31,10 +31,11 @@ fi
 N=${1:-2}
 FILTER=${2:-all}
 TEMPERATURE=${3:-0}  # 0 = use daemon default (0.7)
+ADVERSARY_MODEL=${ADVERSARY_MODEL:-}  # env-passed; empty disables AdversaryConsult
 
 OUT_DIR=${OUT_DIR:-/tmp/gil-variance-probe-$$}
 mkdir -p "$OUT_DIR"
-echo "variance-probe: N=$N filter=$FILTER temperature=$TEMPERATURE traces=$OUT_DIR"
+echo "variance-probe: N=$N filter=$FILTER temperature=$TEMPERATURE adversary=${ADVERSARY_MODEL:-OFF} traces=$OUT_DIR"
 
 # Per-task config: name|prompt-path|max-turns|max-wall|asserts (newline-separated, ::-escaped)
 # Boundary tasks live in /home/ubuntu/eval/, NOT docs/eval/tasks/ (the
@@ -78,12 +79,17 @@ for part in re.split(r"__SPLIT__", data):
     if [ "$TEMPERATURE" != "0" ]; then
         temp_args=(--temperature "$TEMPERATURE")
     fi
+    local adv_args=()
+    if [ -n "$ADVERSARY_MODEL" ]; then
+        adv_args=(--adversary-model "$ADVERSARY_MODEL")
+    fi
     if "$GIL_BIN" dogfood "$prompt" \
         --working-dir "$ws" \
         --max-turns "$maxturns" \
         --max-wall "$maxwall" \
         --trace "$trace" \
         "${temp_args[@]}" \
+        "${adv_args[@]}" \
         "${assert_args[@]}" > "$OUT_DIR/${id}-r${run}.log" 2>&1; then
         verdict="PASS"
     else
