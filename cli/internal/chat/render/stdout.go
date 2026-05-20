@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/mindungil/gil/cli/internal/cmd/uistyle"
+	"github.com/mindungil/gil/core/chatrender"
 )
 
 type StdoutChatRenderer struct {
@@ -41,8 +42,16 @@ func (r *StdoutChatRenderer) PromptCue() {
 	fmt.Fprint(r.out, "> ")
 }
 
+// AssistantText strips chat-shape markdown decorations (bold, headers,
+// bullets, numbered lists, inline backticks) from the streaming
+// chunk before printing. P68d: gil is an autonomous coding harness,
+// not a chat app — the agent system prompt P68a tells the model to
+// omit these, but high-temperature variance leaks them through.
+// chatrender.StripChatMarkdown is line-oriented, so mid-bold splits
+// across chunks can pass a stray `**` through; that's acceptable
+// versus the alternative of buffering the whole reply before display.
 func (r *StdoutChatRenderer) AssistantText(chunk string) {
-	fmt.Fprint(r.out, chunk)
+	fmt.Fprint(r.out, chatrender.StripChatMarkdown(chunk))
 }
 
 // AssistantReasoning prints the model's separated chain-of-thought

@@ -5,6 +5,7 @@ import (
 	"sync"
 
 	"github.com/charmbracelet/glamour"
+	"github.com/mindungil/gil/core/chatrender"
 )
 
 // chat_markdown.go renders agent transcript text through glamour so
@@ -25,29 +26,38 @@ import (
 //     emits ANSI even with chroma disabled, and the dim-style chroma
 //     palette is a poor fit for ascii-only terminals.
 
-// renderAgentMarkdown renders body as markdown when it contains
-// markdown-worthy markers; falls back to body verbatim otherwise.
-// The detection is deliberately conservative: glamour adds layout
-// (paragraph spacing, list bullets, code-block padding) so we only
-// pay that cost when the source actually has structure.
+// renderAgentMarkdown post-processes agent text for display. P68d
+// shifted the policy: gil is an autonomous coding harness, not a
+// chat app, so the user does NOT want bold/list/header markdown
+// chrome leaking into the transcript ("강조 글씨가 채팅같다" —
+// 2026-05-20 dogfood feedback). We strip chat-shape markdown
+// (bold, inline code, headers, bullets, numbered lists) via
+// chatrender.StripChatMarkdown — the agent system prompt P68a
+// already tells the model to omit these, but high-temperature
+// variance still leaks them through; this is the second layer.
 //
-// The renderer is gated on color + non-ascii — both modes run
-// without glamour because the styled output would either look wrong
-// (ASCII-mode chroma) or no-op the styling (NO_COLOR strips ANSI).
+// We keep glamour rendering ONLY when the stripped body still
+// contains a fenced code block — the agent legitimately quotes
+// code it just read or wrote, and pretty syntax highlighting is
+// worth the layout overhead there. Pure prose skips glamour entirely.
+//
+// NO_COLOR and ASCII modes always return raw stripped text — those
+// terminals can't render the styled output meaningfully.
 func renderAgentMarkdown(body string) string {
+	stripped := chatrender.StripChatMarkdown(body)
 	if IsNoColor() || IsAsciiMode() {
-		return body
+		return stripped
 	}
-	if !looksLikeMarkdown(body) {
-		return body
+	if !strings.Contains(stripped, "```") {
+		return stripped
 	}
 	r := agentMarkdownRenderer()
 	if r == nil {
-		return body
+		return stripped
 	}
-	out, err := r.Render(body)
+	out, err := r.Render(stripped)
 	if err != nil {
-		return body
+		return stripped
 	}
 	// glamour wraps every render with surrounding blank lines and a
 	// trailing newline. Strip those so the rendered block flows

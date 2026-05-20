@@ -162,17 +162,40 @@ func TestRenderAgentMarkdown_RendersFencedCode(t *testing.T) {
 	}
 }
 
-// TestRenderAgentMarkdown_NoColorNoOps confirms NO_COLOR users see
-// raw text, not glamour-rendered ANSI. NO_COLOR's contract is "no
-// styling," so even the inline-code highlight should be absent.
-func TestRenderAgentMarkdown_NoColorNoOps(t *testing.T) {
+// TestRenderAgentMarkdown_StripsChatMarkdown — P68d behavior. The
+// renderer ALWAYS strips chat-shape markdown (inline backticks in
+// prose, bold, italic, headers, list bullets) regardless of color
+// mode. The old test asserted NO_COLOR passed text through
+// unchanged; the new policy is that gil is an autonomous coding
+// harness, not a chat app, so the chat decorations get removed up
+// front. Fenced code blocks (```...```) are still preserved — those
+// carry semantic meaning beyond chat decoration.
+func TestRenderAgentMarkdown_StripsChatMarkdown(t *testing.T) {
 	prevNoColor := IsNoColor()
 	SetNoColor(true)
 	defer SetNoColor(prevNoColor)
 
 	body := "Use `gil status` to list sessions."
-	if got := renderAgentMarkdown(body); got != body {
-		t.Errorf("NO_COLOR should bypass glamour\nwant: %q\n got: %q", body, got)
+	want := "Use gil status to list sessions."
+	if got := renderAgentMarkdown(body); got != want {
+		t.Errorf("inline backticks must be stripped (P68d)\nwant: %q\n got: %q", want, got)
+	}
+}
+
+// TestRenderAgentMarkdown_StripsBoldAndItalic locks the P68d strip
+// scope: `**bold**`, `*italic*`, and inline backticks all become
+// plain text in BOTH color and no-color modes.
+func TestRenderAgentMarkdown_StripsBoldAndItalic(t *testing.T) {
+	body := "this is **bold** and `code` and _italic_"
+	want := "this is bold and code and italic"
+	for _, nc := range []bool{false, true} {
+		prevNoColor := IsNoColor()
+		SetNoColor(nc)
+		got := renderAgentMarkdown(body)
+		SetNoColor(prevNoColor)
+		if got != want {
+			t.Errorf("NoColor=%v want %q got %q", nc, want, got)
+		}
 	}
 }
 
