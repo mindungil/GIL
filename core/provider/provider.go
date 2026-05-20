@@ -84,6 +84,19 @@ type Response struct {
 type Provider interface {
 	// Name returns a short identifier for logs (e.g., "anthropic", "mock").
 	Name() string
-	// Complete sends a request and returns the model's response.
+	// Complete sends a request and returns the model's response. The
+	// returned Response is fully populated when the model finishes.
 	Complete(ctx context.Context, req Request) (Response, error)
+	// StreamComplete is like Complete, but fires onText for each
+	// incremental text delta as it arrives from the upstream. The
+	// final Response is returned the same way as Complete (with the
+	// accumulated text in Response.Text). Reasoning and tool calls
+	// are NOT streamed in this contract — they come back in the
+	// returned Response only — keeping the wire shape simple for
+	// session_prompt.go's chat path. Providers that don't natively
+	// stream MAY fall back to calling Complete and emitting the
+	// final text as a single onText call. onText may be nil; in that
+	// case the implementation MUST behave identically to Complete.
+	// P68c (2026-05-20).
+	StreamComplete(ctx context.Context, req Request, onText func(string)) (Response, error)
 }

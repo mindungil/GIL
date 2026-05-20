@@ -48,6 +48,13 @@ func (m *Mock) Name() string { return "mock" }
 
 // Complete returns the next scripted response.
 func (m *Mock) Complete(ctx context.Context, req Request) (Response, error) {
+	return m.StreamComplete(ctx, req, nil)
+}
+
+// StreamComplete returns the next scripted response, optionally firing
+// onText in 3 chunks so tests of streaming wiring observe progressive
+// delivery. P68c.
+func (m *Mock) StreamComplete(ctx context.Context, req Request, onText func(string)) (Response, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if len(m.responses) == 0 {
@@ -61,14 +68,15 @@ func (m *Mock) Complete(ctx context.Context, req Request) (Response, error) {
 	}
 	resp := m.responses[m.idx]
 	var reasoning string
-	// Reasoning slice is parallel-indexed against responses by the
-	// concrete `idx`, so wrapping above means the same reasoning value
-	// recycles alongside its response — preserving the test contract
-	// when SetReasonings was used with a looping mock.
 	if m.idx < len(m.reasonings) {
 		reasoning = m.reasonings[m.idx]
 	}
 	m.idx++
+	if onText != nil && resp != "" {
+		for _, chunk := range splitForStreaming(resp, 3) {
+			onText(chunk)
+		}
+	}
 	return Response{
 		Text:         resp,
 		Reasoning:    reasoning,
@@ -76,6 +84,31 @@ func (m *Mock) Complete(ctx context.Context, req Request) (Response, error) {
 		OutputTokens: int64(len(resp)),
 		StopReason:   "end_turn",
 	}, nil
+}
+
+// splitForStreaming chops s into roughly n equal pieces by rune count.
+// Returns at most n non-empty chunks; concatenating them recovers s
+// exactly. Used by mock providers to exercise the streaming callback
+// path without requiring a real upstream.
+func splitForStreaming(s string, n int) []string {
+	if n <= 1 || len(s) == 0 {
+		return []string{s}
+	}
+	runes := []rune(s)
+	if len(runes) <= n {
+		return []string{s}
+	}
+	size := len(runes) / n
+	out := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		start := i * size
+		end := start + size
+		if i == n-1 {
+			end = len(runes)
+		}
+		out = append(out, string(runes[start:end]))
+	}
+	return out
 }
 
 // MockTurn is one scripted response that may include tool calls.
@@ -103,6 +136,15 @@ func (m *MockToolProvider) Name() string { return "mock-tool" }
 
 // Complete returns the next scripted turn.
 func (m *MockToolProvider) Complete(ctx context.Context, req Request) (Response, error) {
+	return m.StreamComplete(ctx, req, nil)
+}
+
+// StreamComplete returns the next scripted turn. When onText is set
+// AND the turn carries text (i.e. not a pure tool_use turn), the text
+// is split into 3 chunks and delivered via onText before the final
+// Response. Tool calls are NOT streamed — they appear only in the
+// returned Response. P68c.
+func (m *MockToolProvider) StreamComplete(ctx context.Context, req Request, onText func(string)) (Response, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.idx >= len(m.turns) {
@@ -110,6 +152,11 @@ func (m *MockToolProvider) Complete(ctx context.Context, req Request) (Response,
 	}
 	turn := m.turns[m.idx]
 	m.idx++
+	if onText != nil && turn.Text != "" {
+		for _, chunk := range splitForStreaming(turn.Text, 3) {
+			onText(chunk)
+		}
+	}
 	return Response{
 		Text:         turn.Text,
 		ToolCalls:    turn.ToolCalls,

@@ -41,6 +41,10 @@ func (c *captureProvider) Complete(_ context.Context, req provider.Request) (pro
 	}, nil
 }
 
+func (c *captureProvider) StreamComplete(ctx context.Context, req provider.Request, onText func(string)) (provider.Response, error) {
+	return c.Complete(ctx, req)
+}
+
 // TestAgentLoop_PlanPrependedToSystemPrompt confirms that once the
 // agent writes a plan via the `plan` tool, subsequent iterations see a
 // "=== PLAN" block injected at the top of their system prompt.

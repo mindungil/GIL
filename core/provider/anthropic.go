@@ -28,6 +28,26 @@ func NewAnthropic(apiKey string) *Anthropic {
 // Name implements Provider.
 func (a *Anthropic) Name() string { return "anthropic" }
 
+// StreamComplete is the streaming entry point. Anthropic's official Go
+// SDK supports `messages.stream`, but plumbing the parsed event types
+// (content_block_delta etc.) is non-trivial and not on the critical
+// path right now (gil's primary backend is qwen via vLLM, which uses
+// the OpenAI provider). For P68c this stub falls back to Complete and
+// emits the final text as a single onText callback when set. This
+// preserves correctness — callers see the full response — while
+// leaving room for a real Anthropic stream impl later. The
+// streaming-aware path is implemented in openai.go.
+func (a *Anthropic) StreamComplete(ctx context.Context, req Request, onText func(string)) (Response, error) {
+	resp, err := a.Complete(ctx, req)
+	if err != nil {
+		return resp, err
+	}
+	if onText != nil && resp.Text != "" {
+		onText(resp.Text)
+	}
+	return resp, nil
+}
+
 // Complete sends the request to the Anthropic Messages API and returns the
 // assistant's response with usage tokens.
 func (a *Anthropic) Complete(ctx context.Context, req Request) (Response, error) {

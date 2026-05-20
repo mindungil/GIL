@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -110,11 +111,21 @@ func (e *ProviderPermanent) Error() string {
 // out rather than serialised as zero values, so tests can assert exact body
 // shape with omitempty semantics in mind.
 type chatRequest struct {
-	Model       string         `json:"model"`
-	Messages    []chatMessage  `json:"messages"`
-	Tools       []chatTool     `json:"tools,omitempty"`
-	Temperature *float64       `json:"temperature,omitempty"`
-	MaxTokens   int            `json:"max_tokens,omitempty"`
+	Model         string             `json:"model"`
+	Messages      []chatMessage      `json:"messages"`
+	Tools         []chatTool         `json:"tools,omitempty"`
+	Temperature   *float64           `json:"temperature,omitempty"`
+	MaxTokens     int                `json:"max_tokens,omitempty"`
+	Stream        bool               `json:"stream,omitempty"`
+	StreamOptions *chatStreamOptions `json:"stream_options,omitempty"`
+}
+
+// chatStreamOptions is the OpenAI streaming options block. We request
+// `include_usage` so the final SSE chunk carries the usage object —
+// otherwise streaming responses arrive without token counts and the
+// chat surface's cost/metric display silently shows 0. P68c.
+type chatStreamOptions struct {
+	IncludeUsage bool `json:"include_usage,omitempty"`
 }
 
 // chatMessage is one OpenAI message. Content is *string (not string) so we
@@ -221,6 +232,21 @@ type chatUsage struct {
 //   - req.Temperature == 0 is treated as "unset" (omitted) so the upstream
 //     uses its own default; this matches what the Anthropic adapter does.
 func (o *OpenAI) Complete(ctx context.Context, req Request) (Response, error) {
+	return o.StreamComplete(ctx, req, nil)
+}
+
+// StreamComplete is the streaming entry point. When onText is nil, it
+// posts a non-streaming request and parses the single JSON response
+// (identical to the prior Complete path — same wire shape, same
+// error handling). When onText is non-nil, it adds `stream: true` +
+// `stream_options.include_usage: true` to the request, parses the
+// SSE response chunk by chunk, fires onText for each text delta, and
+// accumulates reasoning / tool calls / usage to return the final
+// Response. P68c. Tool-call arguments stream incrementally per
+// OpenAI's spec (one delta per arguments chunk per index); they are
+// accumulated and surfaced only in the returned Response — onText
+// receives ONLY user-visible text deltas.
+func (o *OpenAI) StreamComplete(ctx context.Context, req Request, onText func(string)) (Response, error) {
 	if req.Model == "" {
 		return Response{}, errors.New("openai.Complete: model required")
 	}
@@ -228,9 +254,16 @@ func (o *OpenAI) Complete(ctx context.Context, req Request) (Response, error) {
 		return Response{}, errors.New("openai.Complete: base URL required")
 	}
 
+	streaming := onText != nil
 	body, err := o.buildRequestBody(req)
 	if err != nil {
 		return Response{}, err
+	}
+	if streaming {
+		body, err = injectStreamFlags(body)
+		if err != nil {
+			return Response{}, err
+		}
 	}
 
 	url := o.BaseURL + "/chat/completions"
@@ -239,7 +272,11 @@ func (o *OpenAI) Complete(ctx context.Context, req Request) (Response, error) {
 		return Response{}, fmt.Errorf("openai.Complete: build request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Accept", "application/json")
+	if streaming {
+		httpReq.Header.Set("Accept", "text/event-stream")
+	} else {
+		httpReq.Header.Set("Accept", "application/json")
+	}
 	if o.APIKey != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+o.APIKey)
 	}
@@ -254,6 +291,12 @@ func (o *OpenAI) Complete(ctx context.Context, req Request) (Response, error) {
 		return Response{}, fmt.Errorf("openai.Complete: http: %w", err)
 	}
 	defer resp.Body.Close()
+
+	if streaming {
+		// Branch off into the SSE reader; preserves the existing
+		// non-streaming code path verbatim below for the common case.
+		return parseStreamingResponse(o.Name(), resp, onText)
+	}
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -508,4 +551,194 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
+}
+
+// --- Streaming (P68c) -----------------------------------------------------
+
+// injectStreamFlags re-marshals body with `stream: true` +
+// `stream_options.include_usage: true` set. We accept a pre-marshalled
+// body because buildRequestBody is shared with non-streaming Complete
+// callers; this helper avoids two divergent build paths. The body is
+// parsed back into chatRequest, the streaming flags are flipped, and
+// the result is re-marshalled. Round-trip is JSON-safe because every
+// field on chatRequest carries an explicit json tag.
+func injectStreamFlags(body []byte) ([]byte, error) {
+	var req chatRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		return nil, fmt.Errorf("openai.StreamComplete: re-parse body: %w", err)
+	}
+	req.Stream = true
+	req.StreamOptions = &chatStreamOptions{IncludeUsage: true}
+	return json.Marshal(req)
+}
+
+// chatStreamChunk is the per-event JSON shape inside the SSE stream.
+// Only the fields we care about are declared; everything else is
+// silently ignored. choices[].delta is what carries the per-event
+// content; finish_reason is non-empty on the chunk that terminates
+// the choice. usage appears in the FINAL chunk when include_usage is
+// set.
+type chatStreamChunk struct {
+	Choices []chatStreamChoice `json:"choices"`
+	Usage   *chatUsage         `json:"usage,omitempty"`
+}
+
+type chatStreamChoice struct {
+	Index        int             `json:"index"`
+	Delta        chatStreamDelta `json:"delta"`
+	FinishReason string          `json:"finish_reason"`
+}
+
+type chatStreamDelta struct {
+	Role             string                 `json:"role,omitempty"`
+	Content          string                 `json:"content,omitempty"`
+	Reasoning        string                 `json:"reasoning,omitempty"`
+	ReasoningContent string                 `json:"reasoning_content,omitempty"`
+	ToolCalls        []chatStreamToolCallΔ `json:"tool_calls,omitempty"`
+}
+
+// chatStreamToolCallΔ is an incremental tool-call event. Per OpenAI's
+// spec, `index` is the slot in the response's tool_calls array (so
+// parallel calls can be reassembled); `id` and `function.name` arrive
+// once on the first delta for that index; `function.arguments` is a
+// JSON string that builds up character by character across many
+// deltas. Unicode-flagged field name (Δ) avoids confusion with the
+// non-streaming chatRespToolCall.
+type chatStreamToolCallΔ struct {
+	Index    int                          `json:"index"`
+	ID       string                       `json:"id,omitempty"`
+	Type     string                       `json:"type,omitempty"`
+	Function chatRespToolCallFunctionCall `json:"function"`
+}
+
+// toolCallBuilder accumulates a tool call across N delta events.
+// id/name arrive once; arguments string-concatenates across all
+// deltas for the same index.
+type toolCallBuilder struct {
+	ID   string
+	Name string
+	Args strings.Builder
+}
+
+// parseStreamingResponse consumes the SSE body, fires onText for each
+// text delta, and returns the accumulated Response. providerName is
+// surfaced inside errors so the caller can disambiguate which adapter
+// failed.
+func parseStreamingResponse(providerName string, resp *http.Response, onText func(string)) (Response, error) {
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return Response{}, classifyHTTPError(providerName, resp.StatusCode, resp.Header, body)
+	}
+
+	out := Response{}
+	builders := map[int]*toolCallBuilder{}
+
+	scanner := bufio.NewScanner(resp.Body)
+	// SSE chunks can carry the full JSON payload on a single line; some
+	// providers emit very large reasoning blocks, so lift the line
+	// buffer well above the 64 KiB default.
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+
+	for scanner.Scan() {
+		raw := scanner.Text()
+		if raw == "" {
+			continue // event separator
+		}
+		if !strings.HasPrefix(raw, "data:") {
+			continue // comment / event-name line
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(raw, "data:"))
+		if payload == "" {
+			continue
+		}
+		if payload == "[DONE]" {
+			break
+		}
+
+		var chunk chatStreamChunk
+		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
+			// Skip malformed chunks rather than aborting — a single
+			// corrupt frame shouldn't kill an otherwise-fine stream.
+			continue
+		}
+
+		for _, c := range chunk.Choices {
+			d := c.Delta
+			if d.Content != "" {
+				out.Text += d.Content
+				if onText != nil {
+					onText(d.Content)
+				}
+			}
+			if d.Reasoning != "" {
+				out.Reasoning += d.Reasoning
+			} else if d.ReasoningContent != "" {
+				out.Reasoning += d.ReasoningContent
+			}
+			for _, tc := range d.ToolCalls {
+				b, ok := builders[tc.Index]
+				if !ok {
+					b = &toolCallBuilder{}
+					builders[tc.Index] = b
+				}
+				if tc.ID != "" {
+					b.ID = tc.ID
+				}
+				if tc.Function.Name != "" {
+					b.Name = tc.Function.Name
+				}
+				if tc.Function.Arguments != "" {
+					b.Args.WriteString(tc.Function.Arguments)
+				}
+			}
+			if c.FinishReason != "" {
+				out.StopReason = mapFinishReason(c.FinishReason)
+			}
+		}
+
+		if chunk.Usage != nil {
+			out.InputTokens = chunk.Usage.PromptTokens
+			out.OutputTokens = chunk.Usage.CompletionTokens
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return out, fmt.Errorf("%s.StreamComplete: read stream: %w", providerName, err)
+	}
+
+	// Materialise tool calls in their index order.
+	if len(builders) > 0 {
+		max := -1
+		for idx := range builders {
+			if idx > max {
+				max = idx
+			}
+		}
+		for i := 0; i <= max; i++ {
+			b, ok := builders[i]
+			if !ok {
+				continue
+			}
+			argStr := b.Args.String()
+			raw := json.RawMessage(argStr)
+			if len(raw) == 0 {
+				raw = json.RawMessage("{}")
+			} else {
+				var probe interface{}
+				if json.Unmarshal([]byte(argStr), &probe) != nil {
+					// Keep raw bytes even when invalid so the caller can
+					// see what the model emitted and self-correct on the
+					// next turn — matches the non-streaming Complete
+					// fallthrough.
+					raw = json.RawMessage(argStr)
+				}
+			}
+			out.ToolCalls = append(out.ToolCalls, ToolCall{
+				ID:    b.ID,
+				Name:  b.Name,
+				Input: raw,
+			})
+		}
+	}
+
+	return out, nil
 }

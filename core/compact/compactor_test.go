@@ -145,3 +145,6 @@ func (e *errProvider) Name() string { return "err" }
 func (e *errProvider) Complete(ctx context.Context, req provider.Request) (provider.Response, error) {
 	return provider.Response{}, e.err
 }
+func (e *errProvider) StreamComplete(ctx context.Context, req provider.Request, onText func(string)) (provider.Response, error) {
+	return e.Complete(ctx, req)
+}

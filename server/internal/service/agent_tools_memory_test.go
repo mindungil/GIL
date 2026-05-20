@@ -184,9 +184,16 @@ type capturingProvider struct {
 }
 
 func (p *capturingProvider) Name() string { return "capturing" }
-func (p *capturingProvider) Complete(_ context.Context, req provider.Request) (provider.Response, error) {
+func (p *capturingProvider) Complete(ctx context.Context, req provider.Request) (provider.Response, error) {
 	p.systemSeen = req.System
 	return provider.Response{Text: "ok", StopReason: "end_turn"}, nil
+}
+
+// StreamComplete satisfies the P68c streaming Provider interface;
+// memory-block tests only assert system-prompt capture, so the
+// streaming callback is a no-op.
+func (p *capturingProvider) StreamComplete(ctx context.Context, req provider.Request, onText func(string)) (provider.Response, error) {
+	return p.Complete(ctx, req)
 }
 
 func min(a, b int) int {

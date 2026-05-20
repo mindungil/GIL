@@ -26,6 +26,13 @@ func (f *flakyProvider) Complete(ctx context.Context, req Request) (Response, er
 	return Response{Text: "ok"}, nil
 }
 
+// StreamComplete satisfies the P68c streaming Provider interface; the
+// retry tests only need the success/failure shape, so the stream-text
+// callback is a no-op here. Retry tests run through Complete anyway.
+func (f *flakyProvider) StreamComplete(ctx context.Context, req Request, onText func(string)) (Response, error) {
+	return f.Complete(ctx, req)
+}
+
 func TestRetry_RetriesTransient(t *testing.T) {
 	flaky := &flakyProvider{failsLeft: 2, failErr: errors.New("status 503 service unavailable")}
 	r := &Retry{Wrapped: flaky, MaxAttempts: 4, BaseDelay: 1 * time.Millisecond}
