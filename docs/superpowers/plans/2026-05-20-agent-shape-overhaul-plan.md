@@ -278,6 +278,20 @@ Dogfood gate: artifacts exist; no behavioral validation needed.
 - **No timeline guesses in this doc** per
   [[feedback_no_timeline_in_todo_docs]].
 
+## End-of-day status (2026-05-20 evening)
+
+| Phase | Status | PR / commit | Dogfood gate |
+|---|---|---|---|
+| P68a | ✅ shipped | PR #7 (merged 07bf819) | 5/5 prompts route correctly; markdown variance accepted |
+| P68b | ✅ shipped | PR #11 (merged) | cached_system_prompt populated 10674b, key=`vllm:qwen3.6-27b:default` |
+| P68c | ✅ shipped | PR #9 (merged f77a518) + fix e1f9013 | list_sessions tool call streams; no 400 |
+| P68d | ✅ shipped | PR #8 (merged 3e02fdd) | bullets/bold/inline-backtick stripped at TUI+CLI |
+| P68e | ⏳ parked | — | JSONL rollout; deferred per synthesis Tier-1 ranking |
+| P68f | ✅ shipped | PR #10 (merged 92ad354) | chess N=3 sweep in flight on develop tip |
+| P68g | ✅ shipped | within PR #10 | claude-code.md + synthesis.md |
+
+P67l (telemetry from prior series) also shipped (PR #6).
+
 ## Out of scope for this plan
 
 - Adding a *skills* system (Claude Code style markdown skill files).
