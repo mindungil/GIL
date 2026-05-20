@@ -705,7 +705,15 @@ func parseStreamingResponse(providerName string, resp *http.Response, onText fun
 		return out, fmt.Errorf("%s.StreamComplete: read stream: %w", providerName, err)
 	}
 
-	// Materialise tool calls in their index order.
+	// Materialise tool calls in their index order. Unlike the
+	// non-streaming Complete path, here invalid-JSON arguments get
+	// replaced with `{}` — keeping malformed JSON breaks the NEXT
+	// Complete request because the upstream re-validates msgs.tool_calls
+	// and rejects fragments like literal `{`. The 2026-05-20 P68f
+	// dogfood surface saw exactly this: a parameterless tool call
+	// whose vLLM streaming emitted `{` once and never closed it. The
+	// non-streaming path is forgiving (the upstream returns the full
+	// args block in one piece); the streaming path can't be.
 	if len(builders) > 0 {
 		max := -1
 		for idx := range builders {
@@ -719,18 +727,14 @@ func parseStreamingResponse(providerName string, resp *http.Response, onText fun
 				continue
 			}
 			argStr := b.Args.String()
-			raw := json.RawMessage(argStr)
-			if len(raw) == 0 {
-				raw = json.RawMessage("{}")
-			} else {
+			raw := json.RawMessage("{}")
+			if argStr != "" {
 				var probe interface{}
-				if json.Unmarshal([]byte(argStr), &probe) != nil {
-					// Keep raw bytes even when invalid so the caller can
-					// see what the model emitted and self-correct on the
-					// next turn — matches the non-streaming Complete
-					// fallthrough.
+				if json.Unmarshal([]byte(argStr), &probe) == nil {
 					raw = json.RawMessage(argStr)
 				}
+				// invalid → keep the {} default; emitting fragments
+				// breaks the next request's strict JSON validation.
 			}
 			out.ToolCalls = append(out.ToolCalls, ToolCall{
 				ID:    b.ID,
