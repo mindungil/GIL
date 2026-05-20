@@ -214,6 +214,19 @@ func (d *chatStuckDispatcher) tick(ctx context.Context, buf *chatEventBuffer, re
 				RecentMessages: recent,
 			})
 			if err != nil {
+				// P67l telemetry: when the AdversaryConsult strategy was
+				// actually invoked (passed opt-in / cooldown / budget) but
+				// returned no Decision — empty LLM response, provider
+				// error, etc. — surface a sentinel so the caller emits an
+				// `adversary_consult_empty` event. Without this, the
+				// chess r2 turn 5 case (Monologue fireCount=2 but no
+				// adversary Part) was invisible in event logs.
+				if _, isAdv := st.(stuck.AdversaryConsultStrategy); isAdv {
+					decisions = append(decisions, stuck.Decision{
+						Action:      stuck.ActionAdversaryConsult,
+						Explanation: "ADVERSARY_EMPTY: " + err.Error(),
+					})
+				}
 				continue // ErrNoFallback or transient — try next strategy
 			}
 			decisions = append(decisions, dec)
