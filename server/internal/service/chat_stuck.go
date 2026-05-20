@@ -125,6 +125,32 @@ func jsonMust(v any) []byte {
 	return b
 }
 
+// stuckDecisionPrefix returns the user-visible chat label and the
+// directive text injected into msgs as a user-role message. P68f
+// addresses the 2026-05-20 chess r2 finding: the user-visible
+// `[system] adversary: …` Part never reached the model's inference
+// input, so adversary suggestions were ignored. Now the same text
+// goes both to the chat surface AND into msgs / chat history as a
+// concrete directive the next inference will see.
+//
+// Adversary suggestions are wrapped in "[ADVERSARY INTERVENTION] …
+// Apply this immediately by calling the relevant tool. Do not
+// narrate; act." — aligned with the P68a system prompt's ACT-not-
+// describe contract. AltToolOrder hints get a lighter "Take
+// different action this iteration. Do not narrate; act." tail
+// because they're cheap nudges, not LLM-derived concrete
+// suggestions.
+func stuckDecisionPrefix(dec stuck.Decision) (chatPrefix, injection string) {
+	if dec.Action == stuck.ActionAdversaryConsult {
+		return "[system] adversary",
+			"[ADVERSARY INTERVENTION] " + dec.Explanation +
+				" Apply this immediately by calling the relevant tool. Do not narrate; act."
+	}
+	return "[system] stuck-recover (" + dec.Action.String() + ")",
+		"[STUCK RECOVERY] " + dec.Explanation +
+			" Take a different action this iteration. Do not narrate; act."
+}
+
 // chatHistoryToProviderMessages returns the trailing tail of the chat
 // history as []provider.Message. The dispatcher passes this slice to
 // AdversaryConsultStrategy so the adversary LLM has fresh context for

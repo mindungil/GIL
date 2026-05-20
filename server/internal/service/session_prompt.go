@@ -1044,10 +1044,12 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 			}
 
 			// P67c — Detector tick. Each Decision surfaces as a visible
-			// system Part so the agent's next inference sees it inline;
-			// `adversary_consulted` event mirrors for giltui Tail + audit.
-			// Adversary skip-budget sentinel (Explanation prefix) becomes
-			// the `adversary_skipped_budget` event (no Part) — P67d.
+			// system Part so the user sees it AND, per P68f, is appended
+			// to msgs as a user-role intervention message so the model
+			// sees it on its next inference. Without that injection
+			// (P67 shipped with the user-only Part), the chess r2 sweep
+			// showed the agent ignoring adversary suggestions because
+			// they were never in the inference input.
 			for _, dec := range chatDispatch.tick(ctx, chatBuf, chatHistoryToProviderMessages(s.chatHistory().get(sessionID), 10)) {
 				if dec.Action == stuck.ActionAdversaryConsult && strings.HasPrefix(dec.Explanation, "ADVERSARY_SKIPPED_BUDGET") {
 					emitChatEvent("adversary_skipped_budget", event.SourceSystem, event.KindNote, map[string]any{
@@ -1062,10 +1064,7 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 					})
 					continue
 				}
-				prefix := "[system] stuck-recover (" + dec.Action.String() + ")"
-				if dec.Action == stuck.ActionAdversaryConsult {
-					prefix = "[system] adversary"
-				}
+				prefix, injection := stuckDecisionPrefix(dec)
 				_ = stream.Send(&gilv1.Part{
 					Body: &gilv1.Part_Text{Text: &gilv1.TextDelta{
 						Content: prefix + ": " + dec.Explanation,
@@ -1075,6 +1074,14 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 					"action":      dec.Action.String(),
 					"explanation": dec.Explanation,
 				})
+				// P68f: append as a user-role message so the LLM's next
+				// inference sees the directive in its input messages, not
+				// just as ambient transcript decoration. The "Act, do not
+				// narrate." tail aligns with the P68a system-prompt
+				// behavioral contract.
+				inj := provider.Message{Role: provider.RoleUser, Content: injection}
+				msgs = append(msgs, inj)
+				s.chatHistory().append(sessionID, inj)
 			}
 
 			// P66: track consecutive timeout results. Bash returns
@@ -1165,7 +1172,10 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 	// runs after tool_result pushes; when an agent goes silent
 	// (tool_call_count=0 turns — the real chess "gave up" pattern),
 	// PatternMonologue would never have a chance to fire. One tick
-	// here covers the silent-turn case.
+	// here covers the silent-turn case. Decisions append to chat
+	// history (no msgs to mutate at this point — the for loop has
+	// exited) so the NEXT Prompt() call sees the directive at
+	// hydrate time. P68f.
 	for _, dec := range chatDispatch.tick(ctx, chatBuf, chatHistoryToProviderMessages(s.chatHistory().get(sessionID), 10)) {
 		if dec.Action == stuck.ActionAdversaryConsult && strings.HasPrefix(dec.Explanation, "ADVERSARY_SKIPPED_BUDGET") {
 			emitChatEvent("adversary_skipped_budget", event.SourceSystem, event.KindNote, map[string]any{
@@ -1180,10 +1190,7 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 			})
 			continue
 		}
-		prefix := "[system] stuck-recover (" + dec.Action.String() + ")"
-		if dec.Action == stuck.ActionAdversaryConsult {
-			prefix = "[system] adversary"
-		}
+		prefix, injection := stuckDecisionPrefix(dec)
 		_ = stream.Send(&gilv1.Part{
 			Body: &gilv1.Part_Text{Text: &gilv1.TextDelta{
 				Content: prefix + ": " + dec.Explanation,
@@ -1193,6 +1200,7 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 			"action":      dec.Action.String(),
 			"explanation": dec.Explanation,
 		})
+		s.chatHistory().append(sessionID, provider.Message{Role: provider.RoleUser, Content: injection})
 	}
 
 	// 6. Metrics + Done. P49: include cost_usd so the chat surface
