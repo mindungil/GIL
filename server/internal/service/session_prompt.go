@@ -480,6 +480,7 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 	_ = providerTextLen // wired in P67b emit sites below
 
 	// 1. Resolve / auto-create the session.
+	var sess session.Session
 	sessionID := req.GetSessionId()
 	if sessionID == "" {
 		hint := firstTextPart(req.GetParts())
@@ -489,13 +490,14 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 		// tools have a place to operate. Empty value leaves the
 		// session unrooted; tools then refuse with a clear error
 		// rather than silently writing to /tmp.
-		sess, err := s.repo.Create(ctx, session.CreateInput{
+		created, err := s.repo.Create(ctx, session.CreateInput{
 			GoalHint:   hint,
 			WorkingDir: req.GetWorkingDir(),
 		})
 		if err != nil {
 			return status.Errorf(codes.Internal, "auto-create session: %v", err)
 		}
+		sess = created
 		sessionID = sess.ID
 		if err := stream.Send(&gilv1.Part{
 			Body: &gilv1.Part_SessionAllocated{
@@ -505,13 +507,16 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 			return err
 		}
 	} else {
-		// Verify the session exists; surface NotFound if it doesn't.
-		if _, err := s.repo.Get(ctx, sessionID); err != nil {
+		// Verify the session exists and capture state for the rest
+		// of this Prompt (P68b system prompt cache reads it).
+		loaded, err := s.repo.Get(ctx, sessionID)
+		if err != nil {
 			if errors.Is(err, session.ErrNotFound) {
 				return status.Errorf(codes.NotFound, "session %q not found", sessionID)
 			}
 			return status.Errorf(codes.Internal, "session lookup: %v", err)
 		}
+		sess = loaded
 	}
 
 	// 2. Resolve provider + model. PromptRequest.Model overrides; empty
@@ -666,11 +671,30 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 	// worst-case runaway. Trust agent autonomy within this larger
 	// envelope.
 	const maxAgentTurns = 30
-	systemPrompt := fmt.Sprintf(agent.SystemPrompt, provName, modelID, sessionID)
+	// P68b: persistent system prompt cache. The Sprintf'd template
+	// depends on provider + model + agent only — none of which change
+	// mid-session under normal use. Cache the assembled string on the
+	// session row so subsequent turns reuse the byte-identical prompt
+	// (Anthropic prefix-cache hits) AND so template churn between
+	// daemon releases doesn't break in-flight sessions.
+	cacheKey := provName + ":" + modelID + ":" + agent.Name
+	var systemPrompt string
+	if sess.CachedPromptKey == cacheKey && sess.CachedSystemPrompt != "" {
+		systemPrompt = sess.CachedSystemPrompt
+	} else {
+		systemPrompt = fmt.Sprintf(agent.SystemPrompt, provName, modelID, sessionID)
+		if s.repo != nil {
+			// Persist the freshly-built prompt for next-turn reuse. The
+			// memory block is NOT cached (changes per-turn) — it's
+			// prepended at send time below. Best-effort: a write failure
+			// just means we'll rebuild on the next turn too.
+			_ = s.repo.UpdateCachedSystemPrompt(ctx, sessionID, systemPrompt, cacheKey)
+		}
+	}
 	// P55: prepend recent cross-session memories so the agent has
 	// continuity across sessions. Best-effort: nil DB or query
 	// failures just skip the block; the agent runs with the base
-	// system prompt unchanged.
+	// system prompt unchanged. Per-turn — NOT cached.
 	if s.repo != nil {
 		if memBlock := renderMemoriesForPrompt(loadRecentMemories(ctx, s.repo.DB())); memBlock != "" {
 			systemPrompt = memBlock + systemPrompt
