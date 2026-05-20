@@ -128,12 +128,16 @@ type stubLLM struct {
 }
 
 func (s *stubLLM) Name() string { return "stub" }
-func (s *stubLLM) Complete(ctx context.Context, _ provider.Request) (provider.Response, error) {
+func (s *stubLLM) Complete(ctx context.Context, req provider.Request) (provider.Response, error) {
 	s.calls++
 	if s.err != nil {
 		return provider.Response{}, s.err
 	}
 	return provider.Response{Text: s.text}, nil
+}
+
+func (s *stubLLM) StreamComplete(ctx context.Context, req provider.Request, onText func(string)) (provider.Response, error) {
+	return s.Complete(ctx, req)
 }
 
 // populateNoProgressTest builds a NoProgress-shaped buffer with `iters`

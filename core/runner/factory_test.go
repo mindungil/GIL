@@ -20,6 +20,10 @@ func (fakeProvider) Complete(ctx context.Context, req provider.Request) (provide
 	return provider.Response{}, nil
 }
 
+func (v fakeProvider) StreamComplete(ctx context.Context, req provider.Request, onText func(string)) (provider.Response, error) {
+	return v.Complete(ctx, req)
+}
+
 func TestNewCompactorFromSpec_PrefersWeakModel(t *testing.T) {
 	models := &specpb.ModelConfig{
 		Weak: &specpb.ModelChoice{Provider: "anthropic", ModelId: "haiku"},

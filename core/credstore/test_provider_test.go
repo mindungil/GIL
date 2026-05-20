@@ -39,6 +39,10 @@ func (f *fakeProvider) Complete(_ context.Context, req provider.Request) (provid
 	}, nil
 }
 
+func (f *fakeProvider) StreamComplete(ctx context.Context, req provider.Request, onText func(string)) (provider.Response, error) {
+	return f.Complete(ctx, req)
+}
+
 // TestTestProvider_HappyPath verifies the wizard's smoke check returns a
 // populated TestResult when the underlying provider responds normally.
 // We use a fake builder so the test is hermetic.

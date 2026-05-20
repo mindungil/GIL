@@ -43,6 +43,18 @@ func (r *Retry) Name() string { return r.Wrapped.Name() + "+retry" }
 // supersedes the exponential delay for that one attempt — but never below
 // the configured BaseDelay floor and always interruptible via ctx.
 func (r *Retry) Complete(ctx context.Context, req Request) (Response, error) {
+	return r.StreamComplete(ctx, req, nil)
+}
+
+// StreamComplete forwards streaming to the wrapped provider with the
+// same retry+backoff envelope as Complete. The onText callback is
+// passed through; on a retried attempt that previously emitted some
+// deltas, the caller will see those deltas plus the next attempt's
+// deltas. This is the correct behavior for terminal display
+// (intermediate text wasn't committed to history yet), but tests
+// that rely on per-attempt isolation should pass the inner provider
+// directly. P68c.
+func (r *Retry) StreamComplete(ctx context.Context, req Request, onText func(string)) (Response, error) {
 	max := r.MaxAttempts
 	if max <= 0 {
 		max = 4
@@ -54,7 +66,7 @@ func (r *Retry) Complete(ctx context.Context, req Request) (Response, error) {
 
 	var lastErr error
 	for attempt := 1; attempt <= max; attempt++ {
-		resp, err := r.Wrapped.Complete(ctx, req)
+		resp, err := r.Wrapped.StreamComplete(ctx, req, onText)
 		if err == nil {
 			return resp, nil
 		}

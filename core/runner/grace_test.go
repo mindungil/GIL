@@ -29,6 +29,10 @@ func (g *graceProvider) Complete(_ context.Context, req provider.Request) (provi
 	return provider.Response{Text: g.response}, nil
 }
 
+func (g *graceProvider) StreamComplete(ctx context.Context, req provider.Request, onText func(string)) (provider.Response, error) {
+	return g.Complete(ctx, req)
+}
+
 // newTestLoopForGrace builds a minimal AgentLoop wired for grace-call
 // unit tests. It sets Provider + Providers["anthropic"] to the supplied
 // graceProvider and seeds graceMessages with one prior assistant turn so

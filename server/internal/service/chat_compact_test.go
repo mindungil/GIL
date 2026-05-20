@@ -129,6 +129,10 @@ func (e *errProviderForCompact) Complete(_ context.Context, _ provider.Request) 
 	return provider.Response{}, e.err
 }
 
+func (e *errProviderForCompact) StreamComplete(ctx context.Context, req provider.Request, onText func(string)) (provider.Response, error) {
+	return e.Complete(ctx, req)
+}
+
 // TestChatHistory_NextSeq_AvoidsCollisionAfterCompaction is the seq-counter
 // regression check the P35 design called out: ReplaceInMemory shortens the
 // in-memory slice; the next append must NOT use len() as the seq, because

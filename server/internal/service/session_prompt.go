@@ -770,15 +770,46 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 		if t := req.GetTemperature(); t > 0 {
 			temperature = t
 		}
-		resp, err := prov.Complete(ctx, provider.Request{
+		// P68c: token-delta streaming. provider.StreamComplete fires
+		// onText for every text chunk as it arrives from upstream;
+		// each chunk is wrapped as a Part_Text and sent down the gRPC
+		// stream immediately so the chat surface sees text grow in
+		// real time. Reasoning and tool calls do NOT stream — they
+		// come back in the returned Response only — keeping the
+		// per-delta wire shape simple.
+		//
+		// Defensive fallback: providers whose StreamComplete returns a
+		// populated resp.Text WITHOUT firing onText (test fakes that
+		// just delegate to Complete; future providers that haven't
+		// wired streaming yet) get their text emitted as a single
+		// Part_Text after the call returns. Without this, fakes built
+		// pre-P68c would silently drop assistant text.
+		var (
+			streamSendErr error
+			streamedBytes int
+		)
+		resp, err := prov.StreamComplete(ctx, provider.Request{
 			Model:       modelID,
 			Messages:    msgs,
 			System:      systemPrompt,
 			Tools:       toolDefs,
 			MaxTokens:   2048,
 			Temperature: temperature,
+		}, func(delta string) {
+			if delta == "" || streamSendErr != nil {
+				return
+			}
+			streamedBytes += len(delta)
+			if sendErr := stream.Send(&gilv1.Part{
+				Body: &gilv1.Part_Text{Text: &gilv1.TextDelta{Content: delta}},
+			}); sendErr != nil {
+				streamSendErr = sendErr
+			}
 		})
 		totalLatency += time.Since(t0)
+		if streamSendErr != nil {
+			return streamSendErr
+		}
 		if err != nil {
 			_ = stream.Send(&gilv1.Part{
 				Body: &gilv1.Part_Done{
@@ -787,26 +818,25 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 			})
 			return status.Errorf(codes.Internal, "provider.Complete: %v", err)
 		}
-		totalTokensIn += resp.InputTokens
-		totalTokensOut += resp.OutputTokens
-
-		// P33: stream the upstream-separated chain-of-thought BEFORE the
-		// final answer so the user sees what the model was working
-		// through. Not persisted to chat history (the model regenerates
-		// fresh reasoning each turn — replaying old reasoning wastes
-		// tokens and confuses the next-turn context).
-		if resp.Reasoning != "" {
+		if streamedBytes == 0 && resp.Text != "" {
 			if err := stream.Send(&gilv1.Part{
-				Body: &gilv1.Part_Reasoning{Reasoning: &gilv1.ReasoningDelta{Content: resp.Reasoning}},
+				Body: &gilv1.Part_Text{Text: &gilv1.TextDelta{Content: resp.Text}},
 			}); err != nil {
 				return err
 			}
 		}
+		totalTokensIn += resp.InputTokens
+		totalTokensOut += resp.OutputTokens
 
-		// Stream any text the LLM emitted on this turn.
-		if resp.Text != "" {
+		// P33: stream the upstream-separated chain-of-thought AFTER
+		// the text deltas. Reasoning is not streamed mid-turn in this
+		// contract — we emit it as a single Part_Reasoning once the
+		// turn closes so the rail sees a coherent block. Not persisted
+		// to chat history (the model regenerates fresh reasoning each
+		// turn).
+		if resp.Reasoning != "" {
 			if err := stream.Send(&gilv1.Part{
-				Body: &gilv1.Part_Text{Text: &gilv1.TextDelta{Content: resp.Text}},
+				Body: &gilv1.Part_Reasoning{Reasoning: &gilv1.ReasoningDelta{Content: resp.Reasoning}},
 			}); err != nil {
 				return err
 			}

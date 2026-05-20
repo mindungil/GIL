@@ -22,6 +22,10 @@ func (s *stubProvider) Complete(_ context.Context, _ provider.Request) (provider
 	return provider.Response{}, nil
 }
 
+func (s *stubProvider) StreamComplete(ctx context.Context, req provider.Request, onText func(string)) (provider.Response, error) {
+	return s.Complete(ctx, req)
+}
+
 func TestBuildRoleProviders_OnlyMain(t *testing.T) {
 	t.Parallel()
 

@@ -54,6 +54,10 @@ func (r *subagentTestProvider) Complete(_ context.Context, req provider.Request)
 	}, nil
 }
 
+func (r *subagentTestProvider) StreamComplete(ctx context.Context, req provider.Request, onText func(string)) (provider.Response, error) {
+	return r.Complete(ctx, req)
+}
+
 // recordingTool captures every Run call so we can assert which tools the
 // sub-loop was actually allowed to invoke.
 type recordingTool struct {

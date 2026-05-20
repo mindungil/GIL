@@ -42,6 +42,10 @@ func (p *transientThenSuccessProvider) Complete(_ context.Context, _ provider.Re
 	return p.success, nil
 }
 
+func (p *transientThenSuccessProvider) StreamComplete(ctx context.Context, req provider.Request, onText func(string)) (provider.Response, error) {
+	return p.Complete(ctx, req)
+}
+
 // permanentFailureProvider always errors with a non-retryable
 // string ("401 unauthorized" — auth failures aren't transient).
 type permanentFailureProvider struct{}
@@ -49,6 +53,10 @@ type permanentFailureProvider struct{}
 func (p *permanentFailureProvider) Name() string { return "mock-permanent" }
 func (p *permanentFailureProvider) Complete(_ context.Context, _ provider.Request) (provider.Response, error) {
 	return provider.Response{}, errors.New("401 unauthorized: bad api key")
+}
+
+func (p *permanentFailureProvider) StreamComplete(ctx context.Context, req provider.Request, onText func(string)) (provider.Response, error) {
+	return p.Complete(ctx, req)
 }
 
 func newChatSvcWithProvider(t *testing.T, prov provider.Provider) (*SessionService, string) {

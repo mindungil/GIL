@@ -42,6 +42,10 @@ func (p *budgetTokenProvider) Complete(_ context.Context, _ provider.Request) (p
 	}, nil
 }
 
+func (p *budgetTokenProvider) StreamComplete(ctx context.Context, req provider.Request, onText func(string)) (provider.Response, error) {
+	return p.Complete(ctx, req)
+}
+
 // TestAgentLoop_BudgetTokens_StopsAtCap verifies token-budget enforcement:
 // with a 100-token cap, a 1-token reserve (so the test stays deterministic
 // regardless of the runner's default reserve), and a provider that bills 40
@@ -286,6 +290,10 @@ func (p *budgetThenEndProvider) Complete(_ context.Context, _ provider.Request) 
 		InputTokens:  p.in,
 		OutputTokens: p.out,
 	}, nil
+}
+
+func (p *budgetThenEndProvider) StreamComplete(ctx context.Context, req provider.Request, onText func(string)) (provider.Response, error) {
+	return p.Complete(ctx, req)
 }
 
 // TestAgentLoop_BudgetReserve_VerifyPasses_StatusDone is Phase 19 Track A,

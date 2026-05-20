@@ -330,6 +330,10 @@ func (f *fakeProvider) Complete(_ context.Context, req provider.Request) (provid
 	return f.resp, f.err
 }
 
+func (f *fakeProvider) StreamComplete(ctx context.Context, req provider.Request, onText func(string)) (provider.Response, error) {
+	return f.Complete(ctx, req)
+}
+
 func TestAdversaryConsultStrategy_LLMSuggestsStep(t *testing.T) {
 	fp := &fakeProvider{resp: provider.Response{Text: "Run git status before retrying.\nThis grounds the next decision."}}
 	s := AdversaryConsultStrategy{}

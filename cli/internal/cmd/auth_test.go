@@ -584,6 +584,9 @@ func (fakeOKProvider) Name() string { return "fake" }
 func (fakeOKProvider) Complete(_ context.Context, _ provider.Request) (provider.Response, error) {
 	return provider.Response{Text: "ok", StopReason: "end_turn"}, nil
 }
+func (f fakeOKProvider) StreamComplete(ctx context.Context, req provider.Request, onText func(string)) (provider.Response, error) {
+	return f.Complete(ctx, req)
+}
 
 // TestAuthRoundTrip exercises the full login -> list -> logout -> status
 // cycle via the CLI surface (not the store directly). This is the test that

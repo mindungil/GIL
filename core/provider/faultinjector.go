@@ -75,6 +75,21 @@ func (f *FaultInjector) Name() string {
 // scripted error. On FaultPartial it returns the scripted Response.
 // When the script is exhausted (idx >= len(Script)), all subsequent
 // calls pass through.
+// StreamComplete forwards streaming to Wrapped when the script is
+// exhausted, otherwise applies the scripted fault via Complete (no
+// per-token deltas emitted for scripted faults — the test contract is
+// about error paths, not user-visible streaming). P68c.
+func (f *FaultInjector) StreamComplete(ctx context.Context, req Request, onText func(string)) (Response, error) {
+	resp, err := f.Complete(ctx, req)
+	if err != nil {
+		return resp, err
+	}
+	if onText != nil && resp.Text != "" {
+		onText(resp.Text)
+	}
+	return resp, nil
+}
+
 func (f *FaultInjector) Complete(ctx context.Context, req Request) (Response, error) {
 	i := f.idx.Add(1) - 1
 	if int(i) >= len(f.Script) {

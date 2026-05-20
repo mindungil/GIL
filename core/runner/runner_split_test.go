@@ -143,6 +143,10 @@ func (r *splitRecordingProvider) Complete(_ context.Context, req provider.Reques
 	}, nil
 }
 
+func (r *splitRecordingProvider) StreamComplete(ctx context.Context, req provider.Request, onText func(string)) (provider.Response, error) {
+	return r.Complete(ctx, req)
+}
+
 // noopTool returns ok for any input. Used so tool calls in scripted
 // turns dispatch successfully without touching the filesystem.
 type splitNoopTool struct{ name string }

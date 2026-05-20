@@ -42,6 +42,10 @@ func (l *loopProvider) Complete(_ context.Context, _ provider.Request) (provider
 	}, nil
 }
 
+func (l *loopProvider) StreamComplete(ctx context.Context, req provider.Request, onText func(string)) (provider.Response, error) {
+	return l.Complete(ctx, req)
+}
+
 func TestAgentLoop_HelloWorld_Done(t *testing.T) {
 	dir := t.TempDir()
 
@@ -1077,6 +1081,10 @@ func (m *milestoneFailingProvider) Complete(_ context.Context, _ provider.Reques
 	return provider.Response{}, fmt.Errorf("provider unavailable: simulated network blip")
 }
 
+func (m *milestoneFailingProvider) StreamComplete(ctx context.Context, req provider.Request, onText func(string)) (provider.Response, error) {
+	return m.Complete(ctx, req)
+}
+
 // TestAgentLoop_MilestoneGate_ProviderErrorFallsBack ensures that when the
 // milestone summarizer's provider call errors, the run still completes
 // successfully and we emit a NOTE-kind `memory_milestone_skipped` event
@@ -1166,6 +1174,10 @@ func (r *recordingProvider) Complete(ctx context.Context, req provider.Request) 
 		InputTokens:  10,
 		OutputTokens: 7,
 	}, nil
+}
+
+func (r *recordingProvider) StreamComplete(ctx context.Context, req provider.Request, onText func(string)) (provider.Response, error) {
+	return r.Complete(ctx, req)
 }
 
 func (r *recordingProvider) anySysContains(sub string) bool {
@@ -1506,6 +1518,10 @@ func (p *interceptingProv) Complete(_ context.Context, req provider.Request) (pr
 		ToolCalls:  []provider.ToolCall{{ID: "x", Name: "noop", Input: json.RawMessage(`{}`)}},
 		StopReason: "tool_use",
 	}, nil
+}
+
+func (p *interceptingProv) StreamComplete(ctx context.Context, req provider.Request, onText func(string)) (provider.Response, error) {
+	return p.Complete(ctx, req)
 }
 
 func TestAgentLoop_AdversaryConsult_AppendsSuggestionToNextSystemPrompt(t *testing.T) {
@@ -1854,6 +1870,10 @@ func (p *subagentRecordingProvider) Complete(_ context.Context, req provider.Req
 	}, nil
 }
 
+func (p *subagentRecordingProvider) StreamComplete(ctx context.Context, req provider.Request, onText func(string)) (provider.Response, error) {
+	return p.Complete(ctx, req)
+}
+
 // TestAgentLoop_SubagentBranch_InjectsFindingIntoSystemPrompt verifies that
 // SubagentBranchStrategy:
 //  1. Fires RunSubagent on the parent AgentLoop (calls the sub-provider).
@@ -1978,6 +1998,10 @@ func (p *systemRecordingProvider) Complete(_ context.Context, req provider.Reque
 	}
 	// Default: end immediately so the loop terminates quickly.
 	return provider.Response{Text: "ok", StopReason: "end_turn"}, nil
+}
+
+func (p *systemRecordingProvider) StreamComplete(ctx context.Context, req provider.Request, onText func(string)) (provider.Response, error) {
+	return p.Complete(ctx, req)
 }
 
 func TestAgentLoop_DiscoversAGENTSMDFromWorkspace(t *testing.T) {
@@ -2349,6 +2373,10 @@ func (c *capturedReqProvider) Complete(_ context.Context, req provider.Request) 
 		InputTokens:  10,
 		OutputTokens: 4,
 	}, nil
+}
+
+func (c *capturedReqProvider) StreamComplete(ctx context.Context, req provider.Request, onText func(string)) (provider.Response, error) {
+	return c.Complete(ctx, req)
 }
 
 // minimalSpec returns a FrozenSpec that allows the loop to run for at most one
