@@ -968,6 +968,13 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 					})
 					continue
 				}
+				if dec.Action == stuck.ActionAdversaryConsult && strings.HasPrefix(dec.Explanation, "ADVERSARY_EMPTY") {
+					emitChatEvent("adversary_consult_empty", event.SourceSystem, event.KindNote, map[string]any{
+						"session": sessionID,
+						"reason":  strings.TrimPrefix(dec.Explanation, "ADVERSARY_EMPTY: "),
+					})
+					continue
+				}
 				prefix := "[system] stuck-recover (" + dec.Action.String() + ")"
 				if dec.Action == stuck.ActionAdversaryConsult {
 					prefix = "[system] adversary"
@@ -1076,6 +1083,13 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 		if dec.Action == stuck.ActionAdversaryConsult && strings.HasPrefix(dec.Explanation, "ADVERSARY_SKIPPED_BUDGET") {
 			emitChatEvent("adversary_skipped_budget", event.SourceSystem, event.KindNote, map[string]any{
 				"session": sessionID,
+			})
+			continue
+		}
+		if dec.Action == stuck.ActionAdversaryConsult && strings.HasPrefix(dec.Explanation, "ADVERSARY_EMPTY") {
+			emitChatEvent("adversary_consult_empty", event.SourceSystem, event.KindNote, map[string]any{
+				"session": sessionID,
+				"reason":  strings.TrimPrefix(dec.Explanation, "ADVERSARY_EMPTY: "),
 			})
 			continue
 		}

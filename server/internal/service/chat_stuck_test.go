@@ -233,6 +233,13 @@ func TestChatStuckDispatcher_BudgetCap(t *testing.T) {
 }
 
 func TestChatStuckDispatcher_AdversaryErrorDoesNotCrash(t *testing.T) {
+	// P67l: an errored AdversaryConsult now produces a sentinel
+	// Decision (Action=AdversaryConsult, Explanation=ADVERSARY_EMPTY:...)
+	// so the caller can emit `adversary_consult_empty` telemetry.
+	// Without this, opt-in dispatches that silently fail (empty LLM
+	// response, provider timeout, etc.) would be invisible — the chess
+	// r2 turn 5 case (Monologue fireCount=2 but no adversary Part) is
+	// exactly the failure mode this guard catches.
 	buf := newChatEventBuffer(200)
 	populateNoProgressTest(buf, 4)
 	stub := &stubLLM{err: context.DeadlineExceeded}
@@ -242,7 +249,29 @@ func TestChatStuckDispatcher_AdversaryErrorDoesNotCrash(t *testing.T) {
 		provider:   stub, model: "m", riskAdv: "m",
 	}
 	decs := disp.tick(context.Background(), buf, nil)
-	require.Empty(t, decs, "errored strategy returns no Decision; caller still alive")
+	require.Len(t, decs, 1, "errored AdversaryConsult must surface ADVERSARY_EMPTY sentinel")
+	require.Equal(t, stuck.ActionAdversaryConsult, decs[0].Action)
+	require.Contains(t, decs[0].Explanation, "ADVERSARY_EMPTY:")
+}
+
+// TestChatStuckDispatcher_AdversaryEmptyResponseSentinel locks the
+// telemetry-on-empty-response path. AdversaryConsultStrategy.Apply
+// returns ErrNoFallback when the LLM responds with empty/whitespace
+// text (recovery.go:337-339); the dispatcher must turn that into a
+// sentinel Decision rather than dropping the event silently.
+func TestChatStuckDispatcher_AdversaryEmptyResponseSentinel(t *testing.T) {
+	buf := newChatEventBuffer(200)
+	populateNoProgressTest(buf, 4)
+	stub := &stubLLM{text: "   \n  "} // whitespace-only → suggestion="" → ErrNoFallback
+	disp := &chatStuckDispatcher{
+		detector:   &stuck.Detector{},
+		strategies: []stuck.Strategy{stuck.AdversaryConsultStrategy{}},
+		provider:   stub, model: "m", riskAdv: "m",
+	}
+	decs := disp.tick(context.Background(), buf, nil)
+	require.Len(t, decs, 1)
+	require.Equal(t, stuck.ActionAdversaryConsult, decs[0].Action)
+	require.Contains(t, decs[0].Explanation, "ADVERSARY_EMPTY:")
 }
 
 func TestChatPrompt_CrossTurnNoProgressDetected(t *testing.T) {
