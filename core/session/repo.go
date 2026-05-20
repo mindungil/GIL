@@ -33,6 +33,14 @@ type Session struct {
 	ParentSessionID string
 	SubagentDepth   int32
 	SubagentLabel   string
+
+	// CachedSystemPrompt holds the assembled chat system prompt for this
+	// session (schema v7, P68b). Empty → no cache yet, build + save on
+	// next Prompt(). CachedPromptKey is the cache invalidation signature
+	// (provider + model + agent profile); when it changes the cache is
+	// dropped. See server/internal/service/session_prompt.go.
+	CachedSystemPrompt string
+	CachedPromptKey    string
 }
 
 // CreateInput captures the fields the caller supplies for a new session.
@@ -94,13 +102,15 @@ func (r *Repo) Get(ctx context.Context, id string) (Session, error) {
 	row := r.db.QueryRowContext(ctx, `
 		SELECT id, status, created_at, updated_at, spec_id, working_dir, goal_hint,
 		       total_tokens, total_cost_usd,
-		       parent_session_id, subagent_depth, subagent_label
+		       parent_session_id, subagent_depth, subagent_label,
+		       cached_system_prompt, cached_prompt_key
 		FROM sessions WHERE id = ?
 	`, id)
 	var s Session
 	err := row.Scan(&s.ID, &s.Status, &s.CreatedAt, &s.UpdatedAt, &s.SpecID, &s.WorkingDir, &s.GoalHint,
 		&s.TotalTokens, &s.TotalCostUSD,
-		&s.ParentSessionID, &s.SubagentDepth, &s.SubagentLabel)
+		&s.ParentSessionID, &s.SubagentDepth, &s.SubagentLabel,
+		&s.CachedSystemPrompt, &s.CachedPromptKey)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Session{}, ErrNotFound
 	}
@@ -108,6 +118,22 @@ func (r *Repo) Get(ctx context.Context, id string) (Session, error) {
 		return Session{}, fmt.Errorf("session.Get: %w", err)
 	}
 	return s, nil
+}
+
+// UpdateCachedSystemPrompt persists the assembled chat system prompt
+// and its invalidation key for `id`. Schema v7 / P68b. The caller
+// computes the key from provider + model + agent profile so a change
+// in any of those drops the cache on the next Get + key compare.
+func (r *Repo) UpdateCachedSystemPrompt(ctx context.Context, id, prompt, key string) error {
+	_, err := r.db.ExecContext(ctx, `
+		UPDATE sessions
+		SET cached_system_prompt = ?, cached_prompt_key = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, prompt, key, id)
+	if err != nil {
+		return fmt.Errorf("session.UpdateCachedSystemPrompt: %w", err)
+	}
+	return nil
 }
 
 // List returns sessions ordered by created_at desc, optionally filtered by status.
@@ -118,7 +144,8 @@ func (r *Repo) List(ctx context.Context, opts ListOptions) ([]Session, error) {
 	}
 	q := `SELECT id, status, created_at, updated_at, spec_id, working_dir, goal_hint,
 	             total_tokens, total_cost_usd,
-	             parent_session_id, subagent_depth, subagent_label
+	             parent_session_id, subagent_depth, subagent_label,
+	             cached_system_prompt, cached_prompt_key
 	      FROM sessions`
 	args := []any{}
 	if opts.StatusFilter != "" {
@@ -139,7 +166,8 @@ func (r *Repo) List(ctx context.Context, opts ListOptions) ([]Session, error) {
 		var s Session
 		if err := rows.Scan(&s.ID, &s.Status, &s.CreatedAt, &s.UpdatedAt, &s.SpecID, &s.WorkingDir, &s.GoalHint,
 			&s.TotalTokens, &s.TotalCostUSD,
-			&s.ParentSessionID, &s.SubagentDepth, &s.SubagentLabel); err != nil {
+			&s.ParentSessionID, &s.SubagentDepth, &s.SubagentLabel,
+			&s.CachedSystemPrompt, &s.CachedPromptKey); err != nil {
 			return nil, fmt.Errorf("session.List scan: %w", err)
 		}
 		out = append(out, s)
@@ -224,7 +252,8 @@ func (r *Repo) ListChildren(ctx context.Context, parentID string) ([]Session, er
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT id, status, created_at, updated_at, spec_id, working_dir, goal_hint,
 		       total_tokens, total_cost_usd,
-		       parent_session_id, subagent_depth, subagent_label
+		       parent_session_id, subagent_depth, subagent_label,
+		       cached_system_prompt, cached_prompt_key
 		FROM sessions
 		WHERE parent_session_id = ?
 		ORDER BY created_at ASC
@@ -239,7 +268,8 @@ func (r *Repo) ListChildren(ctx context.Context, parentID string) ([]Session, er
 		var s Session
 		if err := rows.Scan(&s.ID, &s.Status, &s.CreatedAt, &s.UpdatedAt, &s.SpecID, &s.WorkingDir, &s.GoalHint,
 			&s.TotalTokens, &s.TotalCostUSD,
-			&s.ParentSessionID, &s.SubagentDepth, &s.SubagentLabel); err != nil {
+			&s.ParentSessionID, &s.SubagentDepth, &s.SubagentLabel,
+			&s.CachedSystemPrompt, &s.CachedPromptKey); err != nil {
 			return nil, fmt.Errorf("session.ListChildren scan: %w", err)
 		}
 		out = append(out, s)

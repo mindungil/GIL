@@ -8,7 +8,7 @@ import (
 
 // currentSchemaVersion is the latest schema version. When new migrations
 // are added, this constant must be incremented to match the new version.
-const currentSchemaVersion = 6
+const currentSchemaVersion = 7
 
 // migrations is a slice of SQL migration strings, indexed by version-1.
 // For example, migrations[0] is the SQL for version 1, migrations[1] is for
@@ -127,6 +127,19 @@ var migrations = []string{
 		ON session_memories(created_at);
 	CREATE INDEX IF NOT EXISTS idx_session_memories_session
 		ON session_memories(session_id);
+	`,
+	// v7 — persistent system prompt cache (P68b). Per Hermes pattern
+	// (docs/research/2026-05-20-harness-comparison/hermes.md §7), the
+	// assembled chat system prompt is byte-stable for the lifetime of
+	// a session unless the model/agent profile changes. Caching it on
+	// the session row saves the per-turn fmt.Sprintf cost AND — more
+	// importantly — sets up Anthropic prefix-cache hits since the
+	// cached bytes are identical across turns. cached_prompt_key is a
+	// short cache invalidation signature (provider + model + agent);
+	// when it changes we drop the cache and rebuild.
+	`
+	ALTER TABLE sessions ADD COLUMN cached_system_prompt TEXT NOT NULL DEFAULT '';
+	ALTER TABLE sessions ADD COLUMN cached_prompt_key    TEXT NOT NULL DEFAULT '';
 	`,
 }
 
