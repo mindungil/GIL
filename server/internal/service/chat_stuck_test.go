@@ -7,6 +7,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"strings"
+
 	"github.com/mindungil/gil/core/event"
 	"github.com/mindungil/gil/core/provider"
 	"github.com/mindungil/gil/core/stuck"
@@ -524,4 +526,54 @@ func TestChatPrompt_Production_EscalatesToAdversaryOnSecondFire(t *testing.T) {
 		"1st RepeatedActionError fire must hit AltToolOrder:\n%s", allText)
 	require.Contains(t, allText, "[system] adversary",
 		"2nd RepeatedActionError fire must escalate to AdversaryConsult:\n%s", allText)
+
+	// P68f: dispatcher must ALSO inject the directive into chat history
+	// as a user-role message so the next inference sees it (not just
+	// the chat-surface decoration). The 2026-05-20 chess r2 sweep
+	// proved that the [system] Part alone was insufficient — the
+	// agent never saw the adversary suggestion in its message input.
+	hist := svc.chatHistory().get(sid)
+	var stuckInject, advInject bool
+	for _, m := range hist {
+		if m.Role != provider.RoleUser {
+			continue
+		}
+		if strings.Contains(m.Content, "[STUCK RECOVERY]") &&
+			strings.Contains(m.Content, "Do not narrate; act.") {
+			stuckInject = true
+		}
+		if strings.Contains(m.Content, "[ADVERSARY INTERVENTION]") &&
+			strings.Contains(m.Content, "Apply this immediately") {
+			advInject = true
+		}
+	}
+	require.True(t, stuckInject, "AltToolOrder fire must inject [STUCK RECOVERY] user msg into chat history; got hist=%+v", hist)
+	require.True(t, advInject, "AdversaryConsult fire must inject [ADVERSARY INTERVENTION] user msg into chat history; got hist=%+v", hist)
+}
+
+// TestStuckDecisionPrefix pins the wording of the user-visible chat
+// label and the injected user-role directive for both action types.
+// Future refactors must keep "Do not narrate; act." in the directive
+// — that's the load-bearing imperative aligned with the P68a system
+// prompt's ACT-not-describe contract.
+func TestStuckDecisionPrefix(t *testing.T) {
+	advCase := stuck.Decision{
+		Action:      stuck.ActionAdversaryConsult,
+		Explanation: "Read a.go first.",
+	}
+	prefix, inj := stuckDecisionPrefix(advCase)
+	require.Equal(t, "[system] adversary", prefix)
+	require.Contains(t, inj, "[ADVERSARY INTERVENTION]")
+	require.Contains(t, inj, "Read a.go first.")
+	require.Contains(t, inj, "Do not narrate; act.")
+
+	altCase := stuck.Decision{
+		Action:      stuck.ActionAltToolOrder,
+		Explanation: "Switch tools.",
+	}
+	prefix, inj = stuckDecisionPrefix(altCase)
+	require.Equal(t, "[system] stuck-recover ("+stuck.ActionAltToolOrder.String()+")", prefix)
+	require.Contains(t, inj, "[STUCK RECOVERY]")
+	require.Contains(t, inj, "Switch tools.")
+	require.Contains(t, inj, "Do not narrate; act.")
 }
