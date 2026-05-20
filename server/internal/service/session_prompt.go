@@ -2,9 +2,7 @@ package service
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,6 +22,7 @@ import (
 	"github.com/mindungil/gil/core/provider"
 	"github.com/mindungil/gil/core/session"
 	"github.com/mindungil/gil/core/specstore"
+	"github.com/mindungil/gil/core/stuck"
 	"github.com/mindungil/gil/core/workspace"
 	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
 )
@@ -433,6 +432,20 @@ System context: provider=%s model=%s session=%s
 func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionService_PromptServer) error {
 	ctx := stream.Context()
 
+	// AdversaryModel for this Prompt — empty disables AdversaryConsult
+	// (P67c hands this to the chatStuckDispatcher; AltToolOrder still
+	// fires regardless). Stashed early so the value survives auto-
+	// create + history hydration below.
+	adversaryModel := req.GetAdversaryModel()
+	_ = adversaryModel // wired into dispatcher in P67c
+
+	// providerTextLen accumulates streamed assistant text length for
+	// the provider_response event emitted at turn close. Detector's
+	// Monologue check uses length thresholds only — we never store
+	// the actual text in the ring buffer to avoid context bloat.
+	var providerTextLen int
+	_ = providerTextLen // wired in P67b emit sites below
+
 	// 1. Resolve / auto-create the session.
 	sessionID := req.GetSessionId()
 	if sessionID == "" {
@@ -669,11 +682,32 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 	// have one). Observability only. Reset to nil after one signal
 	// per turn so a real productive call sequence after the stuck
 	// run isn't double-flagged.
-	const chatStuckRepeats = 3
-	var (
-		chatCallSigs   []string
-		chatStuckFired bool
-	)
+	// P67b — per-session event ring buffer fed into core/stuck/Detector.
+	// resetTurn bumps iter and clears per-turn dedup state. Push
+	// iteration_start so the Detector's NoProgress check can mark this
+	// turn's iteration boundary (cross-turn accumulation is what catches
+	// the chess "varied-but-futile" pattern P39 ad-hoc misses).
+	chatBuf := s.chatEventBufFor(sessionID)
+	chatBuf.resetTurn()
+	chatBuf.push(event.Event{
+		Type: "iteration_start",
+		Data: jsonMust(map[string]any{"iter": chatBuf.iter}),
+	})
+
+	// P67c — Detector dispatcher. AltToolOrder fires always (chat-only
+	// strategies that don't need an LLM); AdversaryConsult only when
+	// adversaryModel is set (PromptRequest.adversary_model). Provider
+	// and model are already resolved at this point.
+	chatDispatch := &chatStuckDispatcher{
+		detector: &stuck.Detector{},
+		strategies: []stuck.Strategy{
+			stuck.AltToolOrderStrategy{},
+			stuck.AdversaryConsultStrategy{},
+		},
+		provider: prov,
+		model:    modelID,
+		riskAdv:  adversaryModel,
+	}
 
 	// P66: consecutive-tool-timeout abort. Eval-loop task17 SPMC
 	// burned 32 minutes in a single turn when the agent's lock-free
@@ -744,6 +778,18 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 				return err
 			}
 		}
+		// P67b/g — push provider_response with text length AND tool_calls
+		// count. Monologue checker reads the `tool_calls` field; without
+		// it, 3 silent turns (the real chess "agent gave up" pattern)
+		// never trigger PatternMonologue. text_len is for context.
+		providerTextLen += len(resp.Text)
+		chatBuf.push(event.Event{
+			Type: "provider_response",
+			Data: jsonMust(map[string]any{
+				"text_len":   len(resp.Text),
+				"tool_calls": len(resp.ToolCalls),
+			}),
+		})
 
 		// If no tool calls, the LLM thinks it's done. Apply the C1
 		// verify-gate before letting the turn close.
@@ -823,31 +869,25 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 				"name":  call.Name,
 				"input": string(call.Input),
 			})
-			// P39 chat stuck detection: hash (name + input) and check
-			// for consecutive identical calls. Single signal per turn
-			// once the streak fires, then quiet — productive calls
-			// after the stuck run shouldn't double-flag. Surfaces both
-			// as an event (for giltui Tail subscribers + audit) AND as
-			// a visible Part text so the chat user sees the warning
-			// inline without needing a separate observer.
-			if !chatStuckFired {
-				chatCallSigs = append(chatCallSigs, chatStuckSig(call.Name, call.Input))
-				if chatStuckCheck(chatCallSigs, chatStuckRepeats) {
-					emitChatEvent("stuck_detected", event.SourceSystem, event.KindNote, map[string]any{
-						"pattern": "repeated_action_observation",
-						"tool":    call.Name,
-						"count":   chatStuckRepeats,
-						"surface": "chat",
-					})
-					_ = stream.Send(&gilv1.Part{
-						Body: &gilv1.Part_Text{Text: &gilv1.TextDelta{
-							Content: fmt.Sprintf("[system] stuck_detected: %s called %d× with identical input — refine the prompt or stop the run",
-								call.Name, chatStuckRepeats),
-						}},
-					})
-					chatStuckFired = true
-				}
+			// P67b — mirror tool_call into the chat Detector ring buffer.
+			// Synthetic verify_run is emitted *before* dispatch when the
+			// agent invokes the verify tool, so Detector's NoProgress
+			// check has the iteration-boundary signal it needs.
+			chatBuf.push(event.Event{
+				Type: "tool_call",
+				Data: jsonMust(map[string]any{
+					"id":    call.ID,
+					"name":  call.Name,
+					"input": string(call.Input),
+				}),
+			})
+			if call.Name == "verify" {
+				chatBuf.push(event.Event{Type: "verify_run"})
 			}
+			// (P39 ad-hoc stuck detector removed in P67e — Detector's
+			// PatternRepeatedActionObservation covers the same case
+			// via chatStuckDispatcher.tick after the tool_result push
+			// below.)
 			result, runErr := dispatchTool(ctx, registry, sessionID, call)
 			if runErr != nil {
 				result = provider.ToolResult{
@@ -893,6 +933,55 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 				"content":  result.Content,
 				"is_error": result.IsError,
 			})
+			// P67b — mirror tool_result into the chat Detector buffer.
+			// Synthetic verify_result with passed=(!IsError) follows when
+			// the tool name is verify; Detector's NoProgress uses that to
+			// count "verifier still failing" iterations. Schema must
+			// match core/runner's emit shape (snake_case `is_error`,
+			// `content` field) — Detector's pattern checks use these
+			// exact field names.
+			chatBuf.push(event.Event{
+				Type: "tool_result",
+				Data: jsonMust(map[string]any{
+					"id":       call.ID,
+					"name":     call.Name,
+					"is_error": result.IsError,
+					"content":  truncateForDetector(result.Content),
+				}),
+			})
+			if call.Name == "verify" {
+				chatBuf.push(event.Event{
+					Type: "verify_result",
+					Data: jsonMust(map[string]any{"passed": !result.IsError}),
+				})
+			}
+
+			// P67c — Detector tick. Each Decision surfaces as a visible
+			// system Part so the agent's next inference sees it inline;
+			// `adversary_consulted` event mirrors for giltui Tail + audit.
+			// Adversary skip-budget sentinel (Explanation prefix) becomes
+			// the `adversary_skipped_budget` event (no Part) — P67d.
+			for _, dec := range chatDispatch.tick(ctx, chatBuf, chatHistoryToProviderMessages(s.chatHistory().get(sessionID), 10)) {
+				if dec.Action == stuck.ActionAdversaryConsult && strings.HasPrefix(dec.Explanation, "ADVERSARY_SKIPPED_BUDGET") {
+					emitChatEvent("adversary_skipped_budget", event.SourceSystem, event.KindNote, map[string]any{
+						"session": sessionID,
+					})
+					continue
+				}
+				prefix := "[system] stuck-recover (" + dec.Action.String() + ")"
+				if dec.Action == stuck.ActionAdversaryConsult {
+					prefix = "[system] adversary"
+				}
+				_ = stream.Send(&gilv1.Part{
+					Body: &gilv1.Part_Text{Text: &gilv1.TextDelta{
+						Content: prefix + ": " + dec.Explanation,
+					}},
+				})
+				emitChatEvent("adversary_consulted", event.SourceSystem, event.KindNote, map[string]any{
+					"action":      dec.Action.String(),
+					"explanation": dec.Explanation,
+				})
+			}
 
 			// P66: track consecutive timeout results. Bash returns
 			// `timeout after Ns\n...`; verify returns `[TIMEOUT] ...`.
@@ -976,6 +1065,33 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 			},
 		})
 		return status.Errorf(codes.FailedPrecondition, "%s", msg)
+	}
+
+	// P67g — end-of-Prompt dispatcher tick. The intra-loop tick only
+	// runs after tool_result pushes; when an agent goes silent
+	// (tool_call_count=0 turns — the real chess "gave up" pattern),
+	// PatternMonologue would never have a chance to fire. One tick
+	// here covers the silent-turn case.
+	for _, dec := range chatDispatch.tick(ctx, chatBuf, chatHistoryToProviderMessages(s.chatHistory().get(sessionID), 10)) {
+		if dec.Action == stuck.ActionAdversaryConsult && strings.HasPrefix(dec.Explanation, "ADVERSARY_SKIPPED_BUDGET") {
+			emitChatEvent("adversary_skipped_budget", event.SourceSystem, event.KindNote, map[string]any{
+				"session": sessionID,
+			})
+			continue
+		}
+		prefix := "[system] stuck-recover (" + dec.Action.String() + ")"
+		if dec.Action == stuck.ActionAdversaryConsult {
+			prefix = "[system] adversary"
+		}
+		_ = stream.Send(&gilv1.Part{
+			Body: &gilv1.Part_Text{Text: &gilv1.TextDelta{
+				Content: prefix + ": " + dec.Explanation,
+			}},
+		})
+		emitChatEvent("adversary_consulted", event.SourceSystem, event.KindNote, map[string]any{
+			"action":      dec.Action.String(),
+			"explanation": dec.Explanation,
+		})
 	}
 
 	// 6. Metrics + Done. P49: include cost_usd so the chat surface
@@ -1247,16 +1363,6 @@ func addSecretsFromDotenv(path string) {
 	}
 }
 
-// chatStuckSig returns a short stable signature for a chat-side
-// tool call so the P39 chat stuck detector can compare consecutive
-// invocations without storing the full input JSON. Uses sha256
-// truncated to 8 bytes (16 hex chars) — collision risk is negligible
-// at the 3-call window we check against.
-func chatStuckSig(name string, input []byte) string {
-	h := sha256.Sum256(append([]byte(name+"\x00"), input...))
-	return hex.EncodeToString(h[:8])
-}
-
 // isToolTimeoutResult reports whether a tool-result Content body
 // indicates a tool-internal timeout (vs a regular error). The two
 // shapes in use (P66):
@@ -1276,23 +1382,6 @@ func isToolTimeoutResult(content string) bool {
 		return true
 	}
 	return false
-}
-
-// chatStuckCheck reports whether the trailing window of sigs all
-// match — i.e., the same tool-call signature has fired `window`
-// times consecutively. Pure function; tests pin the behavior
-// without spinning up a full chat agent loop.
-func chatStuckCheck(sigs []string, window int) bool {
-	if window <= 0 || len(sigs) < window {
-		return false
-	}
-	tail := sigs[len(sigs)-window:]
-	for _, s := range tail[1:] {
-		if s != tail[0] {
-			return false
-		}
-	}
-	return true
 }
 
 // chatHistory lazily allocates the message log map. Stored on the

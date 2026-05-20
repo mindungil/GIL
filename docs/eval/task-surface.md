@@ -715,3 +715,43 @@ chess에선 **100% 결정론적**. variance 문제가 아니라 reorientation �
 - 단순 retry/variance로도 안 풀림.
 - 다음 단계: A1 — `session_prompt.go:836-844` stuck_detected emit 시
   `AdversaryConsultStrategy.Consult()` 호출 추가, Risk.AdversaryModel opt-in.
+
+## Chess T=0.3 +adversary +escalation — 2026-05-20
+
+`ADVERSARY_MODEL=qwen3.6-27b bash docs/eval/variance-probe.sh 3 07 0.3`
+(`/tmp/gil-variance-probe-3590900/`). Daemon at v0.3.0-alpha.2-31-gbbf874f
+(P67g monologue+silent-turn-tick + P67i pattern-fire escalation).
+
+| Task | PASS/N | turns | wall | max-turn-tok | recov | prem-stop | ovf |
+|---|---|---|---|---|---|---|---|
+| 07-chess @ T=0.3 +adv | **2/3** | 4-5 | 809-1578s | 452k-1.36M | 3-4 | **1/3** | 0/3 |
+
+Adversary firings (in trace `response_tail`, not in dogfood stdout log):
+- r1: 0 — agent succeeded without needing stuck recovery (turn 1-4 verify_missing
+  with decreasing tool counts, turn 5 end_turn 5 tools → PASS)
+- r2: 1 — turn 4 fired Monologue → AdversaryConsult ("agent is stuck diagnosing
+  perft-values=2x bug without inspecting code"). turn 5 fired NoProgress →
+  AltToolOrder. Still FAIL (agent kept talking, didn't act). Edge case: Monologue
+  also reached escalation threshold at turn 5 but no second adversary Part
+  surfaced — likely empty `resp.Text` from adversary LLM (Apply returns
+  ErrNoFallback when suggestion is empty).
+- r3: 0 — agent gave up at turn 2-3 (0/1 tool calls) but recovered at turn 4
+  (17 tools) → PASS without dispatcher intervention.
+
+### Finding
+
+**Reorientation seam works on the case where it fires.** r2 turn 4
+demonstrates Detector → Monologue → AdversaryConsult → visible Part end-to-end
+in production. N=3 is small for a variance claim, but 2/3 PASS vs baseline
+0/5 PASS is a meaningful directional shift; the remaining FAIL (r2) is where
+agent ignored both adversary and AltToolOrder hints — a separate failure mode
+(suggestion strength) not a wiring problem.
+
+### Open
+
+- Monologue 2nd-fire escalation: r2 turn 5 didn't surface a second adversary
+  Part despite fireCount=2. Suspect empty/whitespace LLM response → Apply
+  ErrNoFallback. Add adversary-call telemetry to confirm and (separately)
+  decide whether to retry or fall back to a hard-coded "act now" stub.
+- N=3 is too small for variance claims. Need N≥10 once eval-loop bandwidth
+  recovers (next workstream).

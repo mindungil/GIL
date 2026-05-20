@@ -79,6 +79,13 @@ type SessionService struct {
 	// has its own internal mutex for entry access.
 	workingSetMu sync.Mutex
 	workingSet   *workingSet
+
+	// P67 — chat-side Detector ring buffer. Per-session in-memory only;
+	// daemon restart resets stuck history (acceptable, see A1b spec
+	// Non-goals). Lazily initialised; map mutex covers map mutation
+	// only — each buffer has its own mutex for entry-level ops.
+	chatStuckMu  sync.Mutex
+	chatStuckBuf map[string]*chatEventBuffer
 }
 
 // NewSessionService returns a new SessionService backed by the provided Repo.
@@ -97,6 +104,23 @@ func NewSessionService(repo *session.Repo, progress ProgressGetter) *SessionServ
 		subagentRegistry: newSubagentRegistry(),
 		subagentReleases: newSubagentReleaseRegistry(),
 	}
+}
+
+// chatEventBufFor returns the per-session ring buffer, lazily
+// initialising the map and the per-session buffer on first use.
+// Goroutine-safe via chatStuckMu (map) + per-buffer mutex (entries).
+func (s *SessionService) chatEventBufFor(sessionID string) *chatEventBuffer {
+	s.chatStuckMu.Lock()
+	defer s.chatStuckMu.Unlock()
+	if s.chatStuckBuf == nil {
+		s.chatStuckBuf = make(map[string]*chatEventBuffer)
+	}
+	b, ok := s.chatStuckBuf[sessionID]
+	if !ok {
+		b = newChatEventBuffer(200)
+		s.chatStuckBuf[sessionID] = b
+	}
+	return b
 }
 
 // registerSubagentRelease pins the release closure returned by

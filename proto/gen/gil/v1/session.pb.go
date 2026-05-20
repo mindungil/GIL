@@ -569,9 +569,17 @@ type PromptRequest struct {
 	// showed lower T (0.2–0.3) lifts boundary tasks like chess perft
 	// and lock-free SPMC. Per-call so chat surface can stay at 0.7
 	// while dogfood probes use 0.3.
-	Temperature   float64 `protobuf:"fixed64,6,opt,name=temperature,proto3" json:"temperature,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Temperature float64 `protobuf:"fixed64,6,opt,name=temperature,proto3" json:"temperature,omitempty"`
+	// adversary_model identifies a model to consult when the daemon's
+	// chat-side stuck Detector returns a signal that StuckStrategy
+	// routes to AdversaryConsultStrategy. Empty string disables the
+	// adversary path (other strategies still fire). 2026-05-19 chess
+	// N=5 @ T=0.3 was 0/5 with 5/5 prem-stop — the boundary is
+	// reorientation-shaped and adversary suggestion is the only known
+	// fix (see docs/superpowers/specs/2026-05-19-a1b-...).
+	AdversaryModel string `protobuf:"bytes,7,opt,name=adversary_model,json=adversaryModel,proto3" json:"adversary_model,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *PromptRequest) Reset() {
@@ -644,6 +652,13 @@ func (x *PromptRequest) GetTemperature() float64 {
 		return x.Temperature
 	}
 	return 0
+}
+
+func (x *PromptRequest) GetAdversaryModel() string {
+	if x != nil {
+		return x.AdversaryModel
+	}
+	return ""
 }
 
 // PromptPart is a single piece of the user message. V1 ships only the
@@ -1321,7 +1336,7 @@ const file_gil_v1_session_proto_rawDesc = "" +
 	"\x02id\x18\x01 \x01(\tR\x02id\"1\n" +
 	"\x0eDeleteResponse\x12\x1f\n" +
 	"\vfreed_bytes\x18\x01 \x01(\x03R\n" +
-	"freedBytes\"\xdc\x01\n" +
+	"freedBytes\"\x85\x02\n" +
 	"\rPromptRequest\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12(\n" +
@@ -1330,7 +1345,8 @@ const file_gil_v1_session_proto_rawDesc = "" +
 	"\x05model\x18\x04 \x01(\v2\x13.gil.v1.ModelChoiceR\x05model\x12\x1f\n" +
 	"\vworking_dir\x18\x05 \x01(\tR\n" +
 	"workingDir\x12 \n" +
-	"\vtemperature\x18\x06 \x01(\x01R\vtemperature\"*\n" +
+	"\vtemperature\x18\x06 \x01(\x01R\vtemperature\x12'\n" +
+	"\x0fadversary_model\x18\a \x01(\tR\x0eadversaryModel\"*\n" +
 	"\n" +
 	"PromptPart\x12\x14\n" +
 	"\x04text\x18\x01 \x01(\tH\x00R\x04textB\x06\n" +

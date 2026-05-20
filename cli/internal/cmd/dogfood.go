@@ -38,7 +38,8 @@ func dogfoodCmd() *cobra.Command {
 		maxWall     time.Duration
 		tracePath   string
 		assertCmds  []string
-		temperature float64
+		temperature    float64
+		adversaryModel string
 	)
 	c := &cobra.Command{
 		Use:   "dogfood <prompt-file>",
@@ -119,9 +120,10 @@ Termination:
 				maxWall:     maxWall,
 				initial:     string(initialBytes),
 				assertCmds:  assertCmds,
-				temperature: temperature,
-				trace:       json.NewEncoder(traceW),
-				stdout:      out,
+				temperature:    temperature,
+				adversaryModel: adversaryModel,
+				trace:          json.NewEncoder(traceW),
+				stdout:         out,
 			}
 			result, err := runner.Run(ctx)
 			if err != nil {
@@ -149,6 +151,7 @@ Termination:
 	c.Flags().StringVar(&tracePath, "trace", "", "path for JSONL trace (default: stdout)")
 	c.Flags().StringArrayVar(&assertCmds, "assert", nil, "shell command run after the loop; failure marks dogfood as failed (may be repeated)")
 	c.Flags().Float64Var(&temperature, "temperature", 0, "sampling temperature override (0 = use daemon default 0.7; try 0.2–0.3 for autonomous-coding tasks per Finding #6)")
+	c.Flags().StringVar(&adversaryModel, "adversary-model", "", "model id to consult when the chat Detector emits a stuck signal (empty disables adversary; AltToolOrder / ModelEscalate still fire)")
 	return c
 }
 
@@ -161,8 +164,9 @@ type dogfoodRunner struct {
 	maxTurns    int
 	maxWall     time.Duration
 	initial     string
-	assertCmds  []string
-	temperature float64
+	assertCmds     []string
+	temperature    float64
+	adversaryModel string
 
 	trace  *json.Encoder
 	stdout io.Writer
@@ -368,12 +372,13 @@ func (r *dogfoodRunner) runOneTurn(ctx context.Context, turn int, prompt string)
 		PromptHead: head(prompt, 200),
 	}
 	stream, err := r.cli.Prompt(ctx, sdk.PromptOptions{
-		SessionID:   r.sessionID,
-		Text:        prompt,
-		Provider:    r.provider,
-		Model:       r.model,
-		WorkingDir:  r.workingDir,
-		Temperature: r.temperature,
+		SessionID:      r.sessionID,
+		Text:           prompt,
+		Provider:       r.provider,
+		Model:          r.model,
+		WorkingDir:     r.workingDir,
+		Temperature:    r.temperature,
+		AdversaryModel: r.adversaryModel,
 	})
 	if err != nil {
 		return rec, fmt.Errorf("prompt RPC: %w", err)
