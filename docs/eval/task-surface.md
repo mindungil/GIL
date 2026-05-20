@@ -755,3 +755,55 @@ agent ignored both adversary and AltToolOrder hints — a separate failure mode
   decide whether to retry or fall back to a hard-coded "act now" stub.
 - N=3 is too small for variance claims. Need N≥10 once eval-loop bandwidth
   recovers (next workstream).
+
+## Chess T=0.3 +adversary +escalation +directive-injection — 2026-05-21
+
+`ADVERSARY_MODEL=qwen3.6-27b bash docs/eval/variance-probe.sh 3 07 0.3`
+(`/tmp/gil-variance-probe-3630422/`). Daemon at v0.3.0-alpha.2-23-g92ad354
+(develop tip with P67l + P68a/b/c/d/f/g + streaming tool-call fix).
+
+| Task | PASS/N | turns | wall | max-turn-tok | recov | prem-stop | ovf |
+|---|---|---|---|---|---|---|---|
+| 07-chess @ T=0.3 +adv | **0/3** | 8-15 | 3701-4317s | 307k-500k | 7-14 | 2/3 | 0/3 |
+
+Adversary firings + effectiveness (P68f goal metric):
+- r1: 3 adversary fires (t2, t3, t4). **3/3 followed by tool calls next turn.**
+  15 total turns, every turn has tool calls (3-30 each).
+- r2: 1 adversary fire (t3). **1/1 followed by tool call next turn.**
+  14 turns, sustained tool-call count 18-30 per turn.
+- r3: 2 adversary fires (t3, t7). **2/2 followed by tool calls next turn.**
+  8 turns, then turn cap.
+
+**6/6 (100%) adversary → tool-call-next-turn.** P68f directive injection
+verified working in production.
+
+### Finding
+
+**Failure mode shifted from "give up early" to "work hard but don't converge."**
+Compare against P67j (2026-05-20):
+- P67j: 2/3 PASS, 4-5 turns avg, 800-1500s wall, agent gave up after a few turns.
+- P68f: 0/3 PASS, 8-15 turns avg, 3700-4300s wall, agent sustained effort throughout.
+
+P68f's user-role directive injection (vs the prior `[system]` Part-only
+emission) closes the "agent ignored the suggestion" failure mode. The new
+failure mode — agent works hard in a wrong direction without converging — is
+a different problem class. Chess perft at qwen-27B may be a capability
+ceiling rather than a stuck-detection problem: the agent now persistently
+attempts the task but its incorrect mental model of mailbox indexing /
+sliding-piece move generation isn't shifted by terse adversary suggestions.
+
+### Open
+
+- Variance still high. N=3 is too small to call P67j→P68f directionally.
+  Combined with P68f's longer wall times, a larger sweep needs more
+  eval-loop budget than this session has.
+- Adversary suggestion CONTENT may need to be enriched. A 1-line "stop
+  diagnosing, inspect the code" is good for the give-up pattern; for
+  agents already iterating hard but wrong, a longer concrete redirect
+  (e.g. "your mailbox index is off; column-5 piece at index 56 means
+  square e4 not e6") would help — but generating that requires the
+  adversary model to actually understand the bug, which is itself a
+  capability question.
+- SubagentBranchStrategy (G3 from synthesis.md) could fork a fresh
+  read-only sub-agent when adversary fires repeatedly with no PASS
+  signal. Provides clean context for re-investigation.
