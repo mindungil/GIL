@@ -58,6 +58,33 @@ func newTestSessionServiceWithMockTurns(t *testing.T, turns []provider.MockTurn)
 	return svc, sess.ID
 }
 
+// newTestSessionServiceWithSharedProvider is like
+// newTestSessionServiceWithMockTurns but returns the SAME provider
+// instance on every factory call. This matters for multi-turn tests
+// where the chat path runs `s.providerFactory()` once per Prompt()
+// invocation: the default factory creates a fresh MockToolProvider per
+// call and resets the scripted queue. Tests that need turn-count state
+// to survive across user turns (e.g., P67i escalation, where pattern
+// fire counts accumulate across Prompt() calls) pass a shared
+// MockToolProvider via this helper.
+func newTestSessionServiceWithSharedProvider(t *testing.T, p provider.Provider) (*SessionService, string) {
+	t.Helper()
+	repo := newTestRepo(t)
+	wd := t.TempDir()
+	sess, err := repo.Create(t.Context(), session.CreateInput{
+		WorkingDir: wd,
+		GoalHint:   "test",
+	})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	factory := func(name string) (provider.Provider, string, error) {
+		return p, "mock-model", nil
+	}
+	svc := NewSessionService(repo, nil).WithProviderFactory(factory)
+	return svc, sess.ID
+}
+
 // promptReq constructs a PromptRequest targeting an existing session with
 // a single text part.
 func promptReq(sid, text string) *gilv1.PromptRequest {

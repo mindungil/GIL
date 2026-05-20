@@ -28,6 +28,13 @@ type chatEventBuffer struct {
 	seenThisTurn      map[stuck.Pattern]bool
 	adversaryCalls    int
 	lastAdversaryIter int
+
+	// patternFires counts how many times each Pattern has been dispatched
+	// in this session. Drives P67i escalation: 1st fire of a pattern goes
+	// to the cheap nudge strategy (AltToolOrder); 2nd+ fire means the
+	// nudge already failed, so the dispatcher skips it and invokes
+	// AdversaryConsult instead.
+	patternFires map[stuck.Pattern]int
 }
 
 func newChatEventBuffer(c int) *chatEventBuffer {
@@ -38,7 +45,20 @@ func newChatEventBuffer(c int) *chatEventBuffer {
 		cap:          c,
 		events:       make([]event.Event, 0, c),
 		seenThisTurn: make(map[stuck.Pattern]bool),
+		patternFires: make(map[stuck.Pattern]int),
 	}
+}
+
+// incrementPatternFire bumps the per-session fire count for `p` and
+// returns the new count. Used by chatStuckDispatcher.tick to escalate
+// from AltToolOrder (cheap nudge) to AdversaryConsult (LLM-driven
+// concrete suggestion) on 2nd+ occurrence — the nudge clearly didn't
+// work or the agent would have changed behavior.
+func (b *chatEventBuffer) incrementPatternFire(p stuck.Pattern) int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.patternFires[p]++
+	return b.patternFires[p]
 }
 
 func (b *chatEventBuffer) push(e event.Event) {
@@ -152,7 +172,20 @@ func (d *chatStuckDispatcher) tick(ctx context.Context, buf *chatEventBuffer, re
 		if !buf.markSeen(sig.Pattern) {
 			continue
 		}
+		// P67i escalation: count this pattern's fires across the session.
+		// fireCount >= 2 means the cheap nudge already fired once and
+		// didn't change behavior — skip AltToolOrder and invoke
+		// AdversaryConsult directly so the agent gets a concrete next-step
+		// suggestion. The 2026-05-19 chess sweep showed AltToolOrder
+		// firing twice in a row with no effect (turns 9-10 of r1), which
+		// is exactly the failure mode this gate fixes.
+		fireCount := buf.incrementPatternFire(sig.Pattern)
+		escalate := fireCount >= 2
+
 		for _, st := range d.strategies {
+			if _, isAlt := st.(stuck.AltToolOrderStrategy); isAlt && escalate {
+				continue
+			}
 			if _, isAdv := st.(stuck.AdversaryConsultStrategy); isAdv {
 				if d.riskAdv == "" {
 					continue

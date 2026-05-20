@@ -10,6 +10,7 @@ import (
 	"github.com/mindungil/gil/core/event"
 	"github.com/mindungil/gil/core/provider"
 	"github.com/mindungil/gil/core/stuck"
+	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
 )
 
 // Chat-side stuck detection lives on core/stuck/Detector +
@@ -348,4 +349,146 @@ func TestChatStuckDispatcher_MonologueFiresOnSilentTurns(t *testing.T) {
 		}
 	}
 	require.True(t, found, "Detector must fire PatternMonologue on 3 silent provider_responses (real chess pattern)")
+}
+
+// TestChatPrompt_Production_MonologueFiresAdversary is the P67h
+// production-faithful repro. Three sequential silent end_turns must
+// trigger PatternMonologue at the end-of-Prompt() tick, fall through
+// AltToolOrder (returns ErrNoFallback for Monologue), and reach
+// AdversaryConsultStrategy. We assert a `[system] adversary:` Part
+// lands in the stream.
+//
+// If this test fails the way the 2026-05-19 chess N=3 sweep failed
+// (0/3 adversary firings despite turns 4-10 going silent), the
+// production wiring is dead and the unit-level dispatcher tests are
+// passing for the wrong reason.
+//
+// Uses a SHARED mock provider via newTestSessionServiceWithSharedProvider
+// because each production Prompt() invocation calls s.providerFactory()
+// fresh; the default factory resets the scripted queue per call, which
+// would replay the write_file+verify productive turn on every
+// subsequent user message and produce a PingPong pattern instead of
+// the Monologue we want to test.
+func TestChatPrompt_Production_MonologueFiresAdversary(t *testing.T) {
+	turns := []provider.MockTurn{
+		// Turn 1: write_file + verify + end_turn. Two productive iters
+		// then silent close (provider_response{tool_calls=0}).
+		{ToolCalls: []provider.ToolCall{{ID: "w", Name: "write_file",
+			Input: []byte(`{"path":"a.go","content":"package main\n"}`)}},
+			StopReason: "tool_use"},
+		{ToolCalls: []provider.ToolCall{{ID: "v", Name: "verify",
+			Input: []byte(`{"description":"build","command":"go version"}`)}},
+			StopReason: "tool_use"},
+		{Text: "done", StopReason: "end_turn"},
+		// Turn 2: silent end_turn — provider_response{tool_calls=0}.
+		{Text: "thinking", StopReason: "end_turn"},
+		// Turn 3: silent again — buffer now has 3 consecutive
+		// provider_response{tool_calls=0} (turn 1 last iter, turn 2, turn 3).
+		// PatternMonologue must fire; AltToolOrder returns ErrNoFallback;
+		// AdversaryConsult must be invoked.
+		{Text: "still thinking", StopReason: "end_turn"},
+		// AdversaryConsult's LLM call lands here (consumes mock 6).
+		{Text: "Read a.go and add a real test before declaring done.",
+			StopReason: "end_turn"},
+	}
+	shared := provider.NewMockToolProvider(turns)
+	svc, sid := newTestSessionServiceWithSharedProvider(t, shared)
+
+	// PromptRequest must carry adversary_model so dispatcher's riskAdv
+	// is non-empty — the production opt-in gate.
+	mkReq := func(text string) *gilv1.PromptRequest {
+		return &gilv1.PromptRequest{
+			SessionId:      sid,
+			AdversaryModel: "mock-model",
+			Parts:          []*gilv1.PromptPart{{Body: &gilv1.PromptPart_Text{Text: text}}},
+		}
+	}
+
+	s1 := &fakePromptStream{ctx: context.Background()}
+	require.NoError(t, svc.Prompt(mkReq("go"), s1), "turn 1 (productive) must succeed")
+	s2 := &fakePromptStream{ctx: context.Background()}
+	require.NoError(t, svc.Prompt(mkReq("continue"), s2), "turn 2 (silent) must succeed")
+	s3 := &fakePromptStream{ctx: context.Background()}
+	require.NoError(t, svc.Prompt(mkReq("continue"), s3), "turn 3 (silent + Monologue) must succeed")
+
+	// Concatenate all text parts across all three turns and search for
+	// the adversary marker. The hint string itself ("Read a.go...") will
+	// also appear because the dispatcher emits it via stream.Send.
+	var allText string
+	for _, s := range []*fakePromptStream{s1, s2, s3} {
+		for _, p := range s.Parts {
+			if td := p.GetText(); td != nil {
+				allText += td.GetContent() + "\n"
+			}
+		}
+	}
+	require.Contains(t, allText, "[system] adversary",
+		"production strategy chain must dispatch AdversaryConsult after 3 silent turns; observed text:\n%s",
+		allText)
+}
+
+// TestChatPrompt_Production_EscalatesToAdversaryOnSecondFire is the
+// P67i escalation guard. Same action-level pattern firing twice should
+// escalate the second occurrence to AdversaryConsult — the cheap
+// AltToolOrder nudge clearly didn't change behavior or the pattern
+// wouldn't have re-fired. The 2026-05-19 chess N=3 sweep observed this
+// dead-end directly: AltToolOrder fired at r1 turns 9 AND 10 and
+// adversary never got a chance.
+//
+// Drives RepeatedActionError (threshold 3, error pairs) by hammering
+// read_file on a missing path. Turn 3 fires AltToolOrder; turn 4 must
+// escalate to AdversaryConsult.
+func TestChatPrompt_Production_EscalatesToAdversaryOnSecondFire(t *testing.T) {
+	readMissing := provider.MockTurn{
+		ToolCalls: []provider.ToolCall{{ID: "r", Name: "read_file",
+			Input: []byte(`{"path":"does-not-exist.go"}`)}},
+		StopReason: "tool_use",
+	}
+	endTurn := provider.MockTurn{Text: "ok", StopReason: "end_turn"}
+	turns := []provider.MockTurn{
+		// Turn 1, 2: read_file (error) + end_turn. Buffer accumulates
+		// error pairs but stays below threshold (< 3).
+		readMissing, endTurn,
+		readMissing, endTurn,
+		// Turn 3: 3rd read_file (error). Intra-loop tick after
+		// tool_result push detects RepeatedActionError. 1st fire →
+		// AltToolOrder (cheap nudge). Then end_turn.
+		readMissing, endTurn,
+		// Turn 4: 4th read_file (error). Intra-loop tick detects
+		// RepeatedActionError again. 2nd fire → escalation → adversary
+		// LLM consult. Adversary consumes the next mock turn.
+		readMissing,
+		{Text: "Stop calling read_file on the missing path; list dir first.",
+			StopReason: "end_turn"},
+		endTurn,
+	}
+	shared := provider.NewMockToolProvider(turns)
+	svc, sid := newTestSessionServiceWithSharedProvider(t, shared)
+
+	mkReq := func(text string) *gilv1.PromptRequest {
+		return &gilv1.PromptRequest{
+			SessionId:      sid,
+			AdversaryModel: "mock-model",
+			Parts:          []*gilv1.PromptPart{{Body: &gilv1.PromptPart_Text{Text: text}}},
+		}
+	}
+	streams := make([]*fakePromptStream, 4)
+	for i := range streams {
+		streams[i] = &fakePromptStream{ctx: context.Background()}
+		require.NoError(t, svc.Prompt(mkReq("continue"), streams[i]),
+			"turn %d must succeed", i+1)
+	}
+
+	var allText string
+	for _, s := range streams {
+		for _, p := range s.Parts {
+			if td := p.GetText(); td != nil {
+				allText += td.GetContent() + "\n"
+			}
+		}
+	}
+	require.Contains(t, allText, "[system] stuck-recover (AltToolOrder)",
+		"1st RepeatedActionError fire must hit AltToolOrder:\n%s", allText)
+	require.Contains(t, allText, "[system] adversary",
+		"2nd RepeatedActionError fire must escalate to AdversaryConsult:\n%s", allText)
 }
