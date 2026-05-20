@@ -321,3 +321,31 @@ func TestChatStuckDispatcher_RepeatedActionObservationFires(t *testing.T) {
 	}
 	require.True(t, found, "Detector must fire RepeatedActionObservation on 4 identical tool_call/result pairs (was P39's job)")
 }
+
+func TestChatStuckDispatcher_MonologueFiresOnSilentTurns(t *testing.T) {
+	// 3 consecutive provider_response events with tool_calls=0
+	// should fire PatternMonologue. Mirrors the chess "agent gave up"
+	// pattern where turn 1 has 30 tool calls but turn 2+ are silent.
+	buf := newChatEventBuffer(200)
+	// Seed one productive turn so the run starts at 0 and accumulates.
+	buf.push(event.Event{Type: "iteration_start", Data: jsonMust(map[string]any{"iter": 1})})
+	buf.push(event.Event{Type: "tool_call", Data: jsonMust(map[string]any{"name": "verify", "input": "{}"})})
+	buf.push(event.Event{Type: "tool_result", Data: jsonMust(map[string]any{"name": "verify", "is_error": true, "content": "FAIL"})})
+	buf.push(event.Event{Type: "provider_response", Data: jsonMust(map[string]any{"text_len": 100, "tool_calls": 1})})
+
+	// 3 silent turns
+	for i := 2; i <= 4; i++ {
+		buf.push(event.Event{Type: "iteration_start", Data: jsonMust(map[string]any{"iter": i})})
+		buf.push(event.Event{Type: "provider_response", Data: jsonMust(map[string]any{"text_len": 80, "tool_calls": 0})})
+	}
+
+	det := &stuck.Detector{}
+	sigs := det.Check(buf.snapshot())
+	var found bool
+	for _, s := range sigs {
+		if s.Pattern == stuck.PatternMonologue {
+			found = true
+		}
+	}
+	require.True(t, found, "Detector must fire PatternMonologue on 3 silent provider_responses (real chess pattern)")
+}

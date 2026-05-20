@@ -778,13 +778,17 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 				return err
 			}
 		}
-		// P67b — push provider_response with length only (no text body)
-		// so Detector's Monologue check has the per-response signal it
-		// needs without ballooning the ring buffer.
+		// P67b/g — push provider_response with text length AND tool_calls
+		// count. Monologue checker reads the `tool_calls` field; without
+		// it, 3 silent turns (the real chess "agent gave up" pattern)
+		// never trigger PatternMonologue. text_len is for context.
 		providerTextLen += len(resp.Text)
 		chatBuf.push(event.Event{
 			Type: "provider_response",
-			Data: jsonMust(map[string]any{"text_len": len(resp.Text)}),
+			Data: jsonMust(map[string]any{
+				"text_len":   len(resp.Text),
+				"tool_calls": len(resp.ToolCalls),
+			}),
 		})
 
 		// If no tool calls, the LLM thinks it's done. Apply the C1
@@ -1061,6 +1065,33 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 			},
 		})
 		return status.Errorf(codes.FailedPrecondition, "%s", msg)
+	}
+
+	// P67g — end-of-Prompt dispatcher tick. The intra-loop tick only
+	// runs after tool_result pushes; when an agent goes silent
+	// (tool_call_count=0 turns — the real chess "gave up" pattern),
+	// PatternMonologue would never have a chance to fire. One tick
+	// here covers the silent-turn case.
+	for _, dec := range chatDispatch.tick(ctx, chatBuf, chatHistoryToProviderMessages(s.chatHistory().get(sessionID), 10)) {
+		if dec.Action == stuck.ActionAdversaryConsult && strings.HasPrefix(dec.Explanation, "ADVERSARY_SKIPPED_BUDGET") {
+			emitChatEvent("adversary_skipped_budget", event.SourceSystem, event.KindNote, map[string]any{
+				"session": sessionID,
+			})
+			continue
+		}
+		prefix := "[system] stuck-recover (" + dec.Action.String() + ")"
+		if dec.Action == stuck.ActionAdversaryConsult {
+			prefix = "[system] adversary"
+		}
+		_ = stream.Send(&gilv1.Part{
+			Body: &gilv1.Part_Text{Text: &gilv1.TextDelta{
+				Content: prefix + ": " + dec.Explanation,
+			}},
+		})
+		emitChatEvent("adversary_consulted", event.SourceSystem, event.KindNote, map[string]any{
+			"action":      dec.Action.String(),
+			"explanation": dec.Explanation,
+		})
 	}
 
 	// 6. Metrics + Done. P49: include cost_usd so the chat surface
