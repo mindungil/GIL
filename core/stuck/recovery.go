@@ -324,18 +324,13 @@ func (s AdversaryConsultStrategy) Apply(ctx context.Context, req ApplyRequest) (
 		Model:    model,
 		System:   adversarySystemPrompt,
 		Messages: []provider.Message{{Role: provider.RoleUser, Content: userMsg}},
-		// P68k: pin the adversary call to deterministic decoding.
-		// The provider convention treats Temperature == 0 as "use
-		// provider default" (openai.go:223; anthropic.go same), so
-		// to actually pass T≈0 we send a tiny positive value that
-		// the upstream rounds to deterministic decoding. vLLM's
-		// default (0.7) was producing CoT leakage; near-zero stays
-		// in the highest-probability tail and substantially reduces
-		// preamble + tangent output. 2026-05-21 chess/VM dogfood
-		// showed the suggestion text was almost entirely model
-		// reasoning leak rather than the asked-for imperative.
-		Temperature: 0.001,
-		MaxTokens:   256,
+		// P68m reverted P68k's Temperature=0.001 — the deterministic
+		// adversary call coincided with a VM regression (2/3 → 0/3
+		// across two sweeps). Provider default (0.7) restored. The
+		// adversary call's quality signal now comes from the
+		// imperative-allowlist filter in extractAdversarySuggestion
+		// rather than from constraining sampling.
+		MaxTokens: 256,
 	})
 	if err != nil {
 		return Decision{}, fmt.Errorf("adversary_consult: %w", err)
@@ -382,20 +377,18 @@ func extractAdversarySuggestion(text string) string {
 		}
 		cleaned = append(cleaned, line)
 	}
-	// First pass: take the first line starting with an imperative verb.
+	// Single pass: take the first line starting with an imperative verb.
+	// P68m dropped the blocklist-fallback path — when no imperative
+	// shows up the suggestion is almost always meta-narration the
+	// agent can't act on, and injecting it as a [ADVERSARY INTERVENTION]
+	// directive just sends noise into msgs. Returning empty here lets
+	// AdversaryConsultStrategy.Apply surface ErrNoFallback →
+	// adversary_consult_empty telemetry (P67l) which is the honest
+	// signal: "we asked the model, it didn't give us a directive."
 	for _, line := range cleaned {
 		if startsWithImperative(line) {
 			return line
 		}
-	}
-	// Fallback: take the first non-preamble line (keeps the original
-	// blocklist around as a defensive backstop for the case where the
-	// model emits a directive without an obvious imperative verb).
-	for _, line := range cleaned {
-		if isAdversaryPreamble(line) {
-			continue
-		}
-		return line
 	}
 	return ""
 }

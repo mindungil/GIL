@@ -354,7 +354,11 @@ func TestAdversaryConsultStrategy_LLMSuggestsStep(t *testing.T) {
 }
 
 func TestAdversaryConsultStrategy_AdversaryModelOverride(t *testing.T) {
-	fp := &fakeProvider{resp: provider.Response{Text: "do the next thing"}}
+	// "Read X" starts with an imperative verb so the P68l..m
+	// allowlist filter accepts it as a real suggestion. The test
+	// asserts the adversary call routed to the correct model — it
+	// does not care about the suggestion text itself.
+	fp := &fakeProvider{resp: provider.Response{Text: "Read the failing test."}}
 	s := AdversaryConsultStrategy{}
 	_, err := s.Apply(context.Background(), ApplyRequest{
 		Signal:         Signal{Pattern: PatternRepeatedActionError, Count: 2},
@@ -367,7 +371,7 @@ func TestAdversaryConsultStrategy_AdversaryModelOverride(t *testing.T) {
 }
 
 func TestAdversaryConsultStrategy_AdversaryModelEmptyFallsBackToCurrent(t *testing.T) {
-	fp := &fakeProvider{resp: provider.Response{Text: "x"}}
+	fp := &fakeProvider{resp: provider.Response{Text: "Inspect the failing test."}}
 	s := AdversaryConsultStrategy{}
 	_, err := s.Apply(context.Background(), ApplyRequest{
 		Signal:       Signal{Pattern: PatternRepeatedActionError, Count: 2},
@@ -647,9 +651,9 @@ func TestExtractAdversarySuggestion(t *testing.T) {
 		{"short heading without punctuation skipped",
 			"## Next step\nUse grep to find the broken function.",
 			"Use grep to find the broken function."},
-		{"legitimate 'The failing test asserts' kept",
+		{"non-imperative 'The failing test asserts' returns empty (P68m)",
 			"The failing test asserts perft(2)=400; trace which moves are missing.",
-			"The failing test asserts perft(2)=400; trace which moves are missing."},
+			""},
 		// 2026-05-21 chess sweep with P68h+P68i still leaked these
 		{"chess — Thinking Process heading",
 			"Thinking Process:\nRead chess.go and trace the perft initial position bug.",
