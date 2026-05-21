@@ -882,3 +882,61 @@ capability ceiling even with sustained effort. Need either:
 - Different model for adversary (would need separate credential)
 - Fundamentally different approach (read-only sub-agent
   investigation via SubagentBranchStrategy)
+
+## P68 series final — 2026-05-21
+
+After P68k/l/m iterations on adversary suggestion quality:
+
+| Sweep | Filter shape | T | Chess | VM |
+|---|---|---|---|---|
+| P67j (baseline) | none | default | 2/3 | not run |
+| P68f | blocklist v0 | default | 0/3 | not run |
+| P68h | blocklist v1 | default | 0/3 | **2/3** |
+| P68k | blocklist + ✓/✗ prompt | 0.001 | 0/3 | 0/3 |
+| P68l | imperative allowlist + fallback | 0.001 | 0/3 | 0/3 |
+| P68m | imperative allowlist only | default | 0/3 | 1/3 |
+
+**Conclusions:**
+
+1. **Chess is a capability ceiling** for qwen3.6-27B. Across 5 sweeps
+   with progressively-improved adversary mechanism, PASS rate has
+   been 0/3 every time. Agent's mailbox-indexing mental model is
+   wrong and 1-line adversary suggestions can't shift it. Move on
+   — chess is not the validation surface for further harness work.
+
+2. **VM PASS rate has high variance** (0,0,1,2,2 across sweeps) at
+   N=3. Real rate likely 30-70%; harness IS working when adversary
+   fires cleanly. P68h's 2/3 is at the top of that variance band;
+   P68m's 1/3 is the middle.
+
+3. **Filter design lessons:**
+   - Blocklist of CoT preambles loses an arms race (the model
+     always finds new preamble shapes).
+   - Allowlist of imperative verbs is more robust (clear contract).
+   - Restructured system prompts with negative examples can REGRESS
+     the model (qwen imitates wrong examples in-context).
+   - Sampling temperature affects output quality non-trivially —
+     T=0.001 deterministic correlated with the worst sweep (VM 0/3).
+   - Drop the no-imperative fallback: better to honestly emit
+     `adversary_consult_empty` than inject narration noise.
+
+4. **Effective adversary suggestions look like this:**
+   - "Stop using `write_file` and inspect the error message or
+     tool output to understand why it's failing." (VM r2 PASS)
+   - "Check the error message from `write_file`." (VM r1)
+   - "Read the verification failure output to identify the
+     specific error." (clean variant from P68l VM r1)
+
+   The model CAN produce these — about 30% of the time. P68m's
+   filter accepts only those, rejecting the 70% noise.
+
+5. **Next workstreams** (outside this P68 series):
+   - SubagentBranchStrategy wiring into chat path (G3 from
+     synthesis.md) — when adversary fires but agent stays silent
+     for 2+ turns, spin a fresh read-only sub-agent to investigate
+     with clean context.
+   - Cross-model adversary — current self-consult limits chess
+     because the adversary shares the agent's blind spots. A
+     Claude-class adversary would supply correct mailbox-indexing
+     guidance.
+   - N≥10 sweeps to stabilize the variance signal.
