@@ -297,12 +297,24 @@ func (AdversaryConsultStrategy) Name() string { return "adversary_consult" }
 
 const adversarySystemPrompt = `You are an adversarial reviewer of an autonomous coding agent's progress. The agent has detected it is stuck in a repetitive or unproductive pattern. Your ONLY job: suggest ONE concrete next step the agent should try.
 
-Respond with ONE LINE — a terse, actionable instruction starting with a verb. Examples:
+Respond with ONE LINE — a terse, actionable instruction starting with an imperative verb (Read, Run, Call, Stop, Use, Switch, Inspect, Check, …).
+
+✓ RIGHT examples:
 - "Run 'git status' to verify the workspace state before retrying."
 - "Read the failing test's source file and trace which assertion fails."
 - "Stop using the 'bash' tool for this; use 'write_file' to inspect intermediate state instead."
+- "Inspect chess.go line 42 — the mailbox index calculation is off by one."
+- "Switch to read_file with a line range to see the failing context."
 
-Do NOT add preamble, bullets, or multiple suggestions. ONE LINE.`
+✗ WRONG — never do this (these are reasoning leaks, not directives):
+- "Here's a thinking process: ..."
+- "The user is asking / reporting / stuck in a loop ..."
+- "The agent is repeating ..."
+- "The pattern is RepeatedActionError ..."
+- "Analyze User Input: ..."
+- "Thinking Process: ..."
+
+Your first character must be the imperative verb. No preamble, no analysis, no situation description. ONE LINE.`
 
 func (s AdversaryConsultStrategy) Apply(ctx context.Context, req ApplyRequest) (Decision, error) {
 	if req.Signal.Pattern == PatternContextWindowError {
@@ -321,10 +333,21 @@ func (s AdversaryConsultStrategy) Apply(ctx context.Context, req ApplyRequest) (
 
 	userMsg := buildAdversaryConsultPrompt(req.Signal, req.RecentMessages)
 	resp, err := req.Provider.Complete(ctx, provider.Request{
-		Model:     model,
-		System:    adversarySystemPrompt,
-		Messages:  []provider.Message{{Role: provider.RoleUser, Content: userMsg}},
-		MaxTokens: 256,
+		Model:    model,
+		System:   adversarySystemPrompt,
+		Messages: []provider.Message{{Role: provider.RoleUser, Content: userMsg}},
+		// P68k: pin the adversary call to deterministic decoding.
+		// The provider convention treats Temperature == 0 as "use
+		// provider default" (openai.go:223; anthropic.go same), so
+		// to actually pass T≈0 we send a tiny positive value that
+		// the upstream rounds to deterministic decoding. vLLM's
+		// default (0.7) was producing CoT leakage; near-zero stays
+		// in the highest-probability tail and substantially reduces
+		// preamble + tangent output. 2026-05-21 chess/VM dogfood
+		// showed the suggestion text was almost entirely model
+		// reasoning leak rather than the asked-for imperative.
+		Temperature: 0.001,
+		MaxTokens:   256,
 	})
 	if err != nil {
 		return Decision{}, fmt.Errorf("adversary_consult: %w", err)
@@ -438,11 +461,17 @@ func isAdversaryPreamble(line string) bool {
 			return true
 		}
 	}
-	// Markdown heading-only lines (no period, no verb) — typically
-	// "**X:**" or "## X" left over from the model's formatting.
-	trimmed := strings.Trim(line, "*# \t:")
-	if trimmed != "" && !strings.ContainsAny(trimmed, ".?!") && len(strings.Fields(trimmed)) <= 4 {
-		// Short heading-like line without sentence punctuation → skip
+	// Markdown heading-only lines — `## X`, `**Analysis:**`,
+	// `Analyze User Input:**`. Require BOTH a heading marker AND
+	// absence of sentence punctuation; short imperatives without
+	// trailing punctuation (e.g. "Read main.go", "Run the tests")
+	// must NOT be classified as headings.
+	hasHeadingMarker := strings.HasPrefix(line, "#") ||
+		strings.HasPrefix(line, "**") ||
+		strings.HasSuffix(line, ":") ||
+		strings.HasSuffix(line, ":**") ||
+		strings.HasSuffix(line, "**")
+	if hasHeadingMarker && !strings.ContainsAny(line, ".?!") {
 		return true
 	}
 	return false
