@@ -329,11 +329,7 @@ func (s AdversaryConsultStrategy) Apply(ctx context.Context, req ApplyRequest) (
 	if err != nil {
 		return Decision{}, fmt.Errorf("adversary_consult: %w", err)
 	}
-	suggestion := strings.TrimSpace(resp.Text)
-	// Take only the first line; defensive truncation (Goose pattern: output.trim().lines().skip(1)).
-	if i := strings.IndexByte(suggestion, '\n'); i >= 0 {
-		suggestion = strings.TrimSpace(suggestion[:i])
-	}
+	suggestion := extractAdversarySuggestion(resp.Text)
 	if suggestion == "" {
 		return Decision{}, ErrNoFallback
 	}
@@ -341,6 +337,80 @@ func (s AdversaryConsultStrategy) Apply(ctx context.Context, req ApplyRequest) (
 		Action:      ActionAdversaryConsult,
 		Explanation: fmt.Sprintf("ADVERSARY SUGGESTION (pattern: %s): %s", req.Signal.Pattern.String(), suggestion),
 	}, nil
+}
+
+// extractAdversarySuggestion isolates the actual one-line directive
+// from the model's response, skipping chain-of-thought preamble.
+// The 2026-05-21 chess sweep revealed qwen-27B routinely leaks
+// reasoning into the Text field even when asked for "ONE LINE":
+//
+//	"Here's a thinking process: Let me write the chess perft..."
+//	"The user is asking for a suggestion for an autonomous coding..."
+//	"The user wants a single line suggestion..."
+//
+// The old Goose-style "take first line" returned exactly those
+// useless preambles. We now scan lines, drop any that look like
+// meta-narration about the request itself, and take the first
+// imperative-shaped line (verb-led, references concrete tools or
+// actions). Empty result → caller falls back to ErrNoFallback.
+func extractAdversarySuggestion(text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ""
+	}
+	lines := strings.Split(text, "\n")
+	for _, raw := range lines {
+		line := strings.TrimSpace(raw)
+		if line == "" {
+			continue
+		}
+		if isAdversaryPreamble(line) {
+			continue
+		}
+		// Strip leading list markers / quotes the model may add.
+		line = strings.TrimLeft(line, "-*•0123456789. \t")
+		line = strings.Trim(line, `"'` + "`")
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		return line
+	}
+	return ""
+}
+
+// isAdversaryPreamble returns true when `line` looks like
+// chain-of-thought narration about the task rather than an actual
+// directive. Heuristic: matches lines starting with first-person /
+// meta phrases AND lines referring to "the user", "the agent", or
+// "the request" as third-party subjects (those are the model
+// thinking ABOUT the prompt instead of answering it).
+func isAdversaryPreamble(line string) bool {
+	lower := strings.ToLower(line)
+	preambles := []string{
+		"here's a thinking",
+		"here is a thinking",
+		"let me think",
+		"let me consider",
+		"the user is asking",
+		"the user wants",
+		"the user has asked",
+		"the agent is",
+		"the agent has",
+		"this is a request",
+		"to suggest one",
+		"i need to suggest",
+		"i'll suggest",
+		"my suggestion is",
+		"<think",
+		"thinking:",
+	}
+	for _, p := range preambles {
+		if strings.HasPrefix(lower, p) {
+			return true
+		}
+	}
+	return false
 }
 
 func buildAdversaryConsultPrompt(sig Signal, recent []provider.Message) string {
