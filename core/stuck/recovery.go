@@ -297,24 +297,12 @@ func (AdversaryConsultStrategy) Name() string { return "adversary_consult" }
 
 const adversarySystemPrompt = `You are an adversarial reviewer of an autonomous coding agent's progress. The agent has detected it is stuck in a repetitive or unproductive pattern. Your ONLY job: suggest ONE concrete next step the agent should try.
 
-Respond with ONE LINE — a terse, actionable instruction starting with an imperative verb (Read, Run, Call, Stop, Use, Switch, Inspect, Check, …).
-
-✓ RIGHT examples:
+Respond with ONE LINE — a terse, actionable instruction starting with a verb. Examples:
 - "Run 'git status' to verify the workspace state before retrying."
 - "Read the failing test's source file and trace which assertion fails."
 - "Stop using the 'bash' tool for this; use 'write_file' to inspect intermediate state instead."
-- "Inspect chess.go line 42 — the mailbox index calculation is off by one."
-- "Switch to read_file with a line range to see the failing context."
 
-✗ WRONG — never do this (these are reasoning leaks, not directives):
-- "Here's a thinking process: ..."
-- "The user is asking / reporting / stuck in a loop ..."
-- "The agent is repeating ..."
-- "The pattern is RepeatedActionError ..."
-- "Analyze User Input: ..."
-- "Thinking Process: ..."
-
-Your first character must be the imperative verb. No preamble, no analysis, no situation description. ONE LINE.`
+Do NOT add preamble, bullets, or multiple suggestions. ONE LINE.`
 
 func (s AdversaryConsultStrategy) Apply(ctx context.Context, req ApplyRequest) (Decision, error) {
 	if req.Signal.Pattern == PatternContextWindowError {
@@ -363,43 +351,86 @@ func (s AdversaryConsultStrategy) Apply(ctx context.Context, req ApplyRequest) (
 }
 
 // extractAdversarySuggestion isolates the actual one-line directive
-// from the model's response, skipping chain-of-thought preamble.
-// The 2026-05-21 chess sweep revealed qwen-27B routinely leaks
-// reasoning into the Text field even when asked for "ONE LINE":
-//
-//	"Here's a thinking process: Let me write the chess perft..."
-//	"The user is asking for a suggestion for an autonomous coding..."
-//	"The user wants a single line suggestion..."
-//
-// The old Goose-style "take first line" returned exactly those
-// useless preambles. We now scan lines, drop any that look like
-// meta-narration about the request itself, and take the first
-// imperative-shaped line (verb-led, references concrete tools or
-// actions). Empty result → caller falls back to ErrNoFallback.
+// from the model's response. Algorithm: scan lines, strip leading
+// list/quote markers, then PREFER the first line that starts with
+// an imperative verb (allowlist). If no imperative-led line exists,
+// fall back to the first non-preamble line. This is more robust
+// than the prior blocklist approach (P68h..k) because qwen-27B's
+// chain-of-thought preambles take many shapes ("Here's a thinking",
+// "The user is asking", "The pattern is", "Analysis:", etc.) and
+// extending the blocklist each sweep is a losing game. The
+// allowlist matches what the system prompt asks for: imperative
+// verb at line start.
 func extractAdversarySuggestion(text string) string {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return ""
 	}
 	lines := strings.Split(text, "\n")
+	cleaned := make([]string, 0, len(lines))
 	for _, raw := range lines {
 		line := strings.TrimSpace(raw)
 		if line == "" {
 			continue
 		}
-		if isAdversaryPreamble(line) {
-			continue
-		}
 		// Strip leading list markers / quotes the model may add.
 		line = strings.TrimLeft(line, "-*•0123456789. \t")
-		line = strings.Trim(line, `"'` + "`")
+		line = strings.Trim(line, `"'`+"`")
 		line = strings.TrimSpace(line)
 		if line == "" {
+			continue
+		}
+		cleaned = append(cleaned, line)
+	}
+	// First pass: take the first line starting with an imperative verb.
+	for _, line := range cleaned {
+		if startsWithImperative(line) {
+			return line
+		}
+	}
+	// Fallback: take the first non-preamble line (keeps the original
+	// blocklist around as a defensive backstop for the case where the
+	// model emits a directive without an obvious imperative verb).
+	for _, line := range cleaned {
+		if isAdversaryPreamble(line) {
 			continue
 		}
 		return line
 	}
 	return ""
+}
+
+// imperativeVerbs is the small allowlist of English verbs the
+// adversary system prompt explicitly invites ("starting with a
+// verb"). Matched case-insensitive on the first whitespace-delimited
+// token. Kept narrow to avoid false positives ("the" / "this" /
+// "it" are NOT verbs even when they show up at the start of a
+// sentence).
+var imperativeVerbs = map[string]bool{
+	"read": true, "write": true, "run": true, "call": true,
+	"use": true, "stop": true, "start": true, "switch": true,
+	"inspect": true, "check": true, "verify": true, "try": true,
+	"fix": true, "add": true, "remove": true, "open": true,
+	"close": true, "restart": true, "reset": true, "look": true,
+	"find": true, "search": true, "grep": true, "print": true,
+	"log": true, "trace": true, "debug": true, "examine": true,
+	"review": true, "update": true, "edit": true, "modify": true,
+	"delete": true, "create": true, "build": true, "test": true,
+	"replace": true, "rename": true, "move": true, "copy": true,
+	"apply": true, "skip": true, "rollback": true, "revert": true,
+	"avoid": true,
+	// NB: "let" and "instead" are deliberately excluded — they
+	// commonly lead preamble ("Let me think...", "Instead of X,
+	// the agent should...") rather than directives.
+}
+
+func startsWithImperative(line string) bool {
+	fields := strings.Fields(line)
+	if len(fields) == 0 {
+		return false
+	}
+	first := strings.ToLower(strings.TrimRight(fields[0], ",.:;!?"))
+	return imperativeVerbs[first]
 }
 
 // isAdversaryPreamble returns true when `line` looks like
