@@ -845,3 +845,40 @@ adversary model can't generate.
 
 Adversary suggestion text quality is **load-bearing**. P68i ships
 follow-up filter for the patterns observed here.
+
+## Chess (task07) +adversary +P68h CoT filter — 2026-05-21
+
+`/tmp/gil-variance-probe-3857415/`. Daemon at
+v0.3.0-alpha.2-26-gf0effb4 (P68h only — P68i / P68j / P68k filter
+improvements landed AFTER this sweep started).
+
+| Task | PASS/N | turns | wall | max-turn-tok | recov | prem-stop | ovf |
+|---|---|---|---|---|---|---|---|
+| 07-chess @ T=0.3 +adv | **0/3** | 10-14 | 3744-3880s | 397k-518k | 9-13 | 2/3 | 0/3 |
+
+Same pattern as the prior P68f sweep: agent works sustainedly (turn
+counts and tool counts per turn both high) but doesn't converge.
+
+Adversary firings: 9 total across 3 runs, **9/9 (100%) followed by
+tool call on next turn**. Pattern injection (P68f) verified.
+
+Suggestion content was still preamble-leaked across all 9 fires:
+- "Thinking Process:" (×3)
+- "The user is stuck in a loop where..." (×2)
+- "Analyze User Input:**" (×2)
+- "The pattern is..." / "The pattern detected is..." (×2)
+
+P68i + P68j + P68k merged before deploying. P68k addresses the
+ROOT cause: pin adversary call to T=0.001 (deterministic) and add
+✓/✗ examples in system prompt. New sweep round measures effect.
+
+### Finding (P68h-only)
+
+Chess agent now consistently iterates hard with 30 tool_calls/turn
+for 10+ turns — completely different from the pre-P68f "give up
+at turn 2" failure mode. But chess perft remains beyond qwen-27B's
+capability ceiling even with sustained effort. Need either:
+- Cleaner adversary signal (P68k structural fix in flight)
+- Different model for adversary (would need separate credential)
+- Fundamentally different approach (read-only sub-agent
+  investigation via SubagentBranchStrategy)
