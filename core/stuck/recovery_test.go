@@ -631,6 +631,25 @@ func TestExtractAdversarySuggestion(t *testing.T) {
 		{"My suggestion is preamble",
 			"My suggestion is: read the failing test.\nRead the failing test.",
 			"Read the failing test."},
+		// 2026-05-21 VM sweep observations
+		{"vm — The user is reporting",
+			"The user is reporting a stuck pattern where write_file has failed.\nRun the failing test and read its output.",
+			"Run the failing test and read its output."},
+		{"vm — It has failed",
+			"It has failed write_file 13 times.\nInspect the file contents before retrying.",
+			"Inspect the file contents before retrying."},
+		{"vm — The pattern is",
+			"The pattern is RepeatedActionError with write_file failing 12+ times.\nCheck file permissions and disk space.",
+			"Check file permissions and disk space."},
+		{"vm — Analyze User Input: heading",
+			"Analyze User Input:**\nRead the test output to identify the failure root cause.",
+			"Read the test output to identify the failure root cause."},
+		{"short heading without punctuation skipped",
+			"## Next step\nUse grep to find the broken function.",
+			"Use grep to find the broken function."},
+		{"legitimate 'The failing test asserts' kept",
+			"The failing test asserts perft(2)=400; trace which moves are missing.",
+			"The failing test asserts perft(2)=400; trace which moves are missing."},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

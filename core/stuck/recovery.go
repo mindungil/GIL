@@ -381,34 +381,68 @@ func extractAdversarySuggestion(text string) string {
 
 // isAdversaryPreamble returns true when `line` looks like
 // chain-of-thought narration about the task rather than an actual
-// directive. Heuristic: matches lines starting with first-person /
-// meta phrases AND lines referring to "the user", "the agent", or
-// "the request" as third-party subjects (those are the model
-// thinking ABOUT the prompt instead of answering it).
+// directive. The 2026-05-21 VM sweep revealed three new qwen
+// preamble shapes beyond the initial chess set:
+//
+//	"The user is reporting a stuck pattern where..."
+//	"It has failed `write_file` 13 times."
+//	"The pattern is `RepeatedActionError` with..."
+//	"Analyze User Input:**"
+//
+// First two are situation-description, not directive. Third is meta
+// commentary about the detected pattern. Fourth is a markdown
+// heading the model emits before the actual content. All filtered
+// here.
+//
+// The blocklist is intentionally specific (not "any line starting
+// with 'The'") to avoid eating legitimate imperatives like "The
+// failing test asserts perft(2)=400; trace which moves are missing."
 func isAdversaryPreamble(line string) bool {
 	lower := strings.ToLower(line)
 	preambles := []string{
+		// CoT / first-person narration
 		"here's a thinking",
 		"here is a thinking",
 		"let me think",
 		"let me consider",
-		"the user is asking",
-		"the user wants",
-		"the user has asked",
-		"the agent is",
-		"the agent has",
-		"this is a request",
-		"to suggest one",
 		"i need to suggest",
 		"i'll suggest",
 		"my suggestion is",
+		"to suggest one",
 		"<think",
 		"thinking:",
+		"analyze user input",
+		"analysis:",
+		// Third-person task narration
+		"the user is asking",
+		"the user is reporting",
+		"the user wants",
+		"the user has asked",
+		"the user provided",
+		"the agent is",
+		"the agent has",
+		"the pattern is",
+		"the pattern detected",
+		"this is a request",
+		"this pattern indicates",
+		// Situation-description that isn't a directive
+		"it has failed",
+		"it has been",
+		"this has happened",
+		"the failure is",
+		"the issue is",
 	}
 	for _, p := range preambles {
 		if strings.HasPrefix(lower, p) {
 			return true
 		}
+	}
+	// Markdown heading-only lines (no period, no verb) — typically
+	// "**X:**" or "## X" left over from the model's formatting.
+	trimmed := strings.Trim(line, "*# \t:")
+	if trimmed != "" && !strings.ContainsAny(trimmed, ".?!") && len(strings.Fields(trimmed)) <= 4 {
+		// Short heading-like line without sentence punctuation → skip
+		return true
 	}
 	return false
 }
