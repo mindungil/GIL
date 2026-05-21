@@ -290,6 +290,8 @@ Dogfood gate: artifacts exist; no behavioral validation needed.
 | P68f | ✅ shipped | PR #10 (merged 92ad354) | chess N=3 sweep in flight on develop tip |
 | P68g | ✅ shipped | within PR #10 | claude-code.md + synthesis.md |
 | P68h | ✅ shipped | PR #12 (merged f0effb4) | CoT preamble stripped from adversary suggestion; chess + vm sweeps re-measuring |
+| P68i | ✅ shipped | PR #13 (merged 8ac299d) | VM sweep follow-up filter (the user is reporting / pattern / heading) |
+| P68j | ✅ shipped | PR #14 | Chess sweep follow-up filter (the user/agent broad, thinking process) |
 
 P67l (telemetry from prior series) also shipped (PR #6).
 
@@ -307,6 +309,24 @@ actionable directive:
 `extractAdversarySuggestion()` now skips CoT preamble lines and
 returns the first imperative-shaped line. 12-case test pins
 behavior. Re-measurement in progress (chess + vm).
+
+### P68i + P68j follow-ups (same day)
+
+VM sweep with P68h still showed three new preamble shapes:
+"The user is reporting...", "It has failed...", "The pattern is...",
+"Analyze User Input:** heading". P68i added explicit entries +
+short-heading heuristic.
+
+Chess sweep with P68h+P68i then showed two more: capitalized
+"Thinking Process:" and "The user is stuck in a loop where..."
+variant. P68j broadened to general "the user " / "the agent "
+prefixes plus "thinking process".
+
+The filter is now general enough that no further chess-trace
+inspection should reveal new blocklist entries; if it does, the
+right next step is to re-think the structure (e.g. require the
+output start with an imperative verb rather than blocklist
+narration).
 
 ## Out of scope for this plan
 
