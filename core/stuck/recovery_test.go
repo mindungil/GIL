@@ -585,3 +585,57 @@ func (c *captureMaxIterRunner) RunSubagent(_ context.Context, _ string, _ []stri
 	*c.captureMaxIters = maxIters
 	return c.summary, nil
 }
+
+// TestExtractAdversarySuggestion locks the CoT-preamble filtering
+// introduced in P68h. 2026-05-21 chess sweep showed qwen-27B routinely
+// leaks reasoning into the response Text field even when the system
+// prompt asks for ONE LINE — the prior "take first line" Goose pattern
+// returned the reasoning preamble verbatim, not the actual directive.
+func TestExtractAdversarySuggestion(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"empty", "", ""},
+		{"single clean line",
+			"Read main.go and trace the failing assertion.",
+			"Read main.go and trace the failing assertion."},
+		{"leading whitespace",
+			"   Read main.go and trace it.",
+			"Read main.go and trace it."},
+		{"qwen CoT leak — Here's a thinking process",
+			"Here's a thinking process: Let me write the perft properly.\nRun the tests after.",
+			"Run the tests after."},
+		{"qwen CoT leak — The user is asking",
+			"The user is asking for a suggestion for an autonomous coding agent that is stuck.\nInspect the failing test file before editing.",
+			"Inspect the failing test file before editing."},
+		{"qwen CoT leak — The user wants",
+			"The user wants a single line suggestion.\nCall grep with the error message to find the broken assertion.",
+			"Call grep with the error message to find the broken assertion."},
+		{"strip leading list marker",
+			"- Read the file first.",
+			"Read the file first."},
+		{"strip leading numbered list",
+			"1. Read the file first.",
+			"Read the file first."},
+		{"strip leading quote",
+			`"Read the file first."`,
+			"Read the file first."},
+		{"all lines preamble → empty",
+			"Here's a thinking process: doing X.\nThe user is asking for help.\nLet me think about it.",
+			""},
+		{"first directive after preamble",
+			"<think>...</think>\n\nRead the failing test.",
+			"Read the failing test."},
+		{"My suggestion is preamble",
+			"My suggestion is: read the failing test.\nRead the failing test.",
+			"Read the failing test."},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := extractAdversarySuggestion(c.in)
+			require.Equal(t, c.want, got)
+		})
+	}
+}
