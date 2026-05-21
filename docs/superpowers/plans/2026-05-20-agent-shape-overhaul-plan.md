@@ -289,8 +289,24 @@ Dogfood gate: artifacts exist; no behavioral validation needed.
 | P68e | ⏳ parked | — | JSONL rollout; deferred per synthesis Tier-1 ranking |
 | P68f | ✅ shipped | PR #10 (merged 92ad354) | chess N=3 sweep in flight on develop tip |
 | P68g | ✅ shipped | within PR #10 | claude-code.md + synthesis.md |
+| P68h | ✅ shipped | PR #12 (merged f0effb4) | CoT preamble stripped from adversary suggestion; chess + vm sweeps re-measuring |
 
 P67l (telemetry from prior series) also shipped (PR #6).
+
+## P68h — adversary CoT preamble filter (2026-05-21)
+
+P68f's first chess sweep on the develop tip showed 6/6 (100%)
+adversary→tool-call-next-turn effectiveness, BUT 0/3 PASS. Pulling
+the adversary suggestion text out of the trace exposed the root
+cause: every "suggestion" was qwen-27B reasoning leak, not an
+actionable directive:
+- "Here's a thinking process: Let me write the chess perft..."
+- "The user is asking for a suggestion for an autonomous coding..."
+- "The user wants a single line suggestion..."
+
+`extractAdversarySuggestion()` now skips CoT preamble lines and
+returns the first imperative-shaped line. 12-case test pins
+behavior. Re-measurement in progress (chess + vm).
 
 ## Out of scope for this plan
 
