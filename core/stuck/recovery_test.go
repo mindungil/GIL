@@ -650,6 +650,16 @@ func TestExtractAdversarySuggestion(t *testing.T) {
 		{"legitimate 'The failing test asserts' kept",
 			"The failing test asserts perft(2)=400; trace which moves are missing.",
 			"The failing test asserts perft(2)=400; trace which moves are missing."},
+		// 2026-05-21 chess sweep with P68h+P68i still leaked these
+		{"chess — Thinking Process heading",
+			"Thinking Process:\nRead chess.go and trace the perft initial position bug.",
+			"Read chess.go and trace the perft initial position bug."},
+		{"chess — The user is stuck variant",
+			"The user is stuck in a loop where `run_bash` failed 15 times.\nCall verify with a different command.",
+			"Call verify with a different command."},
+		{"all 'the user' variants caught",
+			"The user provided context X. The user is reporting Y. The user wants Z.\nUse grep to find the broken function.",
+			"Use grep to find the broken function."},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

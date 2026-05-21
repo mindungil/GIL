@@ -411,16 +411,17 @@ func isAdversaryPreamble(line string) bool {
 		"to suggest one",
 		"<think",
 		"thinking:",
+		"thinking process",
 		"analyze user input",
 		"analysis:",
-		// Third-person task narration
-		"the user is asking",
-		"the user is reporting",
-		"the user wants",
-		"the user has asked",
-		"the user provided",
-		"the agent is",
-		"the agent has",
+		// Third-person task narration. Broad "the user " / "the agent "
+		// prefixes catch all variants ("is asking", "is stuck", "is
+		// reporting", "has failed", "wants", "provided", etc.) qwen
+		// emits. Risk of blocking a legitimate "The user requested X;
+		// fix Y" is low because the adversary system prompt asks for
+		// verb-led imperatives, not user-referencing prose.
+		"the user ",
+		"the agent ",
 		"the pattern is",
 		"the pattern detected",
 		"this is a request",
