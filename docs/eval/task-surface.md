@@ -807,3 +807,41 @@ sliding-piece move generation isn't shifted by terse adversary suggestions.
 - SubagentBranchStrategy (G3 from synthesis.md) could fork a fresh
   read-only sub-agent when adversary fires repeatedly with no PASS
   signal. Provides clean context for re-investigation.
+
+## VM (task11) +adversary +P68h CoT filter — 2026-05-21
+
+`ADVERSARY_MODEL=qwen3.6-27b bash docs/eval/variance-probe.sh 3 11 0.3`
+(`/tmp/gil-variance-probe-3857484/`). Daemon at
+v0.3.0-alpha.2-26-gf0effb4 (develop tip + P68h CoT preamble filter).
+
+| Task | PASS/N | turns | wall | max-turn-tok | recov | prem-stop | ovf |
+|---|---|---|---|---|---|---|---|
+| 11-vm @ T=0.3 +adv | **2/3** | 1-4 | 479-1458s | 15k-274k | 0-3 | 1/3 | 0/3 |
+
+Baseline reference: P67k (2026-05-20 without P68 fixes) was 0/3 PASS
+on this task. P68h brings it to **2/3 PASS**.
+
+- r1: PASS in 3 turns. 1 adversary fire at t3 (suggestion still had
+  preamble leak: "Analyze User Input:**" — caught by P68i in
+  follow-up).
+- r2: PASS in 1 turn (single attempt, no adversary needed).
+- r3: FAIL, 4 turns. Adversary fired t2, t3, t4 — all three with
+  better content shape than chess ("It has failed write_file 13
+  times", "The pattern is RepeatedActionError with write_file
+  failing 12+ times") but still descriptions of the situation, not
+  directives. P68i filter targets these patterns. r3's agent
+  produced 0 tool calls on every turn after t1 — adversary fires
+  but agent stayed silent (chess turn-cap pattern, not the same as
+  earlier "wrong direction" finding).
+
+### Finding
+
+VM (bytecode-VM) responds better to adversary intervention than
+chess does. Hypothesis: VM's bug surface is more localized (a
+single typo or off-by-one in opcode handling) so even a vague
+"inspect the file" directive lets the agent self-correct. Chess's
+mailbox-indexing bugs require concrete numeric guidance the
+adversary model can't generate.
+
+Adversary suggestion text quality is **load-bearing**. P68i ships
+follow-up filter for the patterns observed here.
