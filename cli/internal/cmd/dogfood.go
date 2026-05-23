@@ -491,6 +491,13 @@ func recoveryPromptFor(rec *turnRecord) string {
 		// assertion check will record the actual workspace state
 		// and the runner exits with the verdict.
 		return ""
+	case "tool_error_loop":
+		// P69 fired — the agent locked onto a malformed tool call that
+		// kept returning the same error (e.g. write_file with empty
+		// args). Unlike a timeout loop, a fresh turn with explicit
+		// guidance usually breaks the fixation. If it loops again the
+		// breaker re-fires and max-turns / max-wall bound the total.
+		return "Your previous turn repeated the SAME failing tool call several times and was aborted. STOP repeating that call. Re-read the tool's required arguments; if a tool keeps rejecting your input, switch approach — e.g. write the file with a run_bash heredoc, or split one large write into smaller edits. DO NOT ask me anything — adapt and proceed."
 	default:
 		// Unknown stop reason — assume continue, but don't loop
 		// infinitely if the agent keeps producing nothing.

@@ -54,6 +54,16 @@ func TestRecoveryPromptFor_Error_ExitsLoop(t *testing.T) {
 	require.Equal(t, "", recoveryPromptFor(rec))
 }
 
+func TestRecoveryPromptFor_ToolErrorLoop_GivesActionableRecovery(t *testing.T) {
+	// P69 breaker fired. Recovery should nudge the agent to stop
+	// repeating the malformed call and switch approach — not give up
+	// (unlike tool_timeout_loop) and not the generic default.
+	rec := &turnRecord{StopReason: "tool_error_loop"}
+	got := recoveryPromptFor(rec)
+	require.NotEmpty(t, got)
+	require.Contains(t, got, "STOP repeating")
+}
+
 func TestRecoveryPromptFor_UnknownStopReason_ContinuesDefensively(t *testing.T) {
 	rec := &turnRecord{StopReason: "some_future_reason"}
 	got := recoveryPromptFor(rec)

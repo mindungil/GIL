@@ -777,6 +777,22 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 	const maxConsecutiveTimeouts = 3
 	consecutiveTimeouts := 0
 
+	// P69: consecutive identical tool-error abort. Sibling of the P66
+	// timeout breaker for the OTHER livelock shape. bytecode-vm dogfood
+	// (variance probe, 2026-05-23) showed qwen3.6-27b emit write_file
+	// with empty `{}` input 20+ times in a row — each returning the same
+	// "missing required `path` arg" error — burning the entire 15m wall
+	// budget without adapting. maxAgentTurns=30 eventually bounds it, but
+	// only after ~13 wasted minutes. The chat Detector surfaces a
+	// "looping" event but deliberately does NOT break the loop. Track
+	// consecutive non-timeout errors sharing the same (tool, error)
+	// signature; any success or a different signature resets the streak.
+	// This is a system safeguard (loop bound) — it never constrains which
+	// tool the agent picks (design §2.3).
+	const maxConsecutiveSameError = 4
+	consecutiveSameError := 0
+	lastErrorSig := ""
+
 	for turn := 0; turn < maxAgentTurns; turn++ {
 		// P63c: removed "every 5 iters compaction" — v4 chess dogfood
 		// data showed this aggressively wiped middle context (failing
@@ -938,6 +954,7 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 		// Dispatch each tool call, stream Parts, collect results.
 		toolResults := make([]provider.ToolResult, 0, len(resp.ToolCalls))
 		abortedTimeoutLoop := false
+		abortedErrorLoop := false
 		for _, call := range resp.ToolCalls {
 			if err := stream.Send(&gilv1.Part{
 				Body: &gilv1.Part_ToolCall{ToolCall: &gilv1.ToolCallPart{
@@ -1097,6 +1114,26 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 			} else {
 				consecutiveTimeouts = 0
 			}
+
+			// P69: consecutive identical (non-timeout) tool-error abort.
+			// Timeouts are handled above; this catches the agent locking
+			// onto a malformed call that keeps returning the same error.
+			if result.IsError && !isToolTimeoutResult(result.Content) {
+				sig := call.Name + "\x00" + errorSignature(result.Content)
+				if sig == lastErrorSig {
+					consecutiveSameError++
+				} else {
+					consecutiveSameError = 1
+					lastErrorSig = sig
+				}
+				if consecutiveSameError >= maxConsecutiveSameError {
+					abortedErrorLoop = true
+					break
+				}
+			} else {
+				consecutiveSameError = 0
+				lastErrorSig = ""
+			}
 		}
 
 		// Feed the tool results back as a synthetic user turn (per
@@ -1126,6 +1163,28 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 			emitChatEvent("tool_timeout_loop", event.SourceSystem, event.KindNote, map[string]any{
 				"consecutive_timeouts": consecutiveTimeouts,
 				"max":                  maxConsecutiveTimeouts,
+			})
+			return nil
+		}
+
+		// P69: if we hit the consecutive-identical-error cap, end the
+		// Prompt RPC so the next user/dogfood prompt resets the approach.
+		// The agent is stuck repeating a malformed call (e.g. write_file
+		// with empty args) instead of adapting; more iterations only burn
+		// budget.
+		if abortedErrorLoop {
+			msg := fmt.Sprintf("agent issued %d consecutive tool calls that returned the same error — it is stuck repeating a malformed call instead of adapting. Aborting before more budget is wasted.", maxConsecutiveSameError)
+			_ = stream.Send(&gilv1.Part{
+				Body: &gilv1.Part_Text{Text: &gilv1.TextDelta{Content: "[system] tool_error_loop: " + msg}},
+			})
+			_ = stream.Send(&gilv1.Part{
+				Body: &gilv1.Part_Done{
+					Done: &gilv1.DonePart{StopReason: "tool_error_loop", ErrorMessage: msg},
+				},
+			})
+			emitChatEvent("tool_error_loop", event.SourceSystem, event.KindNote, map[string]any{
+				"consecutive_same_error": consecutiveSameError,
+				"max":                    maxConsecutiveSameError,
 			})
 			return nil
 		}
@@ -1491,6 +1550,26 @@ func isToolTimeoutResult(content string) bool {
 		return true
 	}
 	return false
+}
+
+// errorSignature normalizes a tool-error body into a stable key for the
+// P69 consecutive-identical-error breaker. We take the first line
+// (where the human-readable reason lives) and cap its length so that
+// trailing variable detail (paths, partial output) doesn't make two
+// instances of the same error look different. Identical malformed calls
+// produce byte-identical first lines, so exact-match on this key is the
+// conservative choice — it only trips on a genuinely repeated error,
+// never on an agent making progress through different failures.
+func errorSignature(content string) string {
+	line := content
+	if i := strings.IndexByte(line, '\n'); i >= 0 {
+		line = line[:i]
+	}
+	line = strings.TrimSpace(line)
+	if len(line) > 120 {
+		line = line[:120]
+	}
+	return line
 }
 
 // chatHistory lazily allocates the message log map. Stored on the
