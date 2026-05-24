@@ -149,6 +149,9 @@ func (s *SessionService) releaseSubagent(childID string) {
 // `service.NewSessionService(...).WithSessionsBase(layout.SessionsDir())`.
 func (s *SessionService) WithSessionsBase(base string) *SessionService {
 	s.sessionsBase = base
+	if s.chatHist != nil {
+		s.chatHist.SetRolloutBase(filepath.Join(filepath.Dir(base), "chat_rollouts"))
+	}
 	return s
 }
 

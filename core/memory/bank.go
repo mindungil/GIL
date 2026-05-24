@@ -190,6 +190,14 @@ func specContents(spec *gilv1.FrozenSpec) map[string]string {
 				sb.WriteString("\n")
 			}
 		}
+		if spec.GetGoal() != nil && len(spec.GetGoal().GetTasks()) > 0 {
+			sb.WriteString("\n## Tasks\n\n")
+			for _, task := range spec.GetGoal().GetTasks() {
+				sb.WriteString("- ")
+				sb.WriteString(task)
+				sb.WriteString("\n")
+			}
+		}
 		contents[FileProjectBrief] = sb.String()
 	}
 

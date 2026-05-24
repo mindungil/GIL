@@ -11,11 +11,22 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/mindungil/gil/core/checkpoint"
+	"github.com/mindungil/gil/core/event"
 	"github.com/mindungil/gil/core/instructions"
 	"github.com/mindungil/gil/core/paths"
+	"github.com/mindungil/gil/core/specstore"
 )
+
+func sessionEventLogPath(sessionsDir, sessionID string) string {
+	rollout := filepath.Join(filepath.Dir(sessionsDir), "rollouts", sessionID+".jsonl")
+	if _, err := os.Stat(rollout); err == nil {
+		return rollout
+	}
+	return filepath.Join(sessionsDir, sessionID, "events", "events.jsonl")
+}
 
 // SessionInfo is a tiny sub-set of sdk.Session that the handlers need.
 // We intentionally keep this decoupled from the SDK to avoid a core →
@@ -145,6 +156,11 @@ func RegisterDefaults(reg *Registry, env *HandlerEnv) {
 		Handler: handleStatus(env),
 	})
 	reg.Register(Spec{
+		Name:    "goal",
+		Summary: "show the frozen goal, tasks, and latest activity",
+		Handler: handleGoal(env),
+	})
+	reg.Register(Spec{
 		Name:    "cost",
 		Summary: "show estimated USD cost (Track F catalog wired in Phase 12 Track F)",
 		Handler: handleCost(env),
@@ -237,6 +253,59 @@ func handleStatus(env *HandlerEnv) Handler {
 			fmt.Fprintf(&sb, "Tokens:     %d (live), %d (total)\n", info.CurrentTokens, info.TotalTokens)
 		} else {
 			fmt.Fprintf(&sb, "Tokens:     %d (total)\n", info.TotalTokens)
+		}
+		return strings.TrimRight(sb.String(), "\n"), nil
+	}
+}
+
+func handleGoal(env *HandlerEnv) Handler {
+	return func(ctx context.Context, _ Command) (string, error) {
+		if env.SessionID == "" {
+			return "", fmt.Errorf("no session attached")
+		}
+		specDir := filepath.Join(env.Layout.SessionsDir(), env.SessionID)
+		spec, err := specstore.NewStore(specDir).Load()
+		if err != nil {
+			return "", fmt.Errorf("goal: %w", err)
+		}
+		var latestType string
+		var latestAt time.Time
+		if evs, err := event.LoadAll(sessionEventLogPath(env.Layout.SessionsDir(), env.SessionID)); err == nil && len(evs) > 0 {
+			last := evs[len(evs)-1]
+			latestType, latestAt = last.Type, last.Timestamp
+		}
+		var sb strings.Builder
+		fmt.Fprintf(&sb, "Goal: %s\n", spec.Goal.OneLiner)
+		if spec.Goal.Detailed != "" {
+			fmt.Fprintf(&sb, "Detail: %s\n", spec.Goal.Detailed)
+		}
+		if len(spec.Goal.Tasks) > 0 {
+			sb.WriteString("Tasks:\n")
+			for i, task := range spec.Goal.Tasks {
+				fmt.Fprintf(&sb, "  %d. %s\n", i+1, task)
+			}
+		}
+		if len(spec.Goal.SuccessCriteriaNatural) > 0 {
+			sb.WriteString("Success criteria:\n")
+			for i, criterion := range spec.Goal.SuccessCriteriaNatural {
+				fmt.Fprintf(&sb, "  %d. %s\n", i+1, criterion)
+			}
+		}
+		if len(spec.Goal.NonGoals) > 0 {
+			sb.WriteString("Non-goals:\n")
+			for i, item := range spec.Goal.NonGoals {
+				fmt.Fprintf(&sb, "  %d. %s\n", i+1, item)
+			}
+		}
+		if latestType != "" {
+			fmt.Fprintf(&sb, "Latest activity: %s (%s)\n", latestType, latestAt.Local().Format("2006-01-02 15:04:05"))
+		}
+		if env.Run != nil {
+			if diff, err := env.Run.Diff(ctx, env.SessionID); err == nil && diff != nil {
+				sb.WriteString("Workspace diff:\n")
+				sb.WriteString("  " + strings.ReplaceAll(formatDiffResult(diff), "\n", "\n  "))
+				sb.WriteString("\n")
+			}
 		}
 		return strings.TrimRight(sb.String(), "\n"), nil
 	}

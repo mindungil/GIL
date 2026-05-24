@@ -8,7 +8,10 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/mindungil/gil/cli/internal/cmd/uistyle"
@@ -47,23 +50,17 @@ func runSummary(out io.Writer, socket, base string, ascii bool) error {
 	if err != nil {
 		return wrapRPCError(err)
 	}
+	layout, err := paths.FromEnv()
+	if err != nil {
+		return fmt.Errorf("resolve gil paths: %w", err)
+	}
 
 	g := uistyle.NewGlyphs(ascii)
 	p := uistyle.NewPalette(false)
 
-	rows := make([]summaryRow, 0, len(list))
-	for _, s := range list {
-		if s == nil {
-			continue
-		}
-		rows = append(rows, summaryRowFromSession(s))
-	}
-
-	total := len(rows)
 	const maxRows = 10
-	if len(rows) > maxRows {
-		rows = rows[:maxRows]
-	}
+	total := len(list)
+	rows, total := buildTopSummaryRows(list, layout.SessionsDir(), maxRows)
 
 	renderSummary(out, summaryEnv{
 		Version:       version.Short(),
@@ -82,12 +79,12 @@ func runSummary(out io.Writer, socket, base string, ascii bool) error {
 // a struct keeps the renderer pure (no env / clock access) so the
 // snapshot tests can drive deterministic output.
 type summaryEnv struct {
-	Version  string
-	User     string
-	Host     string
-	Now      time.Time
-	Glyphs   uistyle.Glyphs
-	Palette  uistyle.Palette
+	Version       string
+	User          string
+	Host          string
+	Now           time.Time
+	Glyphs        uistyle.Glyphs
+	Palette       uistyle.Palette
 	Sessions      []summaryRow
 	TotalSessions int // total count before truncation; renderer emits overflow hint
 }
@@ -105,6 +102,8 @@ type summaryRow struct {
 	ID             string
 	Name           string // pre-computed display slug — Phase 25 A3
 	Status         string // "RUNNING" / "DONE" / "STUCK" / ...
+	WorkingDir     string
+	CreatedAt      time.Time
 	Iter           int32
 	MaxIter        int32
 	Tokens         int64
@@ -113,6 +112,11 @@ type summaryRow struct {
 	CostBudget     float64
 	BudgetExceeded bool
 	Goal           string
+	FrozenGoal     string
+	GitSummary     string
+	LatestType     string
+	LatestAt       time.Time
+	PlanNext       string
 	StuckNote      string // "RepeatedAction (2/3)" or empty
 
 	// PlanCompleted / PlanTotal: when PlanTotal > 0 the iter cell
@@ -124,10 +128,26 @@ type summaryRow struct {
 }
 
 func summaryRowFromSession(s *sdk.Session) summaryRow {
+	layout, err := paths.FromEnv()
+	sessionsDir := ""
+	if err == nil {
+		sessionsDir = layout.SessionsDir()
+	}
+	return summaryRowFromSessionAt(s, sessionsDir)
+}
+
+func summaryRowFromSessionAt(s *sdk.Session, sessionsDir string) summaryRow {
+	return summaryRowFromSessionAtNow(s, sessionsDir, time.Now())
+}
+
+func summaryRowFromSessionAtNow(s *sdk.Session, sessionsDir string, now time.Time) summaryRow {
+	meta := sessionSummaryMetaForAt(s, sessionsDir, now)
 	row := summaryRow{
 		ID:             s.ID,
-		Name:           displayName(s),
+		Name:           meta.displayName,
 		Status:         s.Status,
+		WorkingDir:     s.WorkingDir,
+		CreatedAt:      s.CreatedAt,
 		Iter:           s.CurrentIteration,
 		MaxIter:        100, // server doesn't expose max yet; matches spec mockup
 		Tokens:         s.CurrentTokens,
@@ -137,14 +157,97 @@ func summaryRowFromSession(s *sdk.Session) summaryRow {
 		BudgetExceeded: s.BudgetExceeded,
 		Goal:           s.GoalHint,
 	}
-	// Best-effort plan progress: read <SessionsDir>/<id>/plan.json
-	// directly. Failure or missing file → leave PlanTotal=0 so the
-	// renderer falls back to plain iter display.
-	if comp, total, ok := loadSessionPlanCounts(s.ID); ok {
-		row.PlanCompleted = comp
-		row.PlanTotal = total
-	}
+	row.FrozenGoal = meta.frozenGoal
+	row.GitSummary = meta.gitSummary
+	row.PlanCompleted = meta.planCompleted
+	row.PlanTotal = meta.planTotal
+	row.PlanNext = meta.planNext
 	return row
+}
+
+func joinPath(base, elem string) string {
+	if base == "" {
+		return elem
+	}
+	return base + string(filepath.Separator) + elem
+}
+
+func buildSummaryRows(list []*sdk.Session, sessionsDir string) []summaryRow {
+	rows := make([]summaryRow, len(list))
+	if len(list) == 0 {
+		return rows
+	}
+	now := time.Now()
+	workers := runtime.GOMAXPROCS(0)
+	if workers < 1 {
+		workers = 1
+	}
+	workers *= 2
+	if workers < 4 {
+		workers = 4
+	}
+	if len(list) < workers {
+		workers = len(list)
+	}
+	if workers <= 1 {
+		for index, sess := range list {
+			if sess == nil {
+				continue
+			}
+			rows[index] = summaryRowFromSessionAtNow(sess, sessionsDir, now)
+		}
+		return rows
+	}
+	chunk := (len(list) + workers - 1) / workers
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		start := i * chunk
+		if start >= len(list) {
+			wg.Done()
+			continue
+		}
+		end := start + chunk
+		if end > len(list) {
+			end = len(list)
+		}
+		go func(start, end int) {
+			defer wg.Done()
+			for index := start; index < end; index++ {
+				if list[index] == nil {
+					continue
+				}
+				rows[index] = summaryRowFromSessionAtNow(list[index], sessionsDir, now)
+			}
+		}(start, end)
+	}
+	wg.Wait()
+	return rows
+}
+
+func populateLatestActivity(rows []summaryRow, sessionsDir string) {
+	if len(rows) == 0 {
+		return
+	}
+	now := time.Now()
+	for index := range rows {
+		if rows[index].LatestType != "" || rows[index].ID == "" {
+			continue
+		}
+		eventPath := sessionEventLogPathAt(sessionsDir, rows[index].ID, now)
+		if latestType, latestAt := loadLatestEventSummary(eventPath); latestType != "" {
+			rows[index].LatestType = latestType
+			rows[index].LatestAt = latestAt
+		}
+	}
+}
+
+func buildTopSummaryRows(list []*sdk.Session, sessionsDir string, maxRows int) ([]summaryRow, int) {
+	total := len(list)
+	if maxRows > 0 && len(list) > maxRows {
+		list = list[:maxRows]
+	}
+	return buildSummaryRows(list, sessionsDir), total
 }
 
 // renderSummary is the full no-arg layout. Any change here must be
@@ -180,7 +283,7 @@ func renderSummary(out io.Writer, e summaryEnv) {
 	fmt.Fprintf(out, "   %s\n\n", p.Surface(fmt.Sprintf("%d %s", len(e.Sessions), noun)))
 
 	for _, r := range e.Sessions {
-		marker, mark := sessionStatusGlyph(g,r.Status)
+		marker, mark := sessionStatusGlyph(g, r.Status)
 		coloured := colourMarker(p, marker, mark)
 		bar := uistyle.BarFixed(g, int(r.Iter), int(r.MaxIter))
 		// "23/100" or "45" depending on whether status is RUNNING (need denominator)
@@ -188,7 +291,7 @@ func renderSummary(out io.Writer, e summaryEnv) {
 		costStr := renderCostCell(g, p, r)
 		// 14-char goal column — truncate with ellipsis if longer so the
 		// row stays single-line under the spec's 80-col target.
-		goal := truncRune(r.Goal, 48)
+		goal := truncRune(displayGoal(r), 48)
 		name := r.Name
 		if name == "" {
 			name = shortID(r.ID)
@@ -199,6 +302,10 @@ func renderSummary(out io.Writer, e summaryEnv) {
 			indent := strings.Repeat(" ", 49) // hand-aligned with cost column
 			fmt.Fprintf(out, "%s%s %s\n", indent, p.Caution(g.Warn),
 				p.Caution("STUCK · "+r.StuckNote))
+		}
+		if r.GitSummary != "" {
+			indent := strings.Repeat(" ", 14)
+			fmt.Fprintf(out, "%s%s\n", indent, p.Dim("git "+r.GitSummary))
 		}
 	}
 
@@ -222,6 +329,13 @@ func renderSummary(out io.Writer, e summaryEnv) {
 		p.Info(g.Arrow), p.Primary("gil interview"),
 		p.Info(g.Arrow), p.Primary("gil --help"))
 	fmt.Fprintln(out)
+}
+
+func displayGoal(r summaryRow) string {
+	if strings.TrimSpace(r.FrozenGoal) != "" {
+		return r.FrozenGoal
+	}
+	return r.Goal
 }
 
 // renderCostCell returns the cost column for one summary/status row.
@@ -307,25 +421,19 @@ func iterDisplay(r summaryRow) string {
 	return base
 }
 
-// loadSessionPlanCounts reads <SessionsDir>/<sessionID>/plan.json and
-// returns (completed, total, ok). ok=false on any failure (missing
-// file, malformed JSON, no items) so callers can fall back to the
-// no-plan rendering. Sub-items count toward the totals — they're
+// loadSessionPlanSummary reads <SessionsDir>/<sessionID>/plan.json once and
+// returns the completion ratio plus the next actionable item. ok=false on any
+// failure (missing file, malformed JSON, no items) so callers can fall back to
+// the no-plan rendering. Sub-items count toward the totals — they're
 // independently checkable steps from the agent's perspective.
-func loadSessionPlanCounts(sessionID string) (completed, total int, ok bool) {
-	if sessionID == "" {
-		return 0, 0, false
-	}
-	layout, err := paths.FromEnv()
+func loadSessionPlanSummary(planPath string) (completed, total int, next string, ok bool) {
+	body, err := os.ReadFile(planPath)
 	if err != nil {
-		return 0, 0, false
-	}
-	body, err := os.ReadFile(filepath.Join(layout.SessionsDir(), sessionID, "plan.json"))
-	if err != nil {
-		return 0, 0, false
+		return 0, 0, "", false
 	}
 	var d struct {
 		Items []struct {
+			Text   string `json:"text"`
 			Status string `json:"status"`
 			Sub    []struct {
 				Status string `json:"status"`
@@ -333,11 +441,12 @@ func loadSessionPlanCounts(sessionID string) (completed, total int, ok bool) {
 		} `json:"items"`
 	}
 	if err := json.Unmarshal(body, &d); err != nil {
-		return 0, 0, false
+		return 0, 0, "", false
 	}
 	if len(d.Items) == 0 {
-		return 0, 0, false
+		return 0, 0, "", false
 	}
+	total = 0
 	for _, it := range d.Items {
 		total++
 		if it.Status == "completed" {
@@ -350,13 +459,82 @@ func loadSessionPlanCounts(sessionID string) (completed, total int, ok bool) {
 			}
 		}
 	}
-	return completed, total, true
+	for _, it := range d.Items {
+		if it.Status == "in_progress" {
+			return completed, total, it.Text, true
+		}
+	}
+	for _, it := range d.Items {
+		if it.Status != "completed" {
+			return completed, total, it.Text, true
+		}
+	}
+	return completed, total, "", true
 }
 
-// loadSessionPlanNext returns the text of the first non-completed
-// item in the plan (in_progress preferred over pending). Returns ""
-// when the plan is missing, malformed, or fully completed. Used by
-// `gil watch` to show "next:" alongside the plan progress ratio.
+type sessionPlanMeta struct {
+	completed int
+	total     int
+	next      string
+	ok        bool
+}
+
+type sessionPlanMetaCacheEntry struct {
+	meta    sessionPlanMeta
+	expires time.Time
+}
+
+var sessionPlanMetaCache atomic.Pointer[sync.Map]
+
+func loadSessionPlanMeta(planPath string) (completed, total int, next string, ok bool) {
+	return loadSessionPlanMetaAt(planPath, time.Now())
+}
+
+func loadSessionPlanMetaAt(planPath string, now time.Time) (completed, total int, next string, ok bool) {
+	cache := sessionPlanMetaCache.Load()
+	if cache == nil {
+		cache = &sync.Map{}
+		if sessionPlanMetaCache.CompareAndSwap(nil, cache) {
+			// cache installed below
+		} else {
+			cache = sessionPlanMetaCache.Load()
+		}
+	}
+	if cached, ok := cache.Load(planPath); ok {
+		entry := cached.(sessionPlanMetaCacheEntry)
+		if now.Before(entry.expires) {
+			return entry.meta.completed, entry.meta.total, entry.meta.next, entry.meta.ok
+		}
+	}
+	completed, total, next, ok = loadSessionPlanSummary(planPath)
+	cache.Store(planPath, sessionPlanMetaCacheEntry{
+		meta: sessionPlanMeta{
+			completed: completed,
+			total:     total,
+			next:      next,
+			ok:        ok,
+		},
+		expires: now.Add(sessionMetaCacheTTL),
+	})
+	return completed, total, next, ok
+}
+
+// loadSessionPlanCounts is the legacy helper kept for tests and any
+// external callers that still care only about the ratio.
+func loadSessionPlanCounts(sessionID string) (completed, total int, ok bool) {
+	if sessionID == "" {
+		return 0, 0, false
+	}
+	layout, err := paths.FromEnv()
+	if err != nil {
+		return 0, 0, false
+	}
+	completed, total, _, ok = loadSessionPlanMeta(filepath.Join(layout.SessionsDir(), sessionID, "plan.json"))
+	return completed, total, ok
+}
+
+// loadSessionPlanNext is the legacy helper kept for tests and any
+// external callers that still want just the next actionable item.
 func loadSessionPlanNext(sessionID string) string {
 	if sessionID == "" {
 		return ""
@@ -365,31 +543,11 @@ func loadSessionPlanNext(sessionID string) string {
 	if err != nil {
 		return ""
 	}
-	body, err := os.ReadFile(filepath.Join(layout.SessionsDir(), sessionID, "plan.json"))
-	if err != nil {
+	_, _, next, ok := loadSessionPlanMeta(filepath.Join(layout.SessionsDir(), sessionID, "plan.json"))
+	if !ok {
 		return ""
 	}
-	var d struct {
-		Items []struct {
-			Text   string `json:"text"`
-			Status string `json:"status"`
-		} `json:"items"`
-	}
-	if err := json.Unmarshal(body, &d); err != nil {
-		return ""
-	}
-	// Prefer in_progress; fall back to first pending.
-	for _, it := range d.Items {
-		if it.Status == "in_progress" {
-			return it.Text
-		}
-	}
-	for _, it := range d.Items {
-		if it.Status != "completed" {
-			return it.Text
-		}
-	}
-	return ""
+	return next
 }
 
 // shortID returns the first 10 chars of the ULID lowercased. 10 chars
@@ -399,10 +557,18 @@ func loadSessionPlanNext(sessionID string) string {
 // inside the same minute). Lowercasing keeps rendering uniform whether
 // the ID came in as upper or mixed case.
 func shortID(id string) string {
-	if len(id) <= 10 {
-		return strings.ToLower(id)
+	if len(id) > 10 {
+		id = id[:10]
 	}
-	return strings.ToLower(id[:10])
+	var buf [10]byte
+	for i := 0; i < len(id); i++ {
+		c := id[i]
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		buf[i] = c
+	}
+	return string(buf[:len(id)])
 }
 
 // displayName returns a human-friendly label for a session — a slug
@@ -419,6 +585,12 @@ func shortID(id string) string {
 func displayName(s *sdk.Session) string {
 	if s == nil {
 		return ""
+	}
+	if s.GoalHint == "" {
+		return shortID(s.ID)
+	}
+	if strings.TrimSpace(s.GoalHint) == "" {
+		return shortID(s.ID)
 	}
 	slug := slugify(s.GoalHint)
 	if slug == "" {

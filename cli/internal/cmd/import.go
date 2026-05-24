@@ -1,14 +1,14 @@
 // Package cmd — import.go implements `gil import` for replaying exported
 // sessions back into a fresh sessions/<id>/ directory.
 //
-// Why this exists
+// # Why this exists
 //
 // `gil export --format jsonl` produces a single-file representation of a
 // session: one metadata header line followed by one event per line. The
 // import path takes that file and reconstructs an on-disk session that
 // `gil export`, `gil events`, and any future replay tooling can consume.
 //
-// Design — minimal, file-centric
+// # Design — minimal, file-centric
 //
 // We do not introduce a SessionService.Import RPC. The reasons:
 //
@@ -34,7 +34,7 @@
 //     enum value yet, but the goal_hint field is set to "imported from <file>"
 //     so the user can identify it in `gil status`.
 //
-// Restrictions
+// # Restrictions
 //
 // The replayed session is intended for read-only use (`gil events`, `gil
 // export`, future replay tooling). It cannot be `gil run` because the
@@ -58,6 +58,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/mindungil/gil/core/cliutil"
+	"github.com/mindungil/gil/core/paths"
 	"github.com/mindungil/gil/sdk"
 )
 
@@ -96,7 +97,7 @@ shows up in "gil status".`,
 			newID := makeULID()
 			sessionDir := filepath.Join(layout.SessionsDir(), newID)
 
-			if err := writeImportedSession(sessionDir, header, eventLines); err != nil {
+			if err := writeImportedSession(layout, sessionDir, newID, header, eventLines); err != nil {
 				return err
 			}
 
@@ -204,7 +205,7 @@ func trimTrailingNewline(b []byte) []byte {
 // is written byte-for-byte from the source so the round-trip property
 // (`gil export → gil import → gil export` produces equivalent JSONL modulo
 // the new ID) holds without re-marshalling.
-func writeImportedSession(sessionDir string, header jsonlMetadata, lines [][]byte) error {
+func writeImportedSession(layout paths.Layout, sessionDir, sessionID string, header jsonlMetadata, lines [][]byte) error {
 	if err := os.MkdirAll(sessionDir, 0o700); err != nil {
 		return fmt.Errorf("mkdir session dir: %w", err)
 	}
@@ -234,6 +235,28 @@ func writeImportedSession(sessionDir string, header jsonlMetadata, lines [][]byt
 	}
 	if err := w.Flush(); err != nil {
 		return fmt.Errorf("flush events: %w", err)
+	}
+	rolloutDir := filepath.Join(filepath.Dir(layout.SessionsDir()), "rollouts")
+	if err := os.MkdirAll(rolloutDir, 0o755); err != nil {
+		return fmt.Errorf("mkdir rollout dir: %w", err)
+	}
+	rolloutOut, err := os.OpenFile(filepath.Join(rolloutDir, sessionID+".jsonl"),
+		os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		return fmt.Errorf("create rollout.jsonl: %w", err)
+	}
+	defer rolloutOut.Close()
+	rolloutW := bufio.NewWriterSize(rolloutOut, 64*1024)
+	for _, line := range lines {
+		if _, err := rolloutW.Write(line); err != nil {
+			return fmt.Errorf("write rollout event: %w", err)
+		}
+		if err := rolloutW.WriteByte('\n'); err != nil {
+			return fmt.Errorf("write rollout newline: %w", err)
+		}
+	}
+	if err := rolloutW.Flush(); err != nil {
+		return fmt.Errorf("flush rollout: %w", err)
 	}
 	return nil
 }

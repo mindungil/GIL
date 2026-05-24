@@ -15,9 +15,12 @@ import (
 // Persister writes events to a JSONL append-only file.
 type Persister struct {
 	mu     sync.Mutex
+	dir    string
 	file   *os.File
 	w      *bufio.Writer
 	closed bool
+	count  int64
+	last   Event
 }
 
 // jsonEvent is the JSON serialization format (no proto, human-readable).
@@ -43,7 +46,7 @@ func NewPersister(dir string) (*Persister, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Persister{file: f, w: bufio.NewWriter(f)}, nil
+	return &Persister{dir: dir, file: f, w: bufio.NewWriter(f)}, nil
 }
 
 // Write appends an event to the JSONL file.
@@ -70,6 +73,8 @@ func (p *Persister) Write(e Event) error {
 	if _, err := p.w.Write(b); err != nil {
 		return err
 	}
+	p.count++
+	p.last = e
 	return p.w.WriteByte('\n')
 }
 
@@ -78,6 +83,12 @@ func (p *Persister) Sync() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if err := p.w.Flush(); err != nil {
+		return err
+	}
+	if err := p.writeCountLocked(); err != nil {
+		return err
+	}
+	if err := p.writeLastLocked(); err != nil {
 		return err
 	}
 	return p.file.Sync()
@@ -94,7 +105,35 @@ func (p *Persister) Close() error {
 	if p.w != nil {
 		_ = p.w.Flush()
 	}
+	_ = p.writeCountLocked()
+	_ = p.writeLastLocked()
 	return p.file.Close()
+}
+
+func (p *Persister) writeCountLocked() error {
+	if p == nil || p.dir == "" {
+		return nil
+	}
+	body := []byte(fmt.Sprintf("%d\n", p.count))
+	return os.WriteFile(filepath.Join(p.dir, "events.count"), body, 0o644)
+}
+
+func (p *Persister) writeLastLocked() error {
+	if p == nil || p.dir == "" {
+		return nil
+	}
+	body, err := json.Marshal(struct {
+		Type      string `json:"type"`
+		Timestamp string `json:"timestamp"`
+	}{
+		Type:      p.last.Type,
+		Timestamp: p.last.Timestamp.UTC().Format(time.RFC3339Nano),
+	})
+	if err != nil {
+		return err
+	}
+	body = append(body, '\n')
+	return os.WriteFile(filepath.Join(p.dir, "events.last"), body, 0o644)
 }
 
 // LoadAll reads all events from a JSONL file.

@@ -77,6 +77,33 @@ func TestAssembleSystemPrompt_Breakdown_PerSection(t *testing.T) {
 	require.Contains(t, out, "Memory Bank")
 }
 
+func TestAssembleSystemPrompt_GoalCheckpointIncludesCriteriaAndNonGoals(t *testing.T) {
+	spec := &gilv1.FrozenSpec{
+		Goal: &gilv1.Goal{
+			OneLiner:               "add a safer goal checkpoint",
+			Detailed:               "Make done/goal fit explicit.",
+			Tasks:                  []string{"write the diff", "run the checks"},
+			SuccessCriteriaNatural: []string{"goal is visible in the prompt", "review happens before done"},
+			NonGoals:               []string{"do not claim success early"},
+		},
+		Verification: &gilv1.Verification{},
+	}
+
+	out, _ := assembleSystemPrompt(SystemPromptInputs{
+		Spec:      spec,
+		Iteration: 2,
+		Options:   SystemPromptOptions{Compact: true},
+	})
+
+	require.Contains(t, out, "Goal checkpoint:")
+	require.Contains(t, out, "add a safer goal checkpoint")
+	require.Contains(t, out, "write the diff")
+	require.Contains(t, out, "goal is visible in the prompt")
+	require.Contains(t, out, "review happens before done")
+	require.Contains(t, out, "do not claim success early")
+	require.Contains(t, out, "compare the current diff and behavior against the goal and success criteria")
+}
+
 // TestAssembleSystemPrompt_LazyMemory_FirstIterationSkipsBank verifies
 // the diet rule: iter 1 must NOT include the memory bank section, iter
 // 2+ must. Iteration 0 (the test-helper sentinel meaning "no run loop")
@@ -267,7 +294,7 @@ func TestPickVerbosity_Matrix(t *testing.T) {
 		{"vllm", SystemPromptOptions{Compact: false}},
 		{"local", SystemPromptOptions{Compact: false}},
 		{"mock", SystemPromptOptions{Compact: true}},
-		{"", SystemPromptOptions{Compact: false}},               // unknown → verbose (safe)
+		{"", SystemPromptOptions{Compact: false}},                     // unknown → verbose (safe)
 		{"some-future-provider", SystemPromptOptions{Compact: false}}, // same
 	}
 	for _, c := range cases {

@@ -41,6 +41,7 @@ func TestBank_InitFromSpec_PopulatesUntouchedFiles(t *testing.T) {
 		Goal: &gilv1.Goal{
 			OneLiner:               "build a CLI",
 			SuccessCriteriaNatural: []string{"runs", "tests pass"},
+			Tasks:                  []string{"wire the commands", "write tests"},
 		},
 		Constraints: &gilv1.Constraints{TechStack: []string{"go", "cobra"}},
 	}
@@ -51,6 +52,8 @@ func TestBank_InitFromSpec_PopulatesUntouchedFiles(t *testing.T) {
 	pb, _ := b.Read(FileProjectBrief)
 	require.Contains(t, pb, "build a CLI")
 	require.Contains(t, pb, "runs")
+	require.Contains(t, pb, "## Tasks")
+	require.Contains(t, pb, "wire the commands")
 }
 
 func TestBank_InitFromSpec_LeavesCustomFilesAlone(t *testing.T) {

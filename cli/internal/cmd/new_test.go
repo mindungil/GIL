@@ -116,10 +116,20 @@ type testRunServer struct {
 // Start implements RunService.Start for testing.
 func (s *testRunServer) Start(ctx context.Context, req *gilv1.StartRunRequest) (*gilv1.StartRunResponse, error) {
 	return &gilv1.StartRunResponse{
-		Status:     "done",
-		Iterations: 1,
-		Tokens:     50,
+		Status:        "done",
+		Iterations:    1,
+		Tokens:        50,
 		VerifyResults: []*gilv1.VerifyResult{{Name: "ok", Passed: true}},
+	}, nil
+}
+
+func (s *testRunServer) Diff(ctx context.Context, req *gilv1.DiffRequest) (*gilv1.DiffResponse, error) {
+	return &gilv1.DiffResponse{
+		CheckpointSha: "abcdef1234567890",
+		FilesChanged:  2,
+		LinesAdded:    3,
+		LinesRemoved:  1,
+		UnifiedDiff:   "diff --git a/foo b/foo\n+bar\n",
 	}, nil
 }
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -39,10 +40,10 @@ import (
 // conversation and calls this tool with the structured slots.
 //
 // The schema is intentionally lightweight for V1: only goal.one_liner
-// is required. Optional slots (constraints, verification, budget,
-// autonomy) follow the existing FrozenSpec proto shape. Workspace and
-// models inherit from the session config; the agent doesn't need to
-// echo them back.
+// is required. Optional slots (tasks, constraints, verification,
+// budget, autonomy) follow the existing FrozenSpec proto shape.
+// Workspace and models inherit from the session config; the agent
+// doesn't need to echo them back.
 type toolFreezeSpec struct {
 	sess *SessionService
 	base string // sessionsBase — matches show_spec's pattern.
@@ -53,7 +54,8 @@ func (t *toolFreezeSpec) name() string { return "freeze_spec" }
 func (t *toolFreezeSpec) description() string {
 	return "Freeze the session's goal + constraints + verification into a persistent spec. " +
 		"Call when the user has agreed on what to do AND wants to proceed to an autonomous run. " +
-		"Only `goal.one_liner` is required; pass whatever else you've extracted from the conversation. " +
+		"Only `goal.one_liner` is required; pass whatever else you've extracted from the conversation, " +
+		"including goal.tasks if you have a concrete checklist. " +
 		"Once frozen the spec is immutable for this session — refusing further changes is the point. " +
 		"After freezing you may call start_run to kick the runner loop."
 }
@@ -62,14 +64,15 @@ func (t *toolFreezeSpec) schema() json.RawMessage {
 	return json.RawMessage(`{
 		"type": "object",
 		"properties": {
-			"goal": {
-				"type": "object",
-				"properties": {
-					"one_liner": {"type": "string", "description": "Required. Single-sentence statement of what the user wants done."},
-					"detailed": {"type": "string", "description": "Optional multi-paragraph elaboration."},
-					"success_criteria": {"type": "array", "items": {"type": "string"}, "description": "Natural-language criteria the user agreed signal completion."},
-					"non_goals": {"type": "array", "items": {"type": "string"}, "description": "What is explicitly out of scope."}
-				},
+				"goal": {
+					"type": "object",
+					"properties": {
+						"one_liner": {"type": "string", "description": "Required. Single-sentence statement of what the user wants done."},
+						"detailed": {"type": "string", "description": "Optional multi-paragraph elaboration."},
+						"success_criteria": {"type": "array", "items": {"type": "string"}, "description": "Natural-language criteria the user agreed signal completion."},
+						"non_goals": {"type": "array", "items": {"type": "string"}, "description": "What is explicitly out of scope."},
+						"tasks": {"type": "array", "items": {"type": "string"}, "description": "Concrete to-do items the agent should complete on the way to the goal."}
+					},
 				"required": ["one_liner"],
 				"additionalProperties": false
 			},
@@ -134,6 +137,7 @@ type goalArg struct {
 	Detailed        string   `json:"detailed"`
 	SuccessCriteria []string `json:"success_criteria"`
 	NonGoals        []string `json:"non_goals"`
+	Tasks           []string `json:"tasks"`
 }
 
 func (g *goalArg) UnmarshalJSON(b []byte) error {
@@ -164,9 +168,9 @@ func (g *goalArg) UnmarshalJSON(b []byte) error {
 // schema's nested `"required": ["one_liner"]` as a top-level field
 // (iter127a observation).
 type freezeSpecArgs struct {
-	Goal             goalArg `json:"goal"`
-	TopOneLiner      string  `json:"one_liner"`
-	TopDetailed      string  `json:"detailed"`
+	Goal        goalArg `json:"goal"`
+	TopOneLiner string  `json:"one_liner"`
+	TopDetailed string  `json:"detailed"`
 	Constraints struct {
 		TechStack []string `json:"tech_stack"`
 		Forbidden []string `json:"forbidden"`
@@ -254,7 +258,20 @@ func (t *toolFreezeSpec) run(ctx context.Context, sessionID string, argsJSON jso
 				IsError: true,
 			}, nil
 		}
+		if uerr := t.sess.repo.UpdateFrozenGoalSummary(ctx, sessionID, session.FrozenGoalSummary{
+			OneLiner:        fs.Goal.OneLiner,
+			Detailed:        fs.Goal.Detailed,
+			SuccessCriteria: append([]string(nil), fs.Goal.SuccessCriteriaNatural...),
+			NonGoals:        append([]string(nil), fs.Goal.NonGoals...),
+			Tasks:           append([]string(nil), fs.Goal.Tasks...),
+		}); uerr != nil {
+			return provider.ToolResult{
+				Content: fmt.Sprintf("spec frozen but goal summary update failed: %v", uerr),
+				IsError: true,
+			}, nil
+		}
 	}
+	_ = persistFrozenSpecSummaryFile(filepath.Join(t.base, sessionID), fs)
 
 	return provider.ToolResult{Content: renderFreezeSummary(fs)}, nil
 }
@@ -272,6 +289,7 @@ func buildFrozenSpec(sessionID string, args freezeSpecArgs) *gilv1.FrozenSpec {
 			Detailed:               args.Goal.Detailed,
 			SuccessCriteriaNatural: args.Goal.SuccessCriteria,
 			NonGoals:               args.Goal.NonGoals,
+			Tasks:                  args.Goal.Tasks,
 		},
 	}
 	if len(args.Constraints.TechStack) > 0 ||
@@ -340,6 +358,12 @@ func renderFreezeSummary(fs *gilv1.FrozenSpec) string {
 	if len(fs.Goal.NonGoals) > 0 {
 		fmt.Fprintf(&b, "non-goals: %d\n", len(fs.Goal.NonGoals))
 	}
+	if len(fs.Goal.Tasks) > 0 {
+		fmt.Fprintf(&b, "tasks: %d\n", len(fs.Goal.Tasks))
+		for i, task := range fs.Goal.Tasks {
+			fmt.Fprintf(&b, "  %d. %s\n", i+1, task)
+		}
+	}
 	if fs.Verification != nil && len(fs.Verification.Checks) > 0 {
 		fmt.Fprintf(&b, "verification checks: %d\n", len(fs.Verification.Checks))
 	}
@@ -353,6 +377,42 @@ func renderFreezeSummary(fs *gilv1.FrozenSpec) string {
 	}
 	b.WriteString("session status → frozen. Call start_run to begin the autonomous run.")
 	return b.String()
+}
+
+func persistFrozenSpecSummaryFile(dir string, fs *gilv1.FrozenSpec) error {
+	if fs == nil {
+		return nil
+	}
+	summary := map[string]any{
+		"goal": map[string]any{
+			"one_liner":                fs.Goal.OneLiner,
+			"detailed":                 fs.Goal.Detailed,
+			"success_criteria_natural": fs.Goal.SuccessCriteriaNatural,
+			"non_goals":                fs.Goal.NonGoals,
+			"tasks":                    fs.Goal.Tasks,
+		},
+	}
+	body, err := json.Marshal(summary)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, "spec.summary.json.tmp.*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if _, err := tmp.Write(body); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, filepath.Join(dir, "spec.summary.json"))
 }
 
 // --- start_run ------------------------------------------------------

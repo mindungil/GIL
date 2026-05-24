@@ -71,7 +71,7 @@ type Result struct {
 // iterations: each provider response increments the role that drove that
 // Complete() call.
 type RoleUsage struct {
-	Calls        int     // number of provider.Complete invocations charged to this role
+	Calls        int // number of provider.Complete invocations charged to this role
 	InputTokens  int64
 	OutputTokens int64
 	CostUSD      float64
@@ -127,11 +127,11 @@ type AgentLoop struct {
 	Checkpoint *checkpoint.ShadowGit
 
 	// Stuck detector + recovery strategy. Both optional. If nil, no detection.
-	StuckDetector  *stuck.Detector
-	StuckStrategy  stuck.Strategy // currently ModelEscalateStrategy
-	ModelChain     []string       // ordered list for ModelEscalateStrategy
-	StuckThreshold int            // abort after this many UN-recovered signals; default 3 if zero
-	StuckCheckEvery int           // run detector every N iterations; default 1 if zero
+	StuckDetector   *stuck.Detector
+	StuckStrategy   stuck.Strategy // currently ModelEscalateStrategy
+	ModelChain      []string       // ordered list for ModelEscalateStrategy
+	StuckThreshold  int            // abort after this many UN-recovered signals; default 3 if zero
+	StuckCheckEvery int            // run detector every N iterations; default 1 if zero
 
 	// AdversaryModel is used by AdversaryConsultStrategy. If empty, falls back
 	// to a.Model.
@@ -517,19 +517,19 @@ loop:
 		// iter 1 still sees which role drove the opener.
 		if role != lastRole {
 			a.emit(event.SourceSystem, event.KindNote, "model_switched", map[string]any{
-				"from":     lastRole,
-				"to":       role,
-				"model":    iterModel,
-				"iter":     iter,
-				"reason":   modelSwitchReason(iter-1, lastResponse, role),
+				"from":   lastRole,
+				"to":     role,
+				"model":  iterModel,
+				"iter":   iter,
+				"reason": modelSwitchReason(iter-1, lastResponse, role),
 			})
 		}
 
 		a.emit(event.SourceAgent, event.KindAction, "provider_request", map[string]any{
-			"model":   iterModel,
-			"role":    role,
-			"msgs":    len(messages),
-			"tools":   len(tools),
+			"model": iterModel,
+			"role":  role,
+			"msgs":  len(messages),
+			"tools": len(tools),
 		})
 
 		// Build the effective system prompt for this iteration via the
@@ -682,12 +682,12 @@ loop:
 			// reserve survives for the post-loop verify pass.
 			if totalTokens >= effectiveMaxTokens {
 				a.emit(event.SourceSystem, event.KindNote, "budget_exceeded", map[string]any{
-					"reason":             "tokens",
-					"used":               totalTokens,
-					"limit":              budgetMaxTokens,
-					"effective_limit":    effectiveMaxTokens,
-					"reserve":            budgetReserveTokens,
-					"fraction":           frac,
+					"reason":          "tokens",
+					"used":            totalTokens,
+					"limit":           budgetMaxTokens,
+					"effective_limit": effectiveMaxTokens,
+					"reserve":         budgetReserveTokens,
+					"fraction":        frac,
 				})
 				a.syncGraceState(totalTokens, totalCostUSD, budgetMaxTokens, budgetMaxCostUSD, messages)
 				exit = exitState{reason: "budget_tokens", iterations: iter}
@@ -857,7 +857,7 @@ loop:
 					a.emit(event.SourceSystem, event.KindNote, "memory_milestone_start", nil)
 					nudge := provider.Message{
 						Role:    provider.RoleUser,
-						Content: "Verification passed. Before declaring done, review the memory bank: is there anything from this run worth recording for future sessions? If yes, call memory_update once or twice now. If no, just reply with 'no update'.",
+						Content: buildGoalReviewNudge(a.Spec),
 					}
 					milestoneMsgs := append(messages[:len(messages):len(messages)], nudge)
 					// Milestone is a one-off "any closing memory updates?"
@@ -1437,6 +1437,37 @@ func (s *subagentRunnerAdapter) RunSubagentWithConfig(ctx context.Context, cfg t
 		out.Tokens = res.Tokens
 	}
 	return out, err
+}
+
+func buildGoalReviewNudge(spec *gilv1.FrozenSpec) string {
+	goal := "(no goal specified)"
+	if spec != nil && spec.Goal != nil && spec.Goal.OneLiner != "" {
+		goal = spec.Goal.OneLiner
+	}
+	var sb strings.Builder
+	sb.WriteString("Verification passed. Before declaring done, compare the current diff against the goal and success criteria. ")
+	sb.WriteString("Goal: ")
+	sb.WriteString(goal)
+	sb.WriteString(". ")
+	if spec != nil && spec.Goal != nil {
+		if len(spec.Goal.Tasks) > 0 {
+			sb.WriteString("Tasks: ")
+			sb.WriteString(strings.Join(spec.Goal.Tasks, "; "))
+			sb.WriteString(". ")
+		}
+		if len(spec.Goal.SuccessCriteriaNatural) > 0 {
+			sb.WriteString("Success criteria: ")
+			sb.WriteString(strings.Join(spec.Goal.SuccessCriteriaNatural, "; "))
+			sb.WriteString(". Make sure each listed success criterion is actually met. ")
+		}
+		if len(spec.Goal.NonGoals) > 0 {
+			sb.WriteString("Non-goals: ")
+			sb.WriteString(strings.Join(spec.Goal.NonGoals, "; "))
+			sb.WriteString(". Do not declare success if any listed non-goal is violated. ")
+		}
+	}
+	sb.WriteString("If anything is off, fix it now. Then review the memory bank: is there anything from this run worth recording for future sessions? If yes, call memory_update once or twice now. If no, just reply with 'no update'.")
+	return sb.String()
 }
 
 // buildSystemPrompt is a thin compatibility shim around assembleSystemPrompt

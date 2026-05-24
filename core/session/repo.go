@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -41,6 +42,12 @@ type Session struct {
 	// dropped. See server/internal/service/session_prompt.go.
 	CachedSystemPrompt string
 	CachedPromptKey    string
+
+	FrozenGoalOneLiner            string
+	FrozenGoalDetailed            string
+	FrozenGoalSuccessCriteriaJSON string
+	FrozenGoalNonGoalsJSON        string
+	FrozenGoalTasksJSON           string
 }
 
 // CreateInput captures the fields the caller supplies for a new session.
@@ -103,14 +110,20 @@ func (r *Repo) Get(ctx context.Context, id string) (Session, error) {
 		SELECT id, status, created_at, updated_at, spec_id, working_dir, goal_hint,
 		       total_tokens, total_cost_usd,
 		       parent_session_id, subagent_depth, subagent_label,
-		       cached_system_prompt, cached_prompt_key
+		       cached_system_prompt, cached_prompt_key,
+		       frozen_goal_one_liner, frozen_goal_detailed,
+		       frozen_goal_success_criteria_json, frozen_goal_non_goals_json,
+		       frozen_goal_tasks_json
 		FROM sessions WHERE id = ?
 	`, id)
 	var s Session
 	err := row.Scan(&s.ID, &s.Status, &s.CreatedAt, &s.UpdatedAt, &s.SpecID, &s.WorkingDir, &s.GoalHint,
 		&s.TotalTokens, &s.TotalCostUSD,
 		&s.ParentSessionID, &s.SubagentDepth, &s.SubagentLabel,
-		&s.CachedSystemPrompt, &s.CachedPromptKey)
+		&s.CachedSystemPrompt, &s.CachedPromptKey,
+		&s.FrozenGoalOneLiner, &s.FrozenGoalDetailed,
+		&s.FrozenGoalSuccessCriteriaJSON, &s.FrozenGoalNonGoalsJSON,
+		&s.FrozenGoalTasksJSON)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Session{}, ErrNotFound
 	}
@@ -136,6 +149,40 @@ func (r *Repo) UpdateCachedSystemPrompt(ctx context.Context, id, prompt, key str
 	return nil
 }
 
+type FrozenGoalSummary struct {
+	OneLiner        string
+	Detailed        string
+	SuccessCriteria []string
+	NonGoals        []string
+	Tasks           []string
+}
+
+func (r *Repo) UpdateFrozenGoalSummary(ctx context.Context, id string, summary FrozenGoalSummary) error {
+	successJSON, err := json.Marshal(summary.SuccessCriteria)
+	if err != nil {
+		return fmt.Errorf("session.UpdateFrozenGoalSummary success criteria: %w", err)
+	}
+	nonGoalsJSON, err := json.Marshal(summary.NonGoals)
+	if err != nil {
+		return fmt.Errorf("session.UpdateFrozenGoalSummary non-goals: %w", err)
+	}
+	tasksJSON, err := json.Marshal(summary.Tasks)
+	if err != nil {
+		return fmt.Errorf("session.UpdateFrozenGoalSummary tasks: %w", err)
+	}
+	_, err = r.db.ExecContext(ctx, `
+		UPDATE sessions
+		SET frozen_goal_one_liner = ?, frozen_goal_detailed = ?,
+		    frozen_goal_success_criteria_json = ?, frozen_goal_non_goals_json = ?,
+		    frozen_goal_tasks_json = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, summary.OneLiner, summary.Detailed, string(successJSON), string(nonGoalsJSON), string(tasksJSON), id)
+	if err != nil {
+		return fmt.Errorf("session.UpdateFrozenGoalSummary: %w", err)
+	}
+	return nil
+}
+
 // List returns sessions ordered by created_at desc, optionally filtered by status.
 func (r *Repo) List(ctx context.Context, opts ListOptions) ([]Session, error) {
 	limit := opts.Limit
@@ -145,7 +192,10 @@ func (r *Repo) List(ctx context.Context, opts ListOptions) ([]Session, error) {
 	q := `SELECT id, status, created_at, updated_at, spec_id, working_dir, goal_hint,
 	             total_tokens, total_cost_usd,
 	             parent_session_id, subagent_depth, subagent_label,
-	             cached_system_prompt, cached_prompt_key
+	             cached_system_prompt, cached_prompt_key,
+	             frozen_goal_one_liner, frozen_goal_detailed,
+	             frozen_goal_success_criteria_json, frozen_goal_non_goals_json,
+	             frozen_goal_tasks_json
 	      FROM sessions`
 	args := []any{}
 	if opts.StatusFilter != "" {
@@ -167,7 +217,10 @@ func (r *Repo) List(ctx context.Context, opts ListOptions) ([]Session, error) {
 		if err := rows.Scan(&s.ID, &s.Status, &s.CreatedAt, &s.UpdatedAt, &s.SpecID, &s.WorkingDir, &s.GoalHint,
 			&s.TotalTokens, &s.TotalCostUSD,
 			&s.ParentSessionID, &s.SubagentDepth, &s.SubagentLabel,
-			&s.CachedSystemPrompt, &s.CachedPromptKey); err != nil {
+			&s.CachedSystemPrompt, &s.CachedPromptKey,
+			&s.FrozenGoalOneLiner, &s.FrozenGoalDetailed,
+			&s.FrozenGoalSuccessCriteriaJSON, &s.FrozenGoalNonGoalsJSON,
+			&s.FrozenGoalTasksJSON); err != nil {
 			return nil, fmt.Errorf("session.List scan: %w", err)
 		}
 		out = append(out, s)

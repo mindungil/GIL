@@ -80,6 +80,7 @@ message Goal {
   string detailed = 2;
   repeated string success_criteria_natural = 3;
   repeated string non_goals = 4;
+  repeated string tasks = 5;
 }
 
 message Constraints {

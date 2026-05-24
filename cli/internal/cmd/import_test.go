@@ -82,6 +82,10 @@ func TestImport_RoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, srcEvents, dstEvents, "imported events.jsonl must match the source byte-for-byte")
 
+	rolloutEvents, err := os.ReadFile(filepath.Join(filepath.Dir(layout.SessionsDir()), "rollouts", newID+".jsonl"))
+	require.NoError(t, err)
+	require.Equal(t, srcEvents, rolloutEvents, "imported rollout must match the source event log byte-for-byte")
+
 	// 4. Re-export the imported session and compare event lines.
 	reExportPath := filepath.Join(t.TempDir(), "re-export.jsonl")
 	_, err = runExport(t, []string{

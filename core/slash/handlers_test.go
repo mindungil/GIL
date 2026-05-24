@@ -12,6 +12,8 @@ import (
 
 	"github.com/mindungil/gil/core/checkpoint"
 	"github.com/mindungil/gil/core/paths"
+	"github.com/mindungil/gil/core/specstore"
+	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
 )
 
 func newTestEnv(t *testing.T, sessionID string) (*Registry, *HandlerEnv, paths.Layout, string) {
@@ -38,7 +40,7 @@ func TestRegisterDefaults_RegistersNine(t *testing.T) {
 		names = append(names, s.Name)
 	}
 	require.ElementsMatch(t, []string{
-		"agents", "clear", "compact", "cost", "diff", "help", "model", "quit", "status",
+		"agents", "clear", "compact", "cost", "diff", "goal", "help", "model", "quit", "status",
 	}, names)
 }
 
@@ -48,7 +50,7 @@ func TestHelpHandler_ListsAllCommands(t *testing.T) {
 	require.True(t, ok)
 	out, err := s.Handler(context.Background(), Command{Name: "help"})
 	require.NoError(t, err)
-	for _, c := range []string{"/help", "/status", "/cost", "/clear", "/compact", "/model", "/agents", "/diff", "/quit"} {
+	for _, c := range []string{"/help", "/status", "/goal", "/cost", "/clear", "/compact", "/model", "/agents", "/diff", "/quit"} {
 		require.Contains(t, out, c, "help should mention %s", c)
 	}
 	// Aliases listed for /quit
@@ -85,6 +87,32 @@ func TestStatusHandler_PrintsFromFetcher(t *testing.T) {
 	require.Contains(t, out, "ship it")
 	require.Contains(t, out, "Iteration:  3")
 	require.Contains(t, out, "1000")
+}
+
+func TestGoalHandler_PrintsFrozenGoalAndLatest(t *testing.T) {
+	reg, env, layout, _ := newTestEnv(t, "sess-1")
+	store := specstore.NewStore(filepath.Join(layout.SessionsDir(), "sess-1"))
+	require.NoError(t, store.Save(&gilv1.FrozenSpec{
+		Goal: &gilv1.Goal{
+			OneLiner:               "add a goal command",
+			Detailed:               "keep the user anchored to the frozen task",
+			Tasks:                  []string{"show the one-liner", "show tasks"},
+			SuccessCriteriaNatural: []string{"goal visible"},
+			NonGoals:               []string{"do not hide the goal"},
+		},
+	}))
+	require.NoError(t, os.MkdirAll(filepath.Join(filepath.Dir(layout.SessionsDir()), "rollouts"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(filepath.Dir(layout.SessionsDir()), "rollouts", "sess-1.jsonl"), []byte(`{"id":1,"timestamp":"2025-06-01T12:00:00Z","source":2,"kind":3,"type":"tool_call","data":"{}"}`+"\n"), 0o644))
+	env.Run = &fakeRunControl{diffResult: &DiffResult{CheckpointSHA: "abcdef1234567890", FilesChanged: 2, LinesAdded: 3, LinesRemoved: 1, UnifiedDiff: "diff --git a/foo b/foo\n+bar\n"}}
+	s, _ := reg.Lookup("goal")
+	out, err := s.Handler(context.Background(), Command{Name: "goal"})
+	require.NoError(t, err)
+	require.Contains(t, out, "Goal: add a goal command")
+	require.Contains(t, out, "show the one-liner")
+	require.Contains(t, out, "goal visible")
+	require.Contains(t, out, "Latest activity: tool_call")
+	require.Contains(t, out, "Workspace diff:")
+	require.Contains(t, out, "2 files, +3/-1")
 }
 
 func TestCostHandler_StubMessageWhenNoFetcher(t *testing.T) {

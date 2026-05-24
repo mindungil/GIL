@@ -176,6 +176,29 @@ func TestPromptSystemPromptInclusion_MemoryAppears(t *testing.T) {
 		"system prompt must include the pre-seeded memory; got prefix: %q", capturing.systemSeen[:min(200, len(capturing.systemSeen))])
 }
 
+func TestPromptSystemPromptInclusion_GoalHintAppears(t *testing.T) {
+	repo := newTestRepo(t)
+	wd := t.TempDir()
+	sess, err := repo.Create(context.Background(), session.CreateInput{
+		WorkingDir: wd,
+		GoalHint:   "add a pinned goal reminder",
+	})
+	require.NoError(t, err)
+
+	capturing := &capturingProvider{}
+	factory := func(name string) (provider.Provider, string, error) {
+		return capturing, "mock-model", nil
+	}
+	svc := NewSessionService(repo, nil).WithProviderFactory(factory)
+	stream := &fakePromptStream{ctx: context.Background()}
+	_ = svc.Prompt(promptReq(sess.ID, "hello"), stream)
+
+	require.NotEmpty(t, capturing.systemSeen)
+	require.Contains(t, capturing.systemSeen, "## Session Goal")
+	require.Contains(t, capturing.systemSeen, "add a pinned goal reminder")
+	require.Contains(t, capturing.systemSeen, "compare the current diff and behavior against this pinned goal")
+}
+
 // capturingProvider records the System string from each Request so
 // the test can assert on what the agent saw. Returns a trivial
 // end_turn response.

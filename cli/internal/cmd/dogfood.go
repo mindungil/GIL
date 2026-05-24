@@ -24,20 +24,20 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/mindungil/gil/sdk"
 	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
+	"github.com/mindungil/gil/sdk"
 )
 
 func dogfoodCmd() *cobra.Command {
 	var (
-		socket      string
-		workingDir  string
-		provider    string
-		model       string
-		maxTurns    int
-		maxWall     time.Duration
-		tracePath   string
-		assertCmds  []string
+		socket         string
+		workingDir     string
+		provider       string
+		model          string
+		maxTurns       int
+		maxWall        time.Duration
+		tracePath      string
+		assertCmds     []string
 		temperature    float64
 		adversaryModel string
 	)
@@ -101,6 +101,8 @@ Termination:
 			defer cli.Close()
 
 			out := cmd.OutOrStdout()
+			progressOut := out
+			summaryOut := out
 			var traceW io.Writer = out
 			if tracePath != "" {
 				f, err := os.Create(tracePath)
@@ -109,21 +111,24 @@ Termination:
 				}
 				defer f.Close()
 				traceW = f
+			} else {
+				progressOut = cmd.ErrOrStderr()
+				summaryOut = progressOut
 			}
 
 			runner := &dogfoodRunner{
-				cli:         cli,
-				workingDir:  absWD,
-				provider:    provider,
-				model:       model,
-				maxTurns:    maxTurns,
-				maxWall:     maxWall,
-				initial:     string(initialBytes),
-				assertCmds:  assertCmds,
+				cli:            cli,
+				workingDir:     absWD,
+				provider:       provider,
+				model:          model,
+				maxTurns:       maxTurns,
+				maxWall:        maxWall,
+				initial:        string(initialBytes),
+				assertCmds:     assertCmds,
 				temperature:    temperature,
 				adversaryModel: adversaryModel,
 				trace:          json.NewEncoder(traceW),
-				stdout:         out,
+				progress:       progressOut,
 			}
 			result, err := runner.Run(ctx)
 			if err != nil {
@@ -131,13 +136,14 @@ Termination:
 			}
 			// Run assertions in the working dir.
 			result.runAssertions(ctx, absWD, assertCmds)
-			// Final summary line on stdout (always — even when trace is
-			// in a file, the user wants the verdict).
-			fmt.Fprintln(out, result.summaryLine())
+			// Final summary line stays human-readable. When trace
+			// defaults to stdout, send human progress to stderr so stdout
+			// remains valid JSONL.
+			fmt.Fprintln(summaryOut, result.summaryLine())
 			// Emit the structured summary as the last JSONL record.
 			_ = runner.trace.Encode(result.summaryRecord())
-			if !result.allAssertionsPassed() {
-				return fmt.Errorf("dogfood assertion failed")
+			if !result.success() {
+				return fmt.Errorf("dogfood %s", verdictFromReason(result))
 			}
 			return nil
 		},
@@ -157,24 +163,24 @@ Termination:
 
 // dogfoodRunner holds the per-invocation state. One Run() per command.
 type dogfoodRunner struct {
-	cli         *sdk.Client
-	workingDir  string
-	provider    string
-	model       string
-	maxTurns    int
-	maxWall     time.Duration
-	initial     string
+	cli            *sdk.Client
+	workingDir     string
+	provider       string
+	model          string
+	maxTurns       int
+	maxWall        time.Duration
+	initial        string
 	assertCmds     []string
 	temperature    float64
 	adversaryModel string
 
-	trace  *json.Encoder
-	stdout io.Writer
+	trace    *json.Encoder
+	progress io.Writer
 
-	sessionID  string
-	startedAt  time.Time
-	totalCost  float64
-	totalInTok int64
+	sessionID   string
+	startedAt   time.Time
+	totalCost   float64
+	totalInTok  int64
 	totalOutTok int64
 }
 
@@ -247,7 +253,7 @@ func (r *dogfoodRunner) Run(ctx context.Context) (*dogfoodResult, error) {
 		r.totalOutTok += turnRec.TokensOut
 		turnRec.WallMs = time.Since(t0).Milliseconds()
 		_ = r.trace.Encode(turnRec)
-		fmt.Fprintf(r.stdout, "[dogfood] turn %d stop=%s wall=%dms cost=$%.4f\n",
+		fmt.Fprintf(r.progress, "[dogfood] turn %d stop=%s wall=%dms cost=$%.4f\n",
 			turn, turnRec.StopReason, turnRec.WallMs, turnRec.CostUSD)
 
 		nextPrompt = recoveryPromptFor(turnRec)
@@ -294,12 +300,12 @@ func (r *dogfoodRunner) Run(ctx context.Context) (*dogfoodResult, error) {
 					}
 					if consecutiveStalled >= maxStalledRecoveries {
 						result.Reason = "stalled"
-						fmt.Fprintf(r.stdout, "[dogfood] turn %d ABANDONED — %d consecutive empty re-engagements; agent not making progress\n",
+						fmt.Fprintf(r.progress, "[dogfood] turn %d ABANDONED — %d consecutive empty re-engagements; agent not making progress\n",
 							turn, consecutiveStalled)
 						break
 					}
 					nextPrompt = assertionRecoveryPrompt(failedTail)
-					fmt.Fprintf(r.stdout, "[dogfood] turn %d agent declared done BUT assertion failed — re-engaging (stalled=%d)\n", turn, consecutiveStalled)
+					fmt.Fprintf(r.progress, "[dogfood] turn %d agent declared done BUT assertion failed — re-engaging (stalled=%d)\n", turn, consecutiveStalled)
 					continue
 				}
 			}
@@ -491,6 +497,13 @@ func recoveryPromptFor(rec *turnRecord) string {
 		// assertion check will record the actual workspace state
 		// and the runner exits with the verdict.
 		return ""
+	case "tool_error_loop":
+		// P69 fired — the agent locked onto a malformed tool call that
+		// kept returning the same error (e.g. write_file with empty
+		// args). Unlike a timeout loop, a fresh turn with explicit
+		// guidance usually breaks the fixation. If it loops again the
+		// breaker re-fires and max-turns / max-wall bound the total.
+		return "Your previous turn repeated the SAME failing tool call several times and was aborted. STOP repeating that call. Re-read the tool's required arguments; if a tool keeps rejecting your input, switch approach — e.g. write the file with a run_bash heredoc, or split one large write into smaller edits. DO NOT ask me anything — adapt and proceed."
 	default:
 		// Unknown stop reason — assume continue, but don't loop
 		// infinitely if the agent keeps producing nothing.
@@ -528,14 +541,7 @@ func (r *dogfoodResult) allAssertionsPassed() bool {
 }
 
 func (r *dogfoodResult) summaryLine() string {
-	verdict := "PASS"
-	if !r.allAssertionsPassed() {
-		verdict = "FAIL"
-	} else if r.Reason == "max_turns" || r.Reason == "max_wall" {
-		verdict = "INCOMPLETE"
-	} else if r.Reason == "error" || r.Reason == "daemon_gone" {
-		verdict = "ERROR"
-	}
+	verdict := verdictFromReason(r)
 	return fmt.Sprintf("[dogfood] %s — turns=%d wall=%s cost=$%.4f session=%s reason=%s",
 		verdict, r.Turns, time.Duration(r.TotalWallMs)*time.Millisecond,
 		r.TotalCostUSD, r.SessionID, r.Reason)
@@ -569,6 +575,10 @@ func verdictFromReason(r *dogfoodResult) string {
 	default:
 		return "ERROR"
 	}
+}
+
+func (r *dogfoodResult) success() bool {
+	return verdictFromReason(r) == "PASS"
 }
 
 func head(s string, n int) string {

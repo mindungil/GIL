@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -35,7 +36,8 @@ func TestToolFreezeSpec_HappyPath(t *testing.T) {
 	res, err := tool.run(context.Background(), sid, json.RawMessage(`{
 		"goal": {
 			"one_liner": "add a Hello() function returning 'hi'",
-			"success_criteria": ["go test ./... passes"]
+			"success_criteria": ["go test ./... passes"],
+			"tasks": ["add the function", "add tests", "run go test"]
 		},
 		"verification": {
 			"checks": [
@@ -57,12 +59,19 @@ func TestToolFreezeSpec_HappyPath(t *testing.T) {
 	require.NoError(t, lerr)
 	require.NotNil(t, fs.Goal)
 	require.Equal(t, "add a Hello() function returning 'hi'", fs.Goal.OneLiner)
+	require.Equal(t, []string{"add the function", "add tests", "run go test"}, fs.Goal.Tasks)
 	require.Len(t, fs.Verification.Checks, 2)
+	summaryBody, err := os.ReadFile(filepath.Join(base, sid, "spec.summary.json"))
+	require.NoError(t, err)
+	require.Contains(t, string(summaryBody), `"one_liner":"add a Hello() function returning 'hi'"`)
+	require.Contains(t, string(summaryBody), `"tasks":["add the function","add tests","run go test"]`)
 
 	// Session status flips to frozen so RunService.Start accepts it.
 	got, gerr := sess.repo.Get(context.Background(), sid)
 	require.NoError(t, gerr)
 	require.Equal(t, "frozen", got.Status)
+	require.Equal(t, "add a Hello() function returning 'hi'", got.FrozenGoalOneLiner)
+	require.Contains(t, got.FrozenGoalTasksJSON, "add the function")
 }
 
 // iter127a: agents repeatedly emit `{"goal": "bare string", "one_liner": "..."}`
@@ -135,7 +144,7 @@ func TestToolFreezeSpec_AlreadyFrozenRejects(t *testing.T) {
 
 func TestToolFreezeSpec_AutonomyDialParse(t *testing.T) {
 	cases := []struct {
-		in       string
+		in        string
 		wantUnset bool
 	}{
 		{"plan_only", false},

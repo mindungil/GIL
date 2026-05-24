@@ -11,12 +11,12 @@ import (
 	"testing"
 	"time"
 
-	_ "modernc.org/sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/test/bufconn"
+	_ "modernc.org/sqlite"
 
 	"github.com/mindungil/gil/core/checkpoint"
 	"github.com/mindungil/gil/core/event"
@@ -140,10 +140,20 @@ func TestRunService_Start_PersistsEventsToDisk(t *testing.T) {
 	eventsPath := filepath.Join(sessionsBase, s.ID, "events", "events.jsonl")
 	require.FileExists(t, eventsPath)
 
+	rolloutPath := filepath.Join(filepath.Dir(sessionsBase), "rollouts", s.ID+".jsonl")
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(rolloutPath)
+		return err == nil
+	}, 2*time.Second, 20*time.Millisecond)
+
 	// Load and verify event count > 0
 	loaded, err := event.LoadAll(eventsPath)
 	require.NoError(t, err)
 	require.NotEmpty(t, loaded)
+
+	rolloutLoaded, err := event.LoadAll(rolloutPath)
+	require.NoError(t, err)
+	require.NotEmpty(t, rolloutLoaded)
 
 	// Should contain at least an iteration_start and run_done
 	types := map[string]int{}

@@ -1,6 +1,6 @@
 // Package cmd — `gil session orphans` lists sessions that were reaped
 // by P36 (daemon_restart) or P38 (stale_heartbeat). Uses the audit
-// row in events.jsonl as the source of truth, so a session that
+// row in the append-only session log as the source of truth, so a session that
 // was orphaned and later manually re-run is still listed (the audit
 // row is forensic).
 package cmd
@@ -9,7 +9,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -31,11 +30,11 @@ type orphanRow struct {
 }
 
 // orphanData mirrors the JSON payload P36 (daemon_restart) and P38
-// (stale_heartbeat) write to events.jsonl for run_orphaned events.
+// (stale_heartbeat) write to the session log for run_orphaned events.
 type orphanData struct {
-	Reason       string `json:"reason"`
-	PriorStatus  string `json:"prior_status"`
-	AutoResume   bool   `json:"auto_resume"`
+	Reason      string `json:"reason"`
+	PriorStatus string `json:"prior_status"`
+	AutoResume  bool   `json:"auto_resume"`
 }
 
 func sessionOrphansCmd() *cobra.Command {
@@ -45,11 +44,11 @@ func sessionOrphansCmd() *cobra.Command {
 	c := &cobra.Command{
 		Use:   "orphans",
 		Short: "List sessions that were reaped (P36 daemon restart / P38 stale heartbeat)",
-		Long: `List sessions whose events.jsonl carries a run_orphaned audit
+		Long: `List sessions whose session log carries a run_orphaned audit
 row. Useful after a daemon bounce ("which of my runs got killed?")
 or for forensic review of mid-session sweeper activity.
 
-The list reads the per-session events.jsonl directly — gild does NOT
+The list reads the per-session session log directly — gild does NOT
 need to be running. A session that was orphaned and later manually
 re-run via ` + "`gil run`" + ` is still listed; the audit row is
 forensic, not a live state. To re-trigger a stopped orphan, run
@@ -119,12 +118,12 @@ spec opted in via Risk.ResumeOnRestart).`,
 	return c
 }
 
-// loadOrphanRow inspects the session's events.jsonl for the most
+// loadOrphanRow inspects the session's append-only log for the most
 // recent run_orphaned row. Returns found=false when none present.
 // Best-effort: read errors, JSON parse errors, missing file all
 // just mean "no orphan row" rather than failing the whole listing.
 func loadOrphanRow(sessionsDir, sessionID, goal, status string) (orphanRow, bool) {
-	eventsPath := filepath.Join(sessionsDir, sessionID, "events", "events.jsonl")
+	eventsPath := sessionEventLogPath(sessionsDir, sessionID)
 	events, err := event.LoadAll(eventsPath)
 	if err != nil {
 		return orphanRow{}, false

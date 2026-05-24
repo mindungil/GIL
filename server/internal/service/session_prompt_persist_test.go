@@ -2,7 +2,9 @@ package service
 
 import (
 	"database/sql"
+	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -113,6 +115,50 @@ func TestChatHistory_ResetWipesRows(t *testing.T) {
 	require.Empty(t, revived.get("sess-reset"), "reset must wipe persisted rows so restart doesn't resurrect them")
 }
 
+func TestChatHistory_RolloutJournalAppendsMessageResetAndCompact(t *testing.T) {
+	rolloutBase := filepath.Join(t.TempDir(), "chat_rollouts")
+	h := newChatHistory()
+	h.SetRolloutBase(rolloutBase)
+
+	h.append("sess-rollout", provider.Message{Role: provider.RoleUser, Content: "hello"})
+	h.ReplaceInMemory("sess-rollout", []provider.Message{
+		{Role: provider.RoleUser, Content: "hello"},
+		{Role: provider.RoleAssistant, Content: "hi"},
+	})
+	h.reset("sess-rollout")
+
+	body, err := os.ReadFile(filepath.Join(rolloutBase, "sess-rollout.jsonl"))
+	require.NoError(t, err)
+	lines := splitNonEmptyLines(string(body))
+	require.Len(t, lines, 3)
+	require.Contains(t, lines[0], `"type":"message"`)
+	require.Contains(t, lines[0], `"role":"user"`)
+	require.Contains(t, lines[1], `"type":"compact"`)
+	require.Contains(t, lines[1], `"before":1`)
+	require.Contains(t, lines[1], `"after":2`)
+	require.Contains(t, lines[2], `"type":"reset"`)
+	require.Contains(t, lines[2], `"before":2`)
+}
+
+func TestChatHistory_RolloutHydratesAfterRestart(t *testing.T) {
+	rolloutBase := filepath.Join(t.TempDir(), "chat_rollouts")
+	h := newChatHistory()
+	h.SetRolloutBase(rolloutBase)
+
+	h.append("sess-hydrate-rollout", provider.Message{Role: provider.RoleUser, Content: "hello"})
+	h.append("sess-hydrate-rollout", provider.Message{Role: provider.RoleAssistant, Content: "hi"})
+	h.ReplaceInMemory("sess-hydrate-rollout", []provider.Message{
+		{Role: provider.RoleUser, Content: "hello"},
+	})
+
+	revived := newChatHistory()
+	revived.SetRolloutBase(rolloutBase)
+	got := revived.get("sess-hydrate-rollout")
+	require.Len(t, got, 1)
+	require.Equal(t, provider.RoleUser, got[0].Role)
+	require.Equal(t, "hello", got[0].Content)
+}
+
 func TestChatHistory_NoDBStillWorks(t *testing.T) {
 	// Pre-P34 contract: when no DB is wired, append/get/reset behave as
 	// the in-memory-only version. This is what test setups that don't
@@ -215,4 +261,15 @@ func TestChatHistory_HydrationIsOnceUntilSetDB(t *testing.T) {
 	require.Len(t, got, 2)
 	require.Equal(t, "first", got[0].Content)
 	require.Equal(t, "second", got[1].Content)
+}
+
+func splitNonEmptyLines(s string) []string {
+	var out []string
+	for _, line := range strings.Split(s, "\n") {
+		if line == "" {
+			continue
+		}
+		out = append(out, line)
+	}
+	return out
 }

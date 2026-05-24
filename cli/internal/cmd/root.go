@@ -193,6 +193,7 @@ func Root() *cobra.Command {
 	addCmd(doctorCmd(), "setup")
 
 	addCmd(chatCmd(), "session")
+	addCmd(goalCmd(), "session")
 	addCmd(newCmd(), "session")
 	// `gil interview` / `gil resume` / `gil spec` / `gil clarify`
 	// removed in M3 — those were thin wrappers over InterviewService

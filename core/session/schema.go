@@ -8,7 +8,7 @@ import (
 
 // currentSchemaVersion is the latest schema version. When new migrations
 // are added, this constant must be incremented to match the new version.
-const currentSchemaVersion = 7
+const currentSchemaVersion = 8
 
 // migrations is a slice of SQL migration strings, indexed by version-1.
 // For example, migrations[0] is the SQL for version 1, migrations[1] is for
@@ -140,6 +140,19 @@ var migrations = []string{
 	`
 	ALTER TABLE sessions ADD COLUMN cached_system_prompt TEXT NOT NULL DEFAULT '';
 	ALTER TABLE sessions ADD COLUMN cached_prompt_key    TEXT NOT NULL DEFAULT '';
+	`,
+	// v8 — frozen spec summary cache (P69). The goal-oriented CLI
+	// surfaces only need a small, stable subset of spec.yaml (goal,
+	// tasks, success criteria, non-goals). Storing the summary on the
+	// session row lets list/goal/resume/watch avoid loading spec.yaml
+	// entirely on the hot path; the full spec remains on disk for the
+	// runner and exact-detail views.
+	`
+	ALTER TABLE sessions ADD COLUMN frozen_goal_one_liner TEXT NOT NULL DEFAULT '';
+	ALTER TABLE sessions ADD COLUMN frozen_goal_detailed TEXT NOT NULL DEFAULT '';
+	ALTER TABLE sessions ADD COLUMN frozen_goal_success_criteria_json TEXT NOT NULL DEFAULT '';
+	ALTER TABLE sessions ADD COLUMN frozen_goal_non_goals_json TEXT NOT NULL DEFAULT '';
+	ALTER TABLE sessions ADD COLUMN frozen_goal_tasks_json TEXT NOT NULL DEFAULT '';
 	`,
 }
 

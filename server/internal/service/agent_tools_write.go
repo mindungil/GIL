@@ -363,6 +363,19 @@ func (t *toolWriteFile) run(ctx context.Context, sessionID string, argsJSON json
 	if err := json.Unmarshal(argsJSON, &args); err != nil {
 		return provider.ToolResult{Content: "invalid args: " + err.Error(), IsError: true}, nil
 	}
+	// P69b: empty args steer. qwen3.6-27b repeatedly emits write_file with
+	// an empty `{}` argument object (the tool-call serialization drops the
+	// payload, esp. for large file content) — observed 29/33 write_file
+	// calls in one bytecode-vm dogfood turn, livelocking until the P69
+	// breaker fires. Steer to the run_bash heredoc fallback on the FIRST
+	// occurrence so the agent switches mechanism immediately instead of
+	// waiting out 4 identical errors + a recovery round.
+	if args.Path == "" {
+		return provider.ToolResult{
+			Content: "write_file received empty/missing `path`. If your write_file arguments keep coming back empty (common when the file is large), STOP retrying write_file and use run_bash with a heredoc instead:\n  cat > path/to/file <<'EOF'\n  <file content>\n  EOF\nOtherwise resend write_file with BOTH `path` and `content` populated.",
+			IsError: true,
+		}, nil
+	}
 	if len(args.Content) > maxWriteBytes {
 		return provider.ToolResult{
 			Content: fmt.Sprintf("content too large: %d bytes (max %d)", len(args.Content), maxWriteBytes),

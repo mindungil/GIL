@@ -59,6 +59,10 @@ type chatHistory struct {
 	// db is the optional durable backing (P34). When nil, append/get/reset
 	// behave as the pre-P34 in-memory-only chatHistory. Set via SetDB.
 	db *sql.DB
+	// rolloutBase is the optional JSONL journal root (P68e). When set,
+	// append/reset/compaction also append best-effort audit records to
+	// <rolloutBase>/<sessionID>.jsonl. Empty disables journaling.
+	rolloutBase string
 	// loaded tracks which session IDs have been hydrated from DB so the
 	// next access skips the SELECT. Presence-only set; same pattern as
 	// workingSet (P30) — see agent_tools_verbs.go.
@@ -82,6 +86,16 @@ func (h *chatHistory) SetDB(db *sql.DB) {
 	h.loaded = make(map[string]struct{})
 }
 
+// SetRolloutBase attaches the root directory for JSONL rollout
+// journaling. The writer is best-effort and only used when the base is
+// non-empty. Safe to call multiple times; the next append/reset writes
+// to the new location.
+func (h *chatHistory) SetRolloutBase(base string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.rolloutBase = base
+}
+
 func (h *chatHistory) get(sid string) []provider.Message {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -99,6 +113,29 @@ func (h *chatHistory) append(sid string, msg provider.Message) {
 	seq := h.nextSeqLocked(sid)
 	h.all[sid] = append(h.all[sid], msg)
 	h.persistAppendLocked(sid, seq, msg)
+	h.persistRolloutLocked(sid, rolloutRecord{
+		Type:    "message",
+		Seq:     seq,
+		Role:    string(msg.Role),
+		Content: msg.Content,
+		ToolCalls: func() []provider.ToolCall {
+			if len(msg.ToolCalls) == 0 {
+				return nil
+			}
+			out := make([]provider.ToolCall, len(msg.ToolCalls))
+			copy(out, msg.ToolCalls)
+			return out
+		}(),
+		ToolResults: func() []provider.ToolResult {
+			if len(msg.ToolResults) == 0 {
+				return nil
+			}
+			out := make([]provider.ToolResult, len(msg.ToolResults))
+			copy(out, msg.ToolResults)
+			return out
+		}(),
+		At: time.Now().UTC(),
+	})
 }
 
 // nextSeqLocked computes the seq the next append should use. With a
@@ -133,6 +170,7 @@ func (h *chatHistory) nextSeqLocked(sid string) int {
 func (h *chatHistory) ReplaceInMemory(sid string, msgs []provider.Message) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	before := len(h.all[sid])
 	cp := make([]provider.Message, len(msgs))
 	copy(cp, msgs)
 	h.all[sid] = cp
@@ -140,6 +178,17 @@ func (h *chatHistory) ReplaceInMemory(sid string, msgs []provider.Message) {
 		h.loaded = make(map[string]struct{})
 	}
 	h.loaded[sid] = struct{}{}
+	h.persistRolloutLocked(sid, rolloutRecord{
+		Type:   "compact",
+		Before: before,
+		After:  len(msgs),
+		Messages: func() []provider.Message {
+			out := make([]provider.Message, len(msgs))
+			copy(out, msgs)
+			return out
+		}(),
+		At: time.Now().UTC(),
+	})
 }
 
 // reset clears the message log for sid so a subsequent Prompt starts
@@ -150,9 +199,15 @@ func (h *chatHistory) ReplaceInMemory(sid string, msgs []provider.Message) {
 func (h *chatHistory) reset(sid string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	before := len(h.all[sid])
 	delete(h.all, sid)
 	delete(h.loaded, sid)
 	h.persistResetLocked(sid)
+	h.persistRolloutLocked(sid, rolloutRecord{
+		Type:   "reset",
+		Before: before,
+		At:     time.Now().UTC(),
+	})
 }
 
 // ensureLoadedLocked hydrates h.all[sid] from DB on first hit after a
@@ -166,10 +221,14 @@ func (h *chatHistory) ensureLoadedLocked(sid string) {
 	if h.loaded == nil {
 		h.loaded = make(map[string]struct{})
 	}
-	if h.db == nil {
+	if _, done := h.loaded[sid]; done {
 		return
 	}
-	if _, done := h.loaded[sid]; done {
+	if h.loadFromRolloutLocked(sid) {
+		h.loaded[sid] = struct{}{}
+		return
+	}
+	if h.db == nil {
 		return
 	}
 	rows, err := h.db.Query(`SELECT role, content, tool_calls, tool_results
@@ -208,6 +267,50 @@ func (h *chatHistory) ensureLoadedLocked(sid string) {
 	h.loaded[sid] = struct{}{}
 }
 
+func (h *chatHistory) loadFromRolloutLocked(sid string) bool {
+	if h.rolloutBase == "" {
+		return false
+	}
+	path := filepath.Join(h.rolloutBase, sid+".jsonl")
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	var msgs []provider.Message
+	for _, line := range strings.Split(string(body), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var rec rolloutRecord
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			return false
+		}
+		switch rec.Type {
+		case "message":
+			msg := provider.Message{
+				Role:        provider.Role(rec.Role),
+				Content:     rec.Content,
+				ToolCalls:   rec.ToolCalls,
+				ToolResults: rec.ToolResults,
+			}
+			msgs = append(msgs, msg)
+		case "compact":
+			cp := make([]provider.Message, len(rec.Messages))
+			copy(cp, rec.Messages)
+			msgs = cp
+		case "reset":
+			msgs = nil
+		default:
+			// Unknown record types are ignored so future additions
+			// don't break older readers. We still keep walking because
+			// the file may contain useful later records.
+		}
+	}
+	h.all[sid] = msgs
+	return true
+}
+
 // persistAppendLocked writes a single message row. Caller holds h.mu.
 // Silent failure: durability is best-effort and the in-memory store
 // remains authoritative within the daemon's lifetime. tool_calls /
@@ -242,6 +345,39 @@ func (h *chatHistory) persistResetLocked(sid string) {
 		return
 	}
 	_, _ = h.db.Exec(`DELETE FROM chat_messages WHERE session_id = ?`, sid)
+}
+
+type rolloutRecord struct {
+	Type        string                `json:"type"`
+	Seq         int                   `json:"seq,omitempty"`
+	Role        string                `json:"role,omitempty"`
+	Content     string                `json:"content,omitempty"`
+	ToolCalls   []provider.ToolCall   `json:"tool_calls,omitempty"`
+	ToolResults []provider.ToolResult `json:"tool_results,omitempty"`
+	Before      int                   `json:"before,omitempty"`
+	After       int                   `json:"after,omitempty"`
+	Messages    []provider.Message    `json:"messages,omitempty"`
+	At          time.Time             `json:"at"`
+}
+
+func (h *chatHistory) persistRolloutLocked(sid string, rec rolloutRecord) {
+	if h.rolloutBase == "" {
+		return
+	}
+	if err := os.MkdirAll(h.rolloutBase, 0o755); err != nil {
+		return
+	}
+	path := filepath.Join(h.rolloutBase, sid+".jsonl")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	b, err := json.Marshal(rec)
+	if err != nil {
+		return
+	}
+	_, _ = f.Write(append(b, '\n'))
 }
 
 // WithProviderFactory wires the same ProviderFactory used by Run /
@@ -290,6 +426,10 @@ PRIMARY BEHAVIORAL CONTRACT (read this twice; everything else is detail):
    choose between options you should just pick.
 5. Match the user's language (Korean ↔ English). No mixed-language
    replies.
+6. If a session goal is present, treat it as pinned. Before saying
+   "done", compare the current diff and behavior against that goal
+   and the current verification context. If anything is off, keep
+   working or ask the agent to review instead of declaring victory.
 
 Routing the user's first message:
 - Task-shaped ("implement X", "fix Y", "add feature Z", "프로젝트에 ~
@@ -349,9 +489,9 @@ Tools — code I/O (scoped to the session working dir):
 
 Tools — session lifecycle (call when the user wants autonomous run):
 - freeze_spec: persist a frozen spec (goal + optional
-  constraints/verification/budget/autonomy) onto the session. Required
-  before start_run. Call ONCE per session; a frozen spec is immutable.
-  Pass only the slots you've extracted from conversation —
+  tasks/constraints/verification/budget/autonomy) onto the session.
+  Required before start_run. Call ONCE per session; a frozen spec is
+  immutable. Pass only the slots you've extracted from conversation —
   goal.one_liner is the only hard requirement, everything else is
   optional. Don't ask the user to re-state things you already know.
 - start_run: kick the autonomous run loop on a frozen spec. Detached;
@@ -553,6 +693,31 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 	// wrapped factory key uses provName (the original variable).
 	prov = provider.NewRetry(prov)
 
+	// M6 Option A bridge: emit tool_call / tool_result / done and
+	// chat_message events on the per-session event stream so giltui's
+	// existing Tail subscription sees chat agent activity (not just
+	// run-mode). The stream is allocated lazily by ensureSessionStream
+	// and persists across the chat → run handoff. evtStream may be nil
+	// in tests that bypass RunService (s.runService() returns nil); the
+	// helper closures below no-op in that case.
+	var evtStream *event.Stream
+	if rs := s.runService(); rs != nil {
+		evtStream = rs.ensureSessionStream(sessionID)
+	}
+	emitChatEvent := func(typ string, source event.Source, kind event.Kind, payload map[string]any) {
+		if evtStream == nil {
+			return
+		}
+		data, _ := json.Marshal(payload)
+		_, _ = evtStream.Append(event.Event{
+			Timestamp: time.Now().UTC(),
+			Source:    source,
+			Kind:      kind,
+			Type:      typ,
+			Data:      data,
+		})
+	}
+
 	// 3. Build messages: prior history + new user message.
 	hist := s.chatHistory().get(sessionID)
 	userText := firstTextPart(req.GetParts())
@@ -563,6 +728,10 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 	// real conversation even if the agent loop terminates early
 	// (provider error, max iterations).
 	s.chatHistory().append(sessionID, provider.Message{Role: provider.RoleUser, Content: userText})
+	emitChatEvent("chat_message", event.SourceUser, event.KindObservation, map[string]any{
+		"role":    "user",
+		"content": userText,
+	})
 	msgs := append(hist, provider.Message{
 		Role:    provider.RoleUser,
 		Content: userText,
@@ -611,30 +780,6 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 	registry = appendChatMCPTools(ctx, registry, s.runService(), sessionID, s.sessionsBase)
 	toolDefs := registry.defs()
 
-	// M6 Option A bridge: emit tool_call / tool_result / done events
-	// on the per-session event stream so giltui's existing Tail
-	// subscription sees chat agent activity (not just run-mode). The
-	// stream is allocated lazily by ensureSessionStream and persists
-	// across the chat → run handoff. evtStream may be nil in tests
-	// that bypass RunService (s.runService() returns nil); the helper
-	// closures below no-op in that case.
-	var evtStream *event.Stream
-	if rs := s.runService(); rs != nil {
-		evtStream = rs.ensureSessionStream(sessionID)
-	}
-	emitChatEvent := func(typ string, source event.Source, kind event.Kind, payload map[string]any) {
-		if evtStream == nil {
-			return
-		}
-		data, _ := json.Marshal(payload)
-		_, _ = evtStream.Append(event.Event{
-			Timestamp: time.Now().UTC(),
-			Source:    source,
-			Kind:      kind,
-			Type:      typ,
-			Data:      data,
-		})
-	}
 	// P44: wire OnRetry on the retry-wrapped chat provider so the user
 	// sees backoff happening instead of a silent 30s gap during
 	// exponential retry. Mirrors run.go's same hookup. The callback
@@ -671,6 +816,19 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 	// worst-case runaway. Trust agent autonomy within this larger
 	// envelope.
 	const maxAgentTurns = 30
+	// P69c: per-call output budget. The old 2048 was catastrophically
+	// small for a reasoning model: qwen3.6-27b emits a large reasoning
+	// block BEFORE the tool call, so (reasoning + a write_file whose
+	// arguments carry a full file's content) routinely overran 2048
+	// output tokens. The tool-call arguments got truncated mid-JSON, the
+	// streaming parser fell back to `{}` (openai.go parseStreamingResponse
+	// replaces invalid-JSON args with empty), and the agent livelocked on
+	// empty write_file calls — the dominant bytecode-vm dogfood failure
+	// (29/33 write_file calls empty in one run). Raising the cap costs
+	// nothing on short turns (they stop at end_turn well under it) and is
+	// what actually lets a large file write complete in one call. The
+	// model serves a 512k context, so 16k output is comfortably in range.
+	const chatMaxOutputTokens = 16384
 	// P68b: persistent system prompt cache. The Sprintf'd template
 	// depends on provider + model + agent only — none of which change
 	// mid-session under normal use. Cache the assembled string on the
@@ -690,6 +848,9 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 			// just means we'll rebuild on the next turn too.
 			_ = s.repo.UpdateCachedSystemPrompt(ctx, sessionID, systemPrompt, cacheKey)
 		}
+	}
+	if pinned := renderPinnedSessionGoal(sess.GoalHint); pinned != "" {
+		systemPrompt = pinned + systemPrompt
 	}
 	// P55: prepend recent cross-session memories so the agent has
 	// continuity across sessions. Best-effort: nil DB or query
@@ -777,6 +938,22 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 	const maxConsecutiveTimeouts = 3
 	consecutiveTimeouts := 0
 
+	// P69: consecutive identical tool-error abort. Sibling of the P66
+	// timeout breaker for the OTHER livelock shape. bytecode-vm dogfood
+	// (variance probe, 2026-05-23) showed qwen3.6-27b emit write_file
+	// with empty `{}` input 20+ times in a row — each returning the same
+	// "missing required `path` arg" error — burning the entire 15m wall
+	// budget without adapting. maxAgentTurns=30 eventually bounds it, but
+	// only after ~13 wasted minutes. The chat Detector surfaces a
+	// "looping" event but deliberately does NOT break the loop. Track
+	// consecutive non-timeout errors sharing the same (tool, error)
+	// signature; any success or a different signature resets the streak.
+	// This is a system safeguard (loop bound) — it never constrains which
+	// tool the agent picks (design §2.3).
+	const maxConsecutiveSameError = 4
+	consecutiveSameError := 0
+	lastErrorSig := ""
+
 	for turn := 0; turn < maxAgentTurns; turn++ {
 		// P63c: removed "every 5 iters compaction" — v4 chess dogfood
 		// data showed this aggressively wiped middle context (failing
@@ -817,7 +994,7 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 			Messages:    msgs,
 			System:      systemPrompt,
 			Tools:       toolDefs,
-			MaxTokens:   2048,
+			MaxTokens:   chatMaxOutputTokens,
 			Temperature: temperature,
 		}, func(delta string) {
 			if delta == "" || streamSendErr != nil {
@@ -917,6 +1094,10 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 			reminderMsg := provider.Message{Role: provider.RoleUser, Content: reminder}
 			msgs = append(msgs, reminderMsg)
 			s.chatHistory().append(sessionID, reminderMsg)
+			emitChatEvent("chat_message", event.SourceSystem, event.KindNote, map[string]any{
+				"role":    "system",
+				"content": reminder,
+			})
 			// Echo the reminder to the stream so observers see the gate fire.
 			_ = stream.Send(&gilv1.Part{
 				Body: &gilv1.Part_Text{Text: &gilv1.TextDelta{Content: "[system] " + reminder}},
@@ -934,10 +1115,15 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 		}
 		msgs = append(msgs, assistantTurn)
 		s.chatHistory().append(sessionID, assistantTurn)
+		emitChatEvent("chat_message", event.SourceAgent, event.KindObservation, map[string]any{
+			"role":    "assistant",
+			"content": assistantTurn.Content,
+		})
 
 		// Dispatch each tool call, stream Parts, collect results.
 		toolResults := make([]provider.ToolResult, 0, len(resp.ToolCalls))
 		abortedTimeoutLoop := false
+		abortedErrorLoop := false
 		for _, call := range resp.ToolCalls {
 			if err := stream.Send(&gilv1.Part{
 				Body: &gilv1.Part_ToolCall{ToolCall: &gilv1.ToolCallPart{
@@ -1082,6 +1268,10 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 				inj := provider.Message{Role: provider.RoleUser, Content: injection}
 				msgs = append(msgs, inj)
 				s.chatHistory().append(sessionID, inj)
+				emitChatEvent("chat_message", event.SourceSystem, event.KindNote, map[string]any{
+					"role":    "system",
+					"content": injection,
+				})
 			}
 
 			// P66: track consecutive timeout results. Bash returns
@@ -1097,6 +1287,26 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 			} else {
 				consecutiveTimeouts = 0
 			}
+
+			// P69: consecutive identical (non-timeout) tool-error abort.
+			// Timeouts are handled above; this catches the agent locking
+			// onto a malformed call that keeps returning the same error.
+			if result.IsError && !isToolTimeoutResult(result.Content) {
+				sig := call.Name + "\x00" + errorSignature(result.Content)
+				if sig == lastErrorSig {
+					consecutiveSameError++
+				} else {
+					consecutiveSameError = 1
+					lastErrorSig = sig
+				}
+				if consecutiveSameError >= maxConsecutiveSameError {
+					abortedErrorLoop = true
+					break
+				}
+			} else {
+				consecutiveSameError = 0
+				lastErrorSig = ""
+			}
 		}
 
 		// Feed the tool results back as a synthetic user turn (per
@@ -1108,6 +1318,10 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 		}
 		msgs = append(msgs, toolFeedback)
 		s.chatHistory().append(sessionID, toolFeedback)
+		emitChatEvent("chat_message", event.SourceSystem, event.KindNote, map[string]any{
+			"role":         "system",
+			"tool_results": len(toolResults),
+		})
 
 		// P66: if we hit the consecutive-timeout cap, surface a clear
 		// signal to the client and end this Prompt RPC. The agent
@@ -1126,6 +1340,28 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 			emitChatEvent("tool_timeout_loop", event.SourceSystem, event.KindNote, map[string]any{
 				"consecutive_timeouts": consecutiveTimeouts,
 				"max":                  maxConsecutiveTimeouts,
+			})
+			return nil
+		}
+
+		// P69: if we hit the consecutive-identical-error cap, end the
+		// Prompt RPC so the next user/dogfood prompt resets the approach.
+		// The agent is stuck repeating a malformed call (e.g. write_file
+		// with empty args) instead of adapting; more iterations only burn
+		// budget.
+		if abortedErrorLoop {
+			msg := fmt.Sprintf("agent issued %d consecutive tool calls that returned the same error — it is stuck repeating a malformed call instead of adapting. Aborting before more budget is wasted.", maxConsecutiveSameError)
+			_ = stream.Send(&gilv1.Part{
+				Body: &gilv1.Part_Text{Text: &gilv1.TextDelta{Content: "[system] tool_error_loop: " + msg}},
+			})
+			_ = stream.Send(&gilv1.Part{
+				Body: &gilv1.Part_Done{
+					Done: &gilv1.DonePart{StopReason: "tool_error_loop", ErrorMessage: msg},
+				},
+			})
+			emitChatEvent("tool_error_loop", event.SourceSystem, event.KindNote, map[string]any{
+				"consecutive_same_error": consecutiveSameError,
+				"max":                    maxConsecutiveSameError,
 			})
 			return nil
 		}
@@ -1201,6 +1437,10 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 			"explanation": dec.Explanation,
 		})
 		s.chatHistory().append(sessionID, provider.Message{Role: provider.RoleUser, Content: injection})
+		emitChatEvent("chat_message", event.SourceSystem, event.KindNote, map[string]any{
+			"role":    "system",
+			"content": injection,
+		})
 	}
 
 	// 6. Metrics + Done. P49: include cost_usd so the chat surface
@@ -1228,6 +1468,19 @@ func (s *SessionService) Prompt(req *gilv1.PromptRequest, stream gilv1.SessionSe
 		return err
 	}
 	return nil
+}
+
+func renderPinnedSessionGoal(goal string) string {
+	goal = strings.TrimSpace(goal)
+	if goal == "" {
+		return ""
+	}
+	return fmt.Sprintf(`## Session Goal
+Pinned goal: %s
+
+Before declaring done, compare the current diff and behavior against this pinned goal. If the work is only partially complete, violates the goal, or leaves obvious follow-up gaps, keep working or ask for a review instead of calling it finished.
+
+`, goal)
 }
 
 // dispatchTool looks up a tool by name and invokes it with the
@@ -1493,6 +1746,26 @@ func isToolTimeoutResult(content string) bool {
 	return false
 }
 
+// errorSignature normalizes a tool-error body into a stable key for the
+// P69 consecutive-identical-error breaker. We take the first line
+// (where the human-readable reason lives) and cap its length so that
+// trailing variable detail (paths, partial output) doesn't make two
+// instances of the same error look different. Identical malformed calls
+// produce byte-identical first lines, so exact-match on this key is the
+// conservative choice — it only trips on a genuinely repeated error,
+// never on an agent making progress through different failures.
+func errorSignature(content string) string {
+	line := content
+	if i := strings.IndexByte(line, '\n'); i >= 0 {
+		line = line[:i]
+	}
+	line = strings.TrimSpace(line)
+	if len(line) > 120 {
+		line = line[:120]
+	}
+	return line
+}
+
 // chatHistory lazily allocates the message log map. Stored on the
 // service struct via a method-level singleton instead of constructor
 // wiring so existing test setups (NewSessionService(repo, nil)) keep
@@ -1506,6 +1779,9 @@ func (s *SessionService) chatHistory() *chatHistory {
 		s.chatHist = newChatHistory()
 		if s.repo != nil {
 			s.chatHist.SetDB(s.repo.DB())
+		}
+		if s.sessionsBase != "" {
+			s.chatHist.SetRolloutBase(filepath.Join(filepath.Dir(s.sessionsBase), "chat_rollouts"))
 		}
 	}
 	return s.chatHist

@@ -143,7 +143,60 @@ func renderBase(spec *gilv1.FrozenSpec) string {
 
 Goal: %s
 
-`, goal)
+%s`, goal, renderGoalCheckpoint(spec))
+}
+
+func renderGoalCheckpoint(spec *gilv1.FrozenSpec) string {
+	if spec == nil || spec.Goal == nil {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString("Goal checkpoint:\n")
+	if spec.Goal.OneLiner != "" {
+		sb.WriteString("- one_liner: ")
+		sb.WriteString(spec.Goal.OneLiner)
+		sb.WriteString("\n")
+	}
+	if spec.Goal.Detailed != "" {
+		sb.WriteString("- detailed: ")
+		sb.WriteString(strings.ReplaceAll(spec.Goal.Detailed, "\n", " "))
+		sb.WriteString("\n")
+	}
+	if len(spec.Goal.Tasks) > 0 {
+		sb.WriteString("- tasks:\n")
+		for _, task := range spec.Goal.Tasks {
+			if strings.TrimSpace(task) == "" {
+				continue
+			}
+			sb.WriteString("  - ")
+			sb.WriteString(task)
+			sb.WriteString("\n")
+		}
+	}
+	if len(spec.Goal.SuccessCriteriaNatural) > 0 {
+		sb.WriteString("- success criteria:\n")
+		for _, c := range spec.Goal.SuccessCriteriaNatural {
+			if strings.TrimSpace(c) == "" {
+				continue
+			}
+			sb.WriteString("  - ")
+			sb.WriteString(c)
+			sb.WriteString("\n")
+		}
+	}
+	if len(spec.Goal.NonGoals) > 0 {
+		sb.WriteString("- non-goals:\n")
+		for _, ng := range spec.Goal.NonGoals {
+			if strings.TrimSpace(ng) == "" {
+				continue
+			}
+			sb.WriteString("  - ")
+			sb.WriteString(ng)
+			sb.WriteString("\n")
+		}
+	}
+	sb.WriteString("Before declaring done, compare the current diff and behavior against the goal and success criteria. If any criterion is missing or any non-goal is violated, keep working or delegate a review instead of stopping.\n\n")
+	return sb.String()
 }
 
 // renderVerifierChecks renders the "Verification checks:" block. Empty

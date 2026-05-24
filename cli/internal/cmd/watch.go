@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/mindungil/gil/cli/internal/cmd/uistyle"
+	"github.com/mindungil/gil/core/paths"
 	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
 	"github.com/mindungil/gil/sdk"
 )
@@ -28,7 +30,8 @@ import (
 //
 // --once → render a single frame and exit (script friendly)
 // --no-clear → skip the ANSI clear-screen, just append (pipe friendly,
-//   eg `gil watch <id> --no-clear | tee log`)
+//
+//	eg `gil watch <id> --no-clear | tee log`)
 func watchCmd() *cobra.Command {
 	var (
 		socket  string
@@ -63,7 +66,30 @@ CI logs, screen-readers. For richer interaction use 'giltui'.
 			ctx, cancel := signal.NotifyContext(cmd.Context(), os.Interrupt)
 			defer cancel()
 
-			fetcher := &grpcWatchFetcher{cli: cli, sessionID: sessionID}
+			layout, err := paths.FromEnv()
+			if err != nil {
+				return fmt.Errorf("resolve gil paths: %w", err)
+			}
+			spec, err := loadFrozenSpecForSession(filepath.Join(layout.SessionsDir(), sessionID))
+			if err != nil {
+				return fmt.Errorf("load frozen spec: %w", err)
+			}
+			sess, err := cli.GetSession(ctx, sessionID)
+			if err != nil {
+				return wrapRPCError(err)
+			}
+			meta := sessionMetaFor(sess, layout.SessionsDir())
+
+			fetcher := &grpcWatchFetcher{
+				cli:           cli,
+				sessionID:     sessionID,
+				frozenGoal:    spec.Goal.OneLiner,
+				gitSummary:    meta.gitSummary,
+				planCompleted: meta.planCompleted,
+				planTotal:     meta.planTotal,
+				planNext:      meta.planNext,
+				tasks:         append([]string(nil), spec.Goal.Tasks...),
+			}
 
 			r := &watchRenderer{
 				out:     cmd.OutOrStdout(),
@@ -85,7 +111,7 @@ CI logs, screen-readers. For richer interaction use 'giltui'.
 // renderer with a fixed snapshot. Two methods because the live event
 // list and the session metadata travel on different RPCs.
 type watchFetcher interface {
-	Snapshot(ctx context.Context) (*sdk.Session, []watchEvent, error)
+	Snapshot(ctx context.Context) (*watchSnapshot, error)
 }
 
 // watchEvent is the renderable shape for one log line. The full proto
@@ -98,22 +124,40 @@ type watchEvent struct {
 	Body string
 }
 
+type watchSnapshot struct {
+	Session       *sdk.Session
+	Events        []watchEvent
+	FrozenGoal    string
+	GitSummary    string
+	PlanCompleted int
+	PlanTotal     int
+	PlanNext      string
+	Tasks         []string
+}
+
 // grpcWatchFetcher is the production fetcher. Each Snapshot does:
-//   1. cli.GetSession(id) — for goal/iter/cost/stuck
-//   2. cli.TailRun(id) for ~250ms — drain into a ring buffer
+//  1. cli.GetSession(id) — for goal/iter/cost/stuck
+//  2. cli.TailRun(id) for ~250ms — drain into a ring buffer
+//
 // The 250ms cap keeps the per-frame call snappy even on a high-traffic
 // session; the ring buffer is reused across frames so events accumulate.
 type grpcWatchFetcher struct {
-	cli       *sdk.Client
-	sessionID string
-	mu        sync.Mutex
-	ring      []watchEvent
+	cli           *sdk.Client
+	sessionID     string
+	frozenGoal    string
+	gitSummary    string
+	planCompleted int
+	planTotal     int
+	planNext      string
+	tasks         []string
+	mu            sync.Mutex
+	ring          []watchEvent
 }
 
-func (f *grpcWatchFetcher) Snapshot(ctx context.Context) (*sdk.Session, []watchEvent, error) {
+func (f *grpcWatchFetcher) Snapshot(ctx context.Context) (*watchSnapshot, error) {
 	sess, err := f.cli.GetSession(ctx, f.sessionID)
 	if err != nil {
-		return nil, nil, wrapRPCError(err)
+		return nil, wrapRPCError(err)
 	}
 	// Drain a short window of new events. We cancel the stream by
 	// timeout so this method always returns within ~300ms regardless
@@ -127,7 +171,16 @@ func (f *grpcWatchFetcher) Snapshot(ctx context.Context) (*sdk.Session, []watchE
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	out := append([]watchEvent(nil), f.ring...)
-	return sess, out, nil
+	return &watchSnapshot{
+		Session:       sess,
+		Events:        out,
+		FrozenGoal:    f.frozenGoal,
+		GitSummary:    f.gitSummary,
+		PlanCompleted: f.planCompleted,
+		PlanTotal:     f.planTotal,
+		PlanNext:      f.planNext,
+		Tasks:         append([]string(nil), f.tasks...),
+	}, nil
 }
 
 func (f *grpcWatchFetcher) drain(ctx context.Context, stream gilv1.RunService_TailClient) {
@@ -172,11 +225,11 @@ func runWatch(ctx context.Context, r *watchRenderer, f watchFetcher, every time.
 	defer tick.Stop()
 	frame := 0
 	for {
-		sess, evts, err := f.Snapshot(ctx)
+		snap, err := f.Snapshot(ctx)
 		if err != nil {
 			return err
 		}
-		r.render(sess, evts, frame)
+		r.render(snap, frame)
 		frame++
 		if once {
 			return nil
@@ -193,14 +246,14 @@ func runWatch(ctx context.Context, r *watchRenderer, f watchFetcher, every time.
 // Pulling it out of runWatch keeps the snapshot test simple — the
 // test gives it a bytes.Buffer and asserts on the rendered string.
 type watchRenderer struct {
-	out          io.Writer
-	glyphs       uistyle.Glyphs
-	palette      uistyle.Palette
-	clear        bool
-	costStart    float64   // cost at first frame (for trend)
-	costStartT   time.Time // when costStart was recorded
-	lastCost     float64
-	lastCostT    time.Time
+	out        io.Writer
+	glyphs     uistyle.Glyphs
+	palette    uistyle.Palette
+	clear      bool
+	costStart  float64   // cost at first frame (for trend)
+	costStartT time.Time // when costStart was recorded
+	lastCost   float64
+	lastCostT  time.Time
 }
 
 // ANSI helpers — terminal-aesthetic.md §8 (motion).
@@ -208,14 +261,16 @@ const (
 	ansiClearScreen = "\x1b[2J\x1b[H"
 )
 
-func (r *watchRenderer) render(sess *sdk.Session, evts []watchEvent, frame int) {
+func (r *watchRenderer) render(snap *watchSnapshot, frame int) {
+	sess := snap.Session
+	evts := snap.Events
 	if r.clear {
 		fmt.Fprint(r.out, ansiClearScreen)
 	}
 	g, p := r.glyphs, r.palette
 
 	// --- Header ----------------------------------------------------------
-	statusGlyphStr, role := sessionStatusGlyph(g,sess.Status)
+	statusGlyphStr, role := sessionStatusGlyph(g, sess.Status)
 	header := fmt.Sprintf("%s   %s  %s   %s",
 		p.Primary("G I L"),
 		colourMarker(p, statusGlyphStr, role),
@@ -224,6 +279,24 @@ func (r *watchRenderer) render(sess *sdk.Session, evts []watchEvent, frame int) 
 	fmt.Fprintln(r.out)
 	fmt.Fprintln(r.out, header)
 	fmt.Fprintln(r.out)
+
+	if snap.FrozenGoal != "" {
+		fmt.Fprintf(r.out, "   %s  %s\n", p.Bold("Frozen goal"), p.Surface(truncRune(snap.FrozenGoal, 72)))
+	}
+	if len(snap.Tasks) > 0 {
+		maxTasks := len(snap.Tasks)
+		if maxTasks > 2 {
+			maxTasks = 2
+		}
+		joined := strings.Join(snap.Tasks[:maxTasks], " · ")
+		if len(snap.Tasks) > maxTasks {
+			joined += " · …"
+		}
+		fmt.Fprintf(r.out, "   %s       %s\n", p.Bold("Tasks"), p.Surface(truncRune(joined, 72)))
+	}
+	if gitSummary := snap.GitSummary; gitSummary != "" {
+		fmt.Fprintf(r.out, "   %s        %s\n", p.Bold("Git"), p.Surface(truncRune(gitSummary, 72)))
+	}
 
 	// --- Progress block --------------------------------------------------
 	const maxIter int32 = 100
@@ -247,8 +320,11 @@ func (r *watchRenderer) render(sess *sdk.Session, evts []watchEvent, frame int) 
 	// bare value + dim trend placeholder so the existing layout for
 	// no-budget sessions is unchanged.
 	cost := sess.TotalCostUSD
-	row := summaryRowFromSession(sess)
-	costStr := renderCostCell(g, p, row)
+	costStr := renderCostCell(g, p, summaryRow{
+		CostUSD:        sess.TotalCostUSD,
+		CostBudget:     sess.BudgetMaxCostUSD,
+		BudgetExceeded: sess.BudgetExceeded,
+	})
 	trendStr := p.Dim(g.LightHRule)
 	if r.lastCostT.IsZero() {
 		r.costStart = cost
@@ -269,11 +345,10 @@ func (r *watchRenderer) render(sess *sdk.Session, evts []watchEvent, frame int) 
 	// The summary is "<C>/<T> done · <next pending text>" so a glance
 	// shows progress + what's coming up. No plan → row omitted (keeps
 	// legacy layout for sessions that never use plan).
-	if comp, total, ok := loadSessionPlanCounts(sess.ID); ok && total > 0 {
-		next := loadSessionPlanNext(sess.ID)
-		body := fmt.Sprintf("%d/%d done", comp, total)
-		if next != "" {
-			body += "  " + p.Dim(g.LightHRule+"  next: "+truncRune(next, 36))
+	if snap.PlanTotal > 0 {
+		body := fmt.Sprintf("%d/%d done", snap.PlanCompleted, snap.PlanTotal)
+		if snap.PlanNext != "" {
+			body += "  " + p.Dim(g.LightHRule+"  next: "+truncRune(snap.PlanNext, 36))
 		}
 		fmt.Fprintf(r.out, "   %s       %s\n", p.Bold("Plan"), p.Surface(body))
 	}

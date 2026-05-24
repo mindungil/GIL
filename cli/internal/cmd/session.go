@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -11,6 +12,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -92,13 +95,19 @@ table for scripts; --output json (root flag) emits structured JSON.`,
 			if err != nil {
 				return wrapRPCError(err)
 			}
-			if outputJSON() {
-				return writeStatusJSON(cmd.OutOrStdout(), list)
+			layout, err := paths.FromEnv()
+			if err != nil {
+				return fmt.Errorf("resolve gil paths: %w", err)
 			}
 			if plain {
 				return writeStatusText(cmd.OutOrStdout(), list)
 			}
-			return writeStatusVisual(cmd.OutOrStdout(), list, asciiMode)
+			rows := buildSummaryRows(list, layout.SessionsDir())
+			populateLatestActivity(rows, layout.SessionsDir())
+			if outputJSON() {
+				return writeStatusJSON(cmd.OutOrStdout(), rows)
+			}
+			return writeStatusVisual(cmd.OutOrStdout(), rows, asciiMode)
 		},
 	}
 	c.Flags().StringVar(&socket, "socket", defaultSocket(), "gild UDS socket path")
@@ -136,13 +145,17 @@ func sessionShowCmd() *cobra.Command {
 				return wrapRPCError(err)
 			}
 			layout, _ := paths.FromEnv()
-			eventsCount := countEvents(filepath.Join(layout.SessionsDir(), id, "events", "events.jsonl"))
+			meta := sessionMetaFor(sess, layout.SessionsDir())
+			eventsCount := 0
+			if _, err := os.Stat(meta.eventPath); err == nil {
+				eventsCount = countEvents(meta.eventPath)
+			}
 			specPath := filepath.Join(layout.SessionsDir(), id, "spec.json")
 			specPreview := readSpecPreview(specPath)
 			if outputJSON() {
-				return writeSessionShowJSON(cmd.OutOrStdout(), sess, eventsCount, specPreview)
+				return writeSessionShowJSON(cmd.OutOrStdout(), sess, eventsCount, meta.latestType, meta.latestAt, meta.gitSummary, specPreview)
 			}
-			writeSessionShow(cmd.OutOrStdout(), sess, eventsCount, specPreview, asciiMode)
+			writeSessionShow(cmd.OutOrStdout(), sess, eventsCount, meta.latestType, meta.latestAt, meta.gitSummary, specPreview, asciiMode)
 			return nil
 		},
 	}
@@ -347,7 +360,7 @@ func filterSessionsForRm(list []*sdk.Session, statusFilter, olderThan string, al
 		}
 		if dur > 0 {
 			ref := s.UpdatedAt
-			if ev := lastEventMtime(filepath.Join(sessionsDir, s.ID, "events", "events.jsonl")); !ev.IsZero() {
+			if ev := lastEventMtime(sessionEventLogPath(sessionsDir, s.ID)); !ev.IsZero() {
 				if ev.After(ref) {
 					ref = ev
 				}
@@ -389,7 +402,7 @@ func parseAge(s string) (time.Duration, error) {
 }
 
 // lastEventMtime returns the modification time of the per-session
-// events.jsonl. Zero on missing file or read error — callers treat
+// events.jsonl / rollout.jsonl. Zero on missing file or read error — callers treat
 // that as "no recorded activity".
 func lastEventMtime(path string) time.Time {
 	info, err := os.Stat(path)
@@ -399,11 +412,79 @@ func lastEventMtime(path string) time.Time {
 	return info.ModTime()
 }
 
+// sessionEventLogPath returns the preferred append-only session log:
+// rollout.jsonl when present, otherwise the legacy events.jsonl.
+func sessionEventLogPath(sessionsDir, sessionID string) string {
+	return sessionEventLogPathAt(sessionsDir, sessionID, time.Now())
+}
+
+func sessionEventLogPathAt(sessionsDir, sessionID string, now time.Time) string {
+	key := sessionsDir + "\x00" + sessionID
+	cache := sessionEventPathCache.Load()
+	if cache == nil {
+		cache = &sync.Map{}
+		if sessionEventPathCache.CompareAndSwap(nil, cache) {
+			// cache installed below
+		} else {
+			cache = sessionEventPathCache.Load()
+		}
+	}
+	if cached, ok := cache.Load(key); ok {
+		entry := cached.(sessionEventPathCacheEntry)
+		if now.Before(entry.expires) {
+			return entry.path
+		}
+	}
+
+	rollout := joinPath(joinPath(filepath.Dir(sessionsDir), "rollouts"), sessionID+".jsonl")
+	path := joinPath(joinPath(joinPath(sessionsDir, sessionID), "events"), "events.jsonl")
+	if _, err := os.Stat(rollout); err == nil {
+		path = rollout
+	}
+	cache.Store(key, sessionEventPathCacheEntry{
+		path:    path,
+		expires: now.Add(sessionMetaCacheTTL),
+	})
+	return path
+}
+
+type sessionEventPathCacheEntry struct {
+	path    string
+	expires time.Time
+}
+
+var sessionEventPathCache atomic.Pointer[sync.Map]
+
+func readLastEventMeta(path string) (string, time.Time) {
+	if typ, ts, ok := readLastEventSidecar(path); ok {
+		return typ, ts
+	}
+	line, err := readLastJSONLine(path)
+	if err != nil {
+		return "", time.Time{}
+	}
+	var last struct {
+		Type      string `json:"type"`
+		Timestamp string `json:"timestamp"`
+	}
+	if err := json.Unmarshal([]byte(line), &last); err != nil {
+		return "", time.Time{}
+	}
+	ts, err := time.Parse(time.RFC3339Nano, last.Timestamp)
+	if err != nil {
+		return "", time.Time{}
+	}
+	return last.Type, ts
+}
+
 // countEvents returns the number of newline-terminated records in the
-// session's events.jsonl. Reading the whole file is fine for the
-// foreseeable future — even a long-running session caps out at a few
-// thousand events.
+// session log. It prefers the persisted sidecar counter written by the
+// event persister, falling back to scanning the JSONL when the sidecar is
+// absent (older sessions) or unreadable.
 func countEvents(path string) int {
+	if count := readEventCountSidecar(path); count >= 0 {
+		return count
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return 0
@@ -421,14 +502,115 @@ func countEvents(path string) int {
 	return n
 }
 
+func readEventCountSidecar(path string) int {
+	countPath := strings.TrimSuffix(path, ".jsonl") + ".count"
+	body, err := os.ReadFile(countPath)
+	if err != nil {
+		return -1
+	}
+	value, err := strconv.Atoi(strings.TrimSpace(string(body)))
+	if err != nil || value < 0 {
+		return -1
+	}
+	return value
+}
+
+// lastEventSummary returns the last event type and timestamp from the
+// session log. Empty values mean "no recorded activity".
+func lastEventSummary(path string) (string, time.Time) {
+	typ, ts := readLastEventMeta(path)
+	return typ, ts
+}
+
+func readLastEventSidecar(path string) (string, time.Time, bool) {
+	lastPath := strings.TrimSuffix(path, ".jsonl") + ".last"
+	body, err := os.ReadFile(lastPath)
+	if err != nil {
+		return "", time.Time{}, false
+	}
+	var last struct {
+		Type      string `json:"type"`
+		Timestamp string `json:"timestamp"`
+	}
+	if err := json.Unmarshal(body, &last); err != nil {
+		return "", time.Time{}, false
+	}
+	ts, err := time.Parse(time.RFC3339Nano, last.Timestamp)
+	if err != nil {
+		return "", time.Time{}, false
+	}
+	if last.Type == "" {
+		return "", time.Time{}, false
+	}
+	return last.Type, ts, true
+}
+
+func readLastJSONLine(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil {
+		return "", err
+	}
+	size := info.Size()
+	if size == 0 {
+		return "", io.EOF
+	}
+
+	const chunkSize int64 = 4096
+	var tail []byte
+	for size > 0 {
+		readSize := chunkSize
+		if size < readSize {
+			readSize = size
+		}
+		start := size - readSize
+		buf := make([]byte, int(readSize))
+		n, rerr := f.ReadAt(buf, start)
+		if n > 0 {
+			tail = append(buf[:n], tail...)
+		}
+		if idx := bytes.LastIndexByte(tail, '\n'); idx >= 0 {
+			candidate := strings.TrimSpace(string(tail[idx+1:]))
+			if candidate != "" {
+				return candidate, nil
+			}
+			tail = tail[:idx]
+		}
+		if rerr != nil && rerr != io.EOF {
+			return "", rerr
+		}
+		size = start
+	}
+	if candidate := strings.TrimSpace(string(tail)); candidate != "" {
+		return candidate, nil
+	}
+	return "", io.EOF
+}
+
 // readSpecPreview returns the first ~200 bytes of the spec file as a
 // safe single-line string (newlines collapsed). Empty when the file
 // is missing.
 func readSpecPreview(path string) string {
-	data, err := os.ReadFile(path)
+	candidate := path
+	if strings.HasSuffix(path, "spec.json") {
+		summaryPath := strings.TrimSuffix(path, "spec.json") + "spec.summary.json"
+		if data, err := os.ReadFile(summaryPath); err == nil {
+			return previewString(data)
+		}
+	}
+	data, err := os.ReadFile(candidate)
 	if err != nil {
 		return ""
 	}
+	return previewString(data)
+}
+
+func previewString(data []byte) string {
 	s := string(data)
 	if len(s) > 240 {
 		s = s[:240] + "…"
@@ -511,7 +693,7 @@ func humanBytes(n int64) string {
 // layout mirrors the spec mockup for `gil watch` — a bordered header
 // line then a metadata key/value column. We reuse uistyle so colour /
 // glyph swaps follow the global flags.
-func writeSessionShow(w io.Writer, s *sdk.Session, events int, specPreview string, ascii bool) {
+func writeSessionShow(w io.Writer, s *sdk.Session, events int, latestType string, latestAt time.Time, gitSummary string, specPreview string, ascii bool) {
 	g := uistyle.NewGlyphs(ascii)
 	p := uistyle.NewPalette(false)
 
@@ -540,7 +722,13 @@ func writeSessionShow(w io.Writer, s *sdk.Session, events int, specPreview strin
 	if s.SpecID != "" {
 		row("Spec", s.SpecID)
 	}
+	if gitSummary != "" {
+		row("Git", gitSummary)
+	}
 	row("Events", fmt.Sprintf("%d", events))
+	if latestType != "" {
+		row("Latest", fmt.Sprintf("%s · %s", latestType, relTime(latestAt)))
+	}
 	if s.CurrentIteration > 0 {
 		row("Iteration", fmt.Sprintf("%d", s.CurrentIteration))
 	}
@@ -570,14 +758,17 @@ type sessionShowJSON struct {
 	SpecID       string  `json:"spec_id"`
 	CreatedAt    string  `json:"created_at,omitempty"`
 	UpdatedAt    string  `json:"updated_at,omitempty"`
+	GitSummary   string  `json:"git_summary,omitempty"`
 	Events       int     `json:"events"`
+	LatestType   string  `json:"latest_type,omitempty"`
+	LatestAt     string  `json:"latest_at,omitempty"`
 	Iteration    int32   `json:"iteration"`
 	TotalTokens  int64   `json:"total_tokens"`
 	TotalCostUSD float64 `json:"total_cost_usd"`
 	SpecPreview  string  `json:"spec_preview,omitempty"`
 }
 
-func writeSessionShowJSON(w io.Writer, s *sdk.Session, events int, specPreview string) error {
+func writeSessionShowJSON(w io.Writer, s *sdk.Session, events int, latestType string, latestAt time.Time, gitSummary string, specPreview string) error {
 	out := sessionShowJSON{
 		ID:           s.ID,
 		Status:       s.Status,
@@ -585,6 +776,7 @@ func writeSessionShowJSON(w io.Writer, s *sdk.Session, events int, specPreview s
 		GoalHint:     s.GoalHint,
 		SpecID:       s.SpecID,
 		Events:       events,
+		LatestType:   latestType,
 		Iteration:    s.CurrentIteration,
 		TotalTokens:  s.TotalTokens,
 		TotalCostUSD: s.TotalCostUSD,
@@ -595,6 +787,10 @@ func writeSessionShowJSON(w io.Writer, s *sdk.Session, events int, specPreview s
 	}
 	if !s.UpdatedAt.IsZero() {
 		out.UpdatedAt = s.UpdatedAt.UTC().Format(time.RFC3339)
+	}
+	out.GitSummary = gitSummary
+	if !latestAt.IsZero() {
+		out.LatestAt = latestAt.UTC().Format(time.RFC3339)
 	}
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")

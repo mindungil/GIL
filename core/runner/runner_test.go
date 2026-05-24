@@ -55,8 +55,8 @@ func TestAgentLoop_HelloWorld_Done(t *testing.T) {
 			Text: "Creating hello.go",
 			ToolCalls: []provider.ToolCall{
 				{
-					ID:   "call_1",
-					Name: "write_file",
+					ID:    "call_1",
+					Name:  "write_file",
 					Input: json.RawMessage(`{"path":"hello.go","content":"package main\nimport \"fmt\"\nfunc main(){fmt.Println(\"hello, world\")}"}`),
 				},
 			},
@@ -705,9 +705,9 @@ func TestAgentLoop_CheckpointInitFailureSoftDisables(t *testing.T) {
 // noopTool is a minimal tool for use in compaction tests.
 type noopTool struct{}
 
-func (n *noopTool) Name() string                                             { return "noop" }
-func (n *noopTool) Description() string                                      { return "no-op" }
-func (n *noopTool) Schema() json.RawMessage                                  { return json.RawMessage(`{"type":"object"}`) }
+func (n *noopTool) Name() string            { return "noop" }
+func (n *noopTool) Description() string     { return "no-op" }
+func (n *noopTool) Schema() json.RawMessage { return json.RawMessage(`{"type":"object"}`) }
 func (n *noopTool) Run(_ context.Context, _ json.RawMessage) (tool.Result, error) {
 	return tool.Result{Content: "ok"}, nil
 }
@@ -1017,6 +1017,25 @@ func TestAgentLoop_MilestoneGate_AgentSkips(t *testing.T) {
 		}
 	}
 	require.Equal(t, 1, doneEvents)
+}
+
+func TestBuildGoalReviewNudge_UsesGoalAndCriteria(t *testing.T) {
+	spec := &gilv1.FrozenSpec{
+		Goal: &gilv1.Goal{
+			OneLiner:               "ship the review gate",
+			Tasks:                  []string{"surface the checklist", "review the diff"},
+			SuccessCriteriaNatural: []string{"goal is surfaced", "done is reviewed"},
+			NonGoals:               []string{"no early finish"},
+		},
+	}
+
+	nudge := buildGoalReviewNudge(spec)
+	require.Contains(t, nudge, "compare the current diff against the goal and success criteria")
+	require.Contains(t, nudge, "ship the review gate")
+	require.Contains(t, nudge, "surface the checklist")
+	require.Contains(t, nudge, "goal is surfaced")
+	require.Contains(t, nudge, "done is reviewed")
+	require.Contains(t, nudge, "no early finish")
 }
 
 func TestAgentLoop_MilestoneGate_SkippedWhenBankNil(t *testing.T) {
@@ -1394,8 +1413,8 @@ func TestAgentLoop_ResetSection_RollsBackAndContinues(t *testing.T) {
 	mock := &loopProvider{turn: provider.MockTurn{
 		Text: "writing file",
 		ToolCalls: []provider.ToolCall{{
-			ID:   "c1",
-			Name: "write_file",
+			ID:    "c1",
+			Name:  "write_file",
 			Input: json.RawMessage(`{"path":"stuck.txt","content":"stuck"}`),
 		}},
 		StopReason: "tool_use",
@@ -1672,7 +1691,12 @@ func TestAgentLoop_Permission_DeniesAndContinues(t *testing.T) {
 	sub := loop.Events.Subscribe(256)
 	var collected []event.Event
 	done := make(chan struct{})
-	go func() { defer close(done); for e := range sub.Events() { collected = append(collected, e) } }()
+	go func() {
+		defer close(done)
+		for e := range sub.Events() {
+			collected = append(collected, e)
+		}
+	}()
 	res, err := loop.Run(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, "done", res.Status)
@@ -1708,7 +1732,12 @@ func TestAgentLoop_Permission_AskTreatedAsDenyInPhase7(t *testing.T) {
 	sub := loop.Events.Subscribe(256)
 	var collected []event.Event
 	done := make(chan struct{})
-	go func() { defer close(done); for e := range sub.Events() { collected = append(collected, e) } }()
+	go func() {
+		defer close(done)
+		for e := range sub.Events() {
+			collected = append(collected, e)
+		}
+	}()
 	res, err := loop.Run(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, "done", res.Status)
@@ -1816,8 +1845,8 @@ func TestAgentLoop_Permission_AskCallback_Deny(t *testing.T) {
 	var asked int
 	loop := &AgentLoop{
 		Spec: spec, Provider: prov, Model: "m",
-		Tools:    []tool.Tool{&tool.WriteFile{WorkingDir: workspace}},
-		Verifier: verify.NewRunner(workspace),
+		Tools:      []tool.Tool{&tool.WriteFile{WorkingDir: workspace}},
+		Verifier:   verify.NewRunner(workspace),
 		Permission: &permission.Evaluator{},
 		AskCallback: func(ctx context.Context, r AskRequest) bool {
 			asked++
@@ -1838,9 +1867,9 @@ func TestAgentLoop_Permission_AskCallback_Deny(t *testing.T) {
 // string), it returns a final answer. Otherwise it always loops a tool call
 // to trigger stuck detection.
 type subagentRecordingProvider struct {
-	mu            sync.Mutex
-	mainRequests  []provider.Request
-	subRequests   []provider.Request
+	mu           sync.Mutex
+	mainRequests []provider.Request
+	subRequests  []provider.Request
 }
 
 func (p *subagentRecordingProvider) Name() string { return "subagent-recording" }

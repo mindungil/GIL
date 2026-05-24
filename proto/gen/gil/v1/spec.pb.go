@@ -593,6 +593,7 @@ type Goal struct {
 	Detailed               string                 `protobuf:"bytes,2,opt,name=detailed,proto3" json:"detailed,omitempty"`
 	SuccessCriteriaNatural []string               `protobuf:"bytes,3,rep,name=success_criteria_natural,json=successCriteriaNatural,proto3" json:"success_criteria_natural,omitempty"`
 	NonGoals               []string               `protobuf:"bytes,4,rep,name=non_goals,json=nonGoals,proto3" json:"non_goals,omitempty"`
+	Tasks                  []string               `protobuf:"bytes,5,rep,name=tasks,proto3" json:"tasks,omitempty"`
 	unknownFields          protoimpl.UnknownFields
 	sizeCache              protoimpl.SizeCache
 }
@@ -651,6 +652,13 @@ func (x *Goal) GetSuccessCriteriaNatural() []string {
 func (x *Goal) GetNonGoals() []string {
 	if x != nil {
 		return x.NonGoals
+	}
+	return nil
+}
+
+func (x *Goal) GetTasks() []string {
+	if x != nil {
+		return x.Tasks
 	}
 	return nil
 }
@@ -1514,12 +1522,13 @@ const file_gil_v1_spec_proto_rawDesc = "" +
 	"\rsystem_prompt\x18\x01 \x01(\v2\x1b.gil.v1.SystemPromptOptionsR\fsystemPrompt\"L\n" +
 	"\x13SystemPromptOptions\x12\x18\n" +
 	"\aminimal\x18\x01 \x01(\bR\aminimal\x12\x1b\n" +
-	"\tno_memory\x18\x02 \x01(\bR\bnoMemory\"\x96\x01\n" +
+	"\tno_memory\x18\x02 \x01(\bR\bnoMemory\"\xac\x01\n" +
 	"\x04Goal\x12\x1b\n" +
 	"\tone_liner\x18\x01 \x01(\tR\boneLiner\x12\x1a\n" +
 	"\bdetailed\x18\x02 \x01(\tR\bdetailed\x128\n" +
 	"\x18success_criteria_natural\x18\x03 \x03(\tR\x16successCriteriaNatural\x12\x1b\n" +
-	"\tnon_goals\x18\x04 \x03(\tR\bnonGoals\"\x83\x01\n" +
+	"\tnon_goals\x18\x04 \x03(\tR\bnonGoals\x12\x14\n" +
+	"\x05tasks\x18\x05 \x03(\tR\x05tasks\"\x83\x01\n" +
 	"\vConstraints\x12\x1d\n" +
 	"\n" +
 	"tech_stack\x18\x01 \x03(\tR\ttechStack\x12\x1c\n" +

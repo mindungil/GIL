@@ -105,6 +105,22 @@ func TestToolWriteFile_CreatesAndOverwrites(t *testing.T) {
 	require.Equal(t, "package y\n", string(body))
 }
 
+// P69b: empty `{}` args (qwen drops the tool-call payload) must steer to
+// the run_bash heredoc fallback on the first occurrence, not the generic
+// path error.
+func TestToolWriteFile_EmptyArgs_SteersToHeredoc(t *testing.T) {
+	repo := newTestRepo(t)
+	wd := t.TempDir()
+	sid := newTestSession(t, repo, wd)
+
+	tool := &toolWriteFile{repo: repo}
+	res, err := tool.run(context.Background(), sid, json.RawMessage(`{}`))
+	require.NoError(t, err)
+	require.True(t, res.IsError)
+	require.Contains(t, res.Content, "heredoc")
+	require.Contains(t, res.Content, "run_bash")
+}
+
 func TestToolRunBash_ExitCodeAndOutput(t *testing.T) {
 	repo := newTestRepo(t)
 	wd := t.TempDir()

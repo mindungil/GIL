@@ -87,6 +87,40 @@ func writeFakeSession(t *testing.T, id string, n int) (paths.Layout, string) {
 	return layout, sessionDir
 }
 
+func writeFakeRollout(t *testing.T, layout paths.Layout, id string, n int) string {
+	t.Helper()
+	rolloutDir := filepath.Join(filepath.Dir(layout.SessionsDir()), "rollouts")
+	require.NoError(t, os.MkdirAll(rolloutDir, 0o755))
+	path := filepath.Join(rolloutDir, id+".jsonl")
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	require.NoError(t, err)
+	defer f.Close()
+	tm := time.Date(2026, 4, 26, 19, 0, 0, 0, time.UTC)
+	for i := 1; i <= n; i++ {
+		ev := event.Event{
+			ID:        int64(i),
+			Timestamp: tm.Add(time.Duration(i) * time.Second),
+			Source:    event.SourceSystem,
+			Kind:      event.KindNote,
+			Type:      "rollout_event",
+			Data:      []byte(`{"source":"rollout"}`),
+		}
+		require.NoError(t, json.NewEncoder(f).Encode(map[string]any{
+			"id":         ev.ID,
+			"timestamp":  ev.Timestamp.UTC().Format(time.RFC3339Nano),
+			"source":     int(ev.Source),
+			"kind":       int(ev.Kind),
+			"type":       ev.Type,
+			"data":       string(ev.Data),
+			"cause":      ev.Cause,
+			"tokens":     ev.Metrics.Tokens,
+			"cost_usd":   ev.Metrics.CostUSD,
+			"latency_ms": ev.Metrics.LatencyMs,
+		}))
+	}
+	return path
+}
+
 func runExport(t *testing.T, args []string) (string, error) {
 	t.Helper()
 	cmd := exportCmd()
@@ -191,6 +225,25 @@ func TestExport_JSONLHasHeaderPlusEvents(t *testing.T) {
 		require.NoErrorf(t, json.Unmarshal([]byte(line), &ev), "line %d not JSON: %s", i, line)
 		require.NotZero(t, ev["id"], "event id must be set on line %d", i)
 	}
+}
+
+func TestExport_JSONLPrefersRolloutWhenPresent(t *testing.T) {
+	disableDaemon(t)
+	layout, _ := writeFakeSession(t, "01TESTSESSION0006", 2)
+	writeFakeRollout(t, layout, "01TESTSESSION0006", 1)
+
+	out, err := runExport(t, []string{
+		"01TESTSESSION0006",
+		"--format", "jsonl",
+		"--socket", "/nonexistent/sock",
+	})
+	require.NoError(t, err)
+
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	require.Len(t, lines, 2, "expected rollout file to override disk events.jsonl")
+	var ev map[string]any
+	require.NoError(t, json.Unmarshal([]byte(lines[1]), &ev))
+	require.Equal(t, "rollout_event", ev["type"])
 }
 
 func TestExport_LargeToolOutputIsTruncated(t *testing.T) {

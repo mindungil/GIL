@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"io"
 	"text/tabwriter"
+	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/mindungil/gil/core/cliutil"
+	"github.com/mindungil/gil/core/paths"
 	"github.com/mindungil/gil/sdk"
 )
 
@@ -21,6 +23,10 @@ type statusSessionJSON struct {
 	Status           string `json:"status"`
 	WorkingDir       string `json:"working_dir"`
 	GoalHint         string `json:"goal_hint"`
+	FrozenGoal       string `json:"frozen_goal"`
+	GitSummary       string `json:"git_summary,omitempty"`
+	LatestType       string `json:"latest_type,omitempty"`
+	LatestAt         string `json:"latest_at,omitempty"`
 	CurrentIteration int32  `json:"current_iteration"`
 	CurrentTokens    int64  `json:"current_tokens"`
 }
@@ -35,9 +41,9 @@ type statusJSONReport struct {
 // card layout (one card per session, with a sub-cell progress bar and
 // a meta row underneath). Two flags drop back to the legacy formats:
 //
-//   --plain       the original tab-separated table — script friendly,
-//                 stable column order, never emits ANSI
-//   --output json the structured JSON envelope — same shape as before
+//	--plain       the original tab-separated table — script friendly,
+//	              stable column order, never emits ANSI
+//	--output json the structured JSON envelope — same shape as before
 //
 // We deliberately keep both fallbacks: any external script that has
 // been parsing the table since Phase 1-12 keeps working as long as it
@@ -84,6 +90,10 @@ func statusCmd() *cobra.Command {
 			if err != nil {
 				return wrapRPCError(err)
 			}
+			layout, err := paths.FromEnv()
+			if err != nil {
+				return fmt.Errorf("resolve gil paths: %w", err)
+			}
 			// Phase 25 S5: hide abandoned sessions (CREATED + 0 events
 			// older than 1 day) by default. The --all flag opts back into
 			// the full list. JSON mode also honours this so dashboards
@@ -94,13 +104,15 @@ func statusCmd() *cobra.Command {
 				list = filterActiveSessions(list)
 				hidden = before - len(list)
 			}
-			if outputJSON() {
-				return writeStatusJSON(cmd.OutOrStdout(), list)
-			}
 			if plain {
 				return writeStatusText(cmd.OutOrStdout(), list)
 			}
-			if err := writeStatusVisual(cmd.OutOrStdout(), list, asciiMode); err != nil {
+			rows := buildSummaryRows(list, layout.SessionsDir())
+			populateLatestActivity(rows, layout.SessionsDir())
+			if outputJSON() {
+				return writeStatusJSON(cmd.OutOrStdout(), rows)
+			}
+			if err := writeStatusVisual(cmd.OutOrStdout(), rows, asciiMode); err != nil {
 				return err
 			}
 			if hidden > 0 {
@@ -142,22 +154,25 @@ func writeStatusText(w io.Writer, list []*sdk.Session) error {
 // --output json flag. We always populate the "sessions" key (with an
 // empty array when nothing is configured) so downstream jq filters can
 // read .sessions[] without first checking presence.
-func writeStatusJSON(w io.Writer, list []*sdk.Session) error {
-	rows := make([]statusSessionJSON, 0, len(list))
-	for _, s := range list {
-		if s == nil {
-			continue
-		}
-		rows = append(rows, statusSessionJSON{
-			ID:               s.ID,
-			Status:           s.Status,
-			WorkingDir:       s.WorkingDir,
-			GoalHint:         s.GoalHint,
-			CurrentIteration: s.CurrentIteration,
-			CurrentTokens:    s.CurrentTokens,
+func writeStatusJSON(w io.Writer, rows []summaryRow) error {
+	out := make([]statusSessionJSON, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, statusSessionJSON{
+			ID:               row.ID,
+			Status:           row.Status,
+			WorkingDir:       row.WorkingDir,
+			GoalHint:         row.Goal,
+			FrozenGoal:       row.FrozenGoal,
+			GitSummary:       row.GitSummary,
+			LatestType:       row.LatestType,
+			CurrentIteration: row.Iter,
+			CurrentTokens:    row.Tokens,
 		})
+		if !row.LatestAt.IsZero() {
+			out[len(out)-1].LatestAt = row.LatestAt.UTC().Format(time.RFC3339)
+		}
 	}
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
-	return enc.Encode(statusJSONReport{Sessions: rows})
+	return enc.Encode(statusJSONReport{Sessions: out})
 }

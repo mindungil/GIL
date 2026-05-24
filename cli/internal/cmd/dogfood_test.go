@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -52,6 +53,16 @@ func TestRecoveryPromptFor_Error_ExitsLoop(t *testing.T) {
 	// Hard error from provider → give up, don't keep retrying.
 	rec := &turnRecord{StopReason: "error"}
 	require.Equal(t, "", recoveryPromptFor(rec))
+}
+
+func TestRecoveryPromptFor_ToolErrorLoop_GivesActionableRecovery(t *testing.T) {
+	// P69 breaker fired. Recovery should nudge the agent to stop
+	// repeating the malformed call and switch approach — not give up
+	// (unlike tool_timeout_loop) and not the generic default.
+	rec := &turnRecord{StopReason: "tool_error_loop"}
+	got := recoveryPromptFor(rec)
+	require.NotEmpty(t, got)
+	require.Contains(t, got, "STOP repeating")
 }
 
 func TestRecoveryPromptFor_UnknownStopReason_ContinuesDefensively(t *testing.T) {
@@ -107,6 +118,31 @@ func TestVerdictFromReason_BudgetExhausted_WithPassingAssertion(t *testing.T) {
 func TestVerdictFromReason_DaemonGone(t *testing.T) {
 	r := &dogfoodResult{Reason: "daemon_gone"}
 	require.Equal(t, "ERROR", verdictFromReason(r))
+}
+
+func TestSummaryLine_UsesSameVerdictAsStructuredSummary(t *testing.T) {
+	r := &dogfoodResult{
+		Reason:      "stalled",
+		Turns:       3,
+		TotalWallMs: int64((2 * time.Second).Milliseconds()),
+		SessionID:   "01DOGFOOD",
+	}
+	line := r.summaryLine()
+	require.Contains(t, line, "INCOMPLETE")
+	require.Equal(t, "INCOMPLETE", r.summaryRecord()["verdict"])
+}
+
+func TestDogfoodResultSuccessOnlyForPass(t *testing.T) {
+	require.True(t, (&dogfoodResult{Reason: "end_turn"}).success())
+	require.False(t, (&dogfoodResult{Reason: "max_turns"}).success())
+	require.False(t, (&dogfoodResult{Reason: "stalled"}).success())
+	require.False(t, (&dogfoodResult{Reason: "daemon_gone"}).success())
+	require.False(t, (&dogfoodResult{
+		Reason: "end_turn",
+		Assertions: []assertResult{
+			{Command: "go test", Exit: 1, Passed: false},
+		},
+	}).success())
 }
 
 func TestHead_LongStringTruncates(t *testing.T) {

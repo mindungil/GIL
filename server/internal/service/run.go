@@ -107,9 +107,10 @@ type RunService struct {
 	providerFactory ProviderFactory
 
 	mu          sync.Mutex
-	runStreams  map[string]*event.Stream            // per-session live event streams
-	runProgress map[string]*runProgressSnap         // per-session live progress counters
-	pendingAsks map[string]map[string]*pendingAsk   // sessionID → requestID → ask context
+	runStreams  map[string]*event.Stream          // per-session live event streams
+	runProgress map[string]*runProgressSnap       // per-session live progress counters
+	rolloutMu   sync.Mutex                        // guards append-only rollout writes
+	pendingAsks map[string]map[string]*pendingAsk // sessionID → requestID → ask context
 	// pendingClarifications maps sessionID → askID → channel the paused
 	// run is blocking on. AnswerClarification writes the user's answer
 	// into the channel (and closes); the clarify tool's Ask callback
@@ -121,7 +122,7 @@ type RunService struct {
 	// the next iteration without preempting the current tool call. The
 	// entry is removed in executeRun's defer once Run() returns. Nil when
 	// no run is in flight for that session.
-	runLoops    map[string]*runner.AgentLoop
+	runLoops map[string]*runner.AgentLoop
 
 	// runCancels stores the cancel func for each detached run so the
 	// stop_run agent-tool (§2.6 verb-tool wave) can signal a running
@@ -155,6 +156,7 @@ func NewRunService(repo *session.Repo, sessionsBase string, factory ProviderFact
 		providerFactory:       factory,
 		runStreams:            make(map[string]*event.Stream),
 		runProgress:           make(map[string]*runProgressSnap),
+		rolloutMu:             sync.Mutex{},
 		pendingAsks:           make(map[string]map[string]*pendingAsk),
 		pendingClarifications: make(map[string]map[string]*pendingClarify),
 		runLoops:              make(map[string]*runner.AgentLoop),
@@ -340,8 +342,8 @@ func (s *RunService) ensureSessionMCPTools(ctx context.Context, sessionID string
 		s.mu.Unlock()
 		if stream != nil {
 			data, _ := json.Marshal(map[string]any{
-				"dead_servers":  deadNames,
-				"action":        "relaunching_on_next_access",
+				"dead_servers": deadNames,
+				"action":       "relaunching_on_next_access",
 			})
 			_, _ = stream.Append(event.Event{
 				Timestamp: time.Now().UTC(),
@@ -574,7 +576,59 @@ func (s *RunService) ensureSessionStream(sessionID string) *event.Stream {
 	}
 	st := event.NewStream()
 	s.runStreams[sessionID] = st
+	rolloutSub := st.Subscribe(256)
+	go func() {
+		for evt := range rolloutSub.Events() {
+			s.appendRolloutEvent(sessionID, evt)
+		}
+	}()
 	return st
+}
+
+func (s *RunService) appendRolloutEvent(sessionID string, evt event.Event) {
+	if s.sessionsBase == "" {
+		return
+	}
+	rolloutRoot := filepath.Join(filepath.Dir(s.sessionsBase), "rollouts")
+	if err := os.MkdirAll(rolloutRoot, 0o755); err != nil {
+		return
+	}
+	type rolloutJSON struct {
+		ID        int64   `json:"id"`
+		Timestamp string  `json:"timestamp"`
+		Source    int     `json:"source"`
+		Kind      int     `json:"kind"`
+		Type      string  `json:"type"`
+		Data      string  `json:"data,omitempty"`
+		Cause     int64   `json:"cause,omitempty"`
+		Tokens    int64   `json:"tokens,omitempty"`
+		CostUSD   float64 `json:"cost_usd,omitempty"`
+		LatencyMs int64   `json:"latency_ms,omitempty"`
+	}
+	rec := rolloutJSON{
+		ID:        evt.ID,
+		Timestamp: evt.Timestamp.UTC().Format(time.RFC3339Nano),
+		Source:    int(evt.Source),
+		Kind:      int(evt.Kind),
+		Type:      event.MaskSecrets(evt.Type),
+		Data:      event.MaskSecrets(string(evt.Data)),
+		Cause:     evt.Cause,
+		Tokens:    evt.Metrics.Tokens,
+		CostUSD:   evt.Metrics.CostUSD,
+		LatencyMs: evt.Metrics.LatencyMs,
+	}
+	b, err := json.Marshal(rec)
+	if err != nil {
+		return
+	}
+	s.rolloutMu.Lock()
+	defer s.rolloutMu.Unlock()
+	f, err := os.OpenFile(filepath.Join(rolloutRoot, sessionID+".jsonl"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	_, _ = f.Write(append(b, '\n'))
+	_ = f.Close()
 }
 
 // buildTools returns the tool set for a run, configured per spec.Workspace.Backend.
@@ -965,14 +1019,14 @@ const clarifyTimeoutDefault = 60 * time.Minute
 
 // makeClarifyCallback returns the AskClarifyCallback the clarify tool
 // invokes. Pattern mirrors makeAskCallback for permissions:
-//   1) generate an ask_id (ULID)
-//   2) register a pendingClarify entry on the session map
-//   3) emit a clarify_requested event so observers (TUI, CLI) can
-//      surface the question
-//   4) fire the outbound Notifier (desktop / webhook / stdout) with
-//      the urgency-derived hint
-//   5) block on the channel until AnswerClarification fires, ctx is
-//      cancelled, or 60min elapses
+//  1. generate an ask_id (ULID)
+//  2. register a pendingClarify entry on the session map
+//  3. emit a clarify_requested event so observers (TUI, CLI) can
+//     surface the question
+//  4. fire the outbound Notifier (desktop / webhook / stdout) with
+//     the urgency-derived hint
+//  5. block on the channel until AnswerClarification fires, ctx is
+//     cancelled, or 60min elapses
 //
 // The notifier never blocks the run — its dispatch happens inside a
 // goroutine so a flaky webhook doesn't extend the ask's effective

@@ -25,6 +25,32 @@ func seedOrphanSession(t *testing.T, sessionsDir, sessionID string, evts []event
 	require.NoError(t, p.Close())
 }
 
+func seedOrphanRollout(t *testing.T, sessionsDir, sessionID string, evts []event.Event) {
+	t.Helper()
+	rolloutDir := filepath.Join(filepath.Dir(sessionsDir), "rollouts")
+	require.NoError(t, os.MkdirAll(rolloutDir, 0o700))
+	p, err := os.OpenFile(filepath.Join(rolloutDir, sessionID+".jsonl"), os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	require.NoError(t, err)
+	defer p.Close()
+	for _, e := range evts {
+		body, err := json.Marshal(map[string]any{
+			"id":         e.ID,
+			"timestamp":  e.Timestamp.UTC().Format(time.RFC3339Nano),
+			"source":     int(e.Source),
+			"kind":       int(e.Kind),
+			"type":       e.Type,
+			"data":       string(e.Data),
+			"cause":      e.Cause,
+			"tokens":     e.Metrics.Tokens,
+			"cost_usd":   e.Metrics.CostUSD,
+			"latency_ms": e.Metrics.LatencyMs,
+		})
+		require.NoError(t, err)
+		_, err = p.Write(append(body, '\n'))
+		require.NoError(t, err)
+	}
+}
+
 func makeOrphanEvt(ts time.Time, reason string, autoResume bool) event.Event {
 	data, _ := json.Marshal(map[string]any{
 		"reason": reason, "prior_status": "running", "auto_resume": autoResume,
@@ -82,6 +108,19 @@ func TestLoadOrphanRow_MultipleOrphanedReturnsLatest(t *testing.T) {
 	require.Equal(t, "stale_heartbeat", row.Reason)
 	require.True(t, row.AutoResume)
 	require.Equal(t, ts2, row.OrphanedAt)
+}
+
+func TestLoadOrphanRow_PrefersRolloutLog(t *testing.T) {
+	sessionsDir := t.TempDir()
+	ts := time.Date(2025, 6, 1, 16, 0, 0, 0, time.UTC)
+	seedOrphanRollout(t, sessionsDir, "01ABCDEFGH0000000000000006", []event.Event{
+		makeOrphanEvt(ts, "daemon_restart", true),
+	})
+	row, found := loadOrphanRow(sessionsDir, "01ABCDEFGH0000000000000006", "goal", "Stopped")
+	require.True(t, found)
+	require.Equal(t, "daemon_restart", row.Reason)
+	require.True(t, row.AutoResume)
+	require.Equal(t, ts, row.OrphanedAt)
 }
 
 func TestLoadOrphanRow_AutoResumeTrue(t *testing.T) {

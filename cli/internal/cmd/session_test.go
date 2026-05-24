@@ -7,11 +7,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/mindungil/gil/core/paths"
+	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
 	"github.com/mindungil/gil/sdk"
 )
 
@@ -67,6 +70,91 @@ func TestSessionList_JSON(t *testing.T) {
 	var parsed statusJSONReport
 	require.NoError(t, json.Unmarshal(buf.Bytes(), &parsed))
 	require.Len(t, parsed.Sessions, 1)
+}
+
+func TestSessionList_PlainSkipsMetadataLoads(t *testing.T) {
+	clearSessionMetaCache()
+	t.Cleanup(clearSessionMetaCache)
+
+	var specCalls int32
+	var latestCalls int32
+	oldLoadSpec := loadFrozenSpecForSession
+	oldLoadLatest := loadLatestEventSummary
+	t.Cleanup(func() {
+		loadFrozenSpecForSession = oldLoadSpec
+		loadLatestEventSummary = oldLoadLatest
+	})
+	loadFrozenSpecForSession = func(sessionDir string) (*gilv1.FrozenSpec, error) {
+		atomic.AddInt32(&specCalls, 1)
+		return &gilv1.FrozenSpec{Goal: &gilv1.Goal{OneLiner: "unused"}}, nil
+	}
+	loadLatestEventSummary = func(path string) (string, time.Time) {
+		atomic.AddInt32(&latestCalls, 1)
+		return "tool_call", time.Unix(123, 0)
+	}
+
+	sock, cleanup := startGildForTest(t)
+	defer cleanup()
+
+	cli, err := sdk.Dial(sock)
+	require.NoError(t, err)
+	defer cli.Close()
+	_, err = cli.CreateSession(context.Background(), sdk.CreateOptions{WorkingDir: "/x"})
+	require.NoError(t, err)
+
+	var buf bytes.Buffer
+	cmd := sessionCmd()
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetArgs([]string{"list", "--socket", sock, "--plain"})
+	require.NoError(t, cmd.ExecuteContext(context.Background()))
+	require.Equal(t, int32(0), atomic.LoadInt32(&specCalls))
+	require.Equal(t, int32(0), atomic.LoadInt32(&latestCalls))
+}
+
+func TestLastEventSummary_ReadsTailLine(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	var buf bytes.Buffer
+	for i := 0; i < 1000; i++ {
+		line := map[string]any{
+			"type":      "tool_call",
+			"timestamp": time.Unix(int64(i), 0).UTC().Format(time.RFC3339Nano),
+			"other":     i,
+		}
+		if i == 999 {
+			line["type"] = "run_done"
+		}
+		body, err := json.Marshal(line)
+		require.NoError(t, err)
+		buf.Write(body)
+		buf.WriteByte('\n')
+	}
+	require.NoError(t, os.WriteFile(path, buf.Bytes(), 0o644))
+
+	typ, ts := lastEventSummary(path)
+	require.Equal(t, "run_done", typ)
+	require.Equal(t, time.Unix(999, 0).UTC(), ts)
+}
+
+func TestCountEvents_PrefersSidecar(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	require.NoError(t, os.WriteFile(path, []byte("one\n\ntwo\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "events.count"), []byte("42\n"), 0o644))
+
+	require.Equal(t, 42, countEvents(path))
+}
+
+func TestLastEventSummary_PrefersSidecar(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	require.NoError(t, os.WriteFile(path, []byte(`{"type":"old","timestamp":"2024-01-01T00:00:00Z"}`+"\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "events.last"), []byte(`{"type":"fresh","timestamp":"2024-01-02T00:00:00Z"}`+"\n"), 0o644))
+
+	typ, ts := lastEventSummary(path)
+	require.Equal(t, "fresh", typ)
+	require.Equal(t, time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC), ts)
 }
 
 // TestSessionRm_SingleID verifies the happy path for removing one
@@ -225,14 +313,20 @@ func TestSessionRm_NoTargets(t *testing.T) {
 // includes the working dir and event count.
 func TestSessionShow(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
+	workdir := initGitRepo(t, "feat/session-show-git", true)
 	sock, cleanup := startGildForTest(t)
 	defer cleanup()
 
 	cli, err := sdk.Dial(sock)
 	require.NoError(t, err)
 	defer cli.Close()
-	created, err := cli.CreateSession(context.Background(), sdk.CreateOptions{WorkingDir: "/abs/wd"})
+	created, err := cli.CreateSession(context.Background(), sdk.CreateOptions{WorkingDir: workdir})
 	require.NoError(t, err)
+	layout, err := paths.FromEnv()
+	require.NoError(t, err)
+	rolloutDir := filepath.Join(filepath.Dir(layout.SessionsDir()), "rollouts")
+	require.NoError(t, os.MkdirAll(rolloutDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(rolloutDir, created.ID+".jsonl"), []byte(`{"id":1,"timestamp":"2025-06-01T12:00:00Z","source":2,"kind":3,"type":"tool_call","data":"{}"}`+"\n"), 0o644))
 
 	var buf bytes.Buffer
 	cmd := sessionCmd()
@@ -243,8 +337,23 @@ func TestSessionShow(t *testing.T) {
 
 	out := buf.String()
 	require.Contains(t, out, "Working dir")
-	require.Contains(t, out, "/abs/wd")
+	require.Contains(t, out, workdir)
+	require.Contains(t, out, "Git")
+	require.Contains(t, out, "feat/session-show-git · dirty")
 	require.Contains(t, out, "Events")
+	require.Contains(t, out, "Latest")
+}
+
+func TestReadSpecPreview_PrefersSummarySidecar(t *testing.T) {
+	dir := t.TempDir()
+	specPath := filepath.Join(dir, "spec.json")
+	summaryPath := filepath.Join(dir, "spec.summary.json")
+	require.NoError(t, os.WriteFile(specPath, []byte(`{"goal":{"one_liner":"full spec"}}`), 0o644))
+	require.NoError(t, os.WriteFile(summaryPath, []byte(`{"goal":{"one_liner":"summary spec"}}`), 0o644))
+
+	got := readSpecPreview(specPath)
+	require.Contains(t, got, "summary spec")
+	require.NotContains(t, got, "full spec")
 }
 
 // TestParseAge covers the day/hour suffix shortcuts plus an obvious

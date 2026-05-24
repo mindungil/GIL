@@ -9,10 +9,12 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
 
+	"github.com/mindungil/gil/core/paths"
 	"github.com/mindungil/gil/sdk"
 )
 
@@ -59,6 +61,42 @@ manually.`,
 			if err != nil {
 				return err
 			}
+			sess, err := cli.GetSession(ctx, fullID)
+			if err != nil {
+				return wrapRPCError(err)
+			}
+
+			layout, err := paths.FromEnv()
+			if err != nil {
+				return fmt.Errorf("resolve gil paths: %w", err)
+			}
+			spec, err := loadFrozenSpecForSession(filepath.Join(layout.SessionsDir(), fullID))
+			if err != nil {
+				return fmt.Errorf("load frozen spec: %w", err)
+			}
+			out := cmd.OutOrStdout()
+			fmt.Fprintf(out, "Goal: %s\n", spec.Goal.OneLiner)
+			if spec.Goal.Detailed != "" {
+				fmt.Fprintf(out, "Detail: %s\n", spec.Goal.Detailed)
+			}
+			if len(spec.Goal.Tasks) > 0 {
+				fmt.Fprintln(out, "Tasks:")
+				for i, task := range spec.Goal.Tasks {
+					fmt.Fprintf(out, "  %d. %s\n", i+1, task)
+				}
+			}
+			meta := sessionMetaFor(sess, layout.SessionsDir())
+			if meta.gitSummary != "" {
+				fmt.Fprintf(out, "Git: %s\n", meta.gitSummary)
+			}
+			if meta.latestType != "" {
+				fmt.Fprintf(out, "Latest activity: %s (%s)\n", meta.latestType, meta.latestAt.Local().Format("2006-01-02 15:04:05"))
+			}
+			if diff, derr := cli.Diff(ctx, fullID); derr == nil && diff != nil {
+				if summary := renderGoalDiffSummary(diff); summary != "" {
+					fmt.Fprintf(out, "Workspace diff: %s\n", summary)
+				}
+			}
 
 			detach := !attach
 			resp, err := cli.StartRun(ctx, fullID, providerName, model, detach)
@@ -66,7 +104,6 @@ manually.`,
 				return wrapRPCError(err)
 			}
 
-			out := cmd.OutOrStdout()
 			if detach && resp.Status == "started" {
 				fmt.Fprintf(out, "Resumed %s (background).\n", fullID)
 				fmt.Fprintf(out, "Watch progress:  gil events %s --tail\n", fullID)

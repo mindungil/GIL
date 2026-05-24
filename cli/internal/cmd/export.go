@@ -1,6 +1,6 @@
 // Package cmd — export.go implements `gil export` for session sharing.
 //
-// Why this exists
+// # Why this exists
 //
 // When an autonomous run completes (or fails), the user needs a single-file
 // representation of what happened: spec + interview transcript + run trace +
@@ -13,7 +13,7 @@
 //   - json     — typed snapshot {metadata, spec, events:[...]}.
 //   - jsonl    — raw event stream with one metadata header line. Lossless.
 //
-// Data sources
+// # Data sources
 //
 // The exporter prefers reading directly from disk (sessions/<id>/events/...,
 // sessions/<id>/spec.yaml) so that `gil export` can run when the daemon is
@@ -71,10 +71,10 @@ const (
 // exportCmd returns the `gil export <session-id>` command.
 func exportCmd() *cobra.Command {
 	var (
-		socket   string
-		format   string
-		output   string
-		layout   = defaultLayout()
+		socket string
+		format string
+		output string
+		layout = defaultLayout()
 	)
 	c := &cobra.Command{
 		Use:   "export <session-id>",
@@ -158,7 +158,7 @@ type sessionMeta struct {
 // sessionData bundles the events read from disk so each renderer can iterate
 // without re-doing the I/O.
 type sessionData struct {
-	Events   []event.Event
+	Events    []event.Event
 	EventsRaw [][]byte // for jsonl mode: untouched lines (preserves field order)
 }
 
@@ -223,18 +223,24 @@ func loadSessionMeta(ctx context.Context, sessionID, socket string, layout paths
 		}
 	}
 
-	// Load events from disk; LoadAll handles missing-file → error so we treat
-	// a missing events.jsonl as "no events yet" rather than a hard failure.
+	// Load events from disk. Prefer the rollout journal when present —
+	// it's the append-only source of truth for replay/audit. Fall back
+	// to the legacy events.jsonl path for older sessions.
+	rolloutPath := filepath.Join(filepath.Dir(layout.SessionsDir()), "rollouts", sessionID+".jsonl")
 	eventsPath := filepath.Join(sessionDir, "events", "events.jsonl")
+	sourcePath := rolloutPath
+	if _, err := os.Stat(sourcePath); err != nil {
+		sourcePath = eventsPath
+	}
 	data := sessionData{}
-	if _, err := os.Stat(eventsPath); err == nil {
-		evs, err := event.LoadAll(eventsPath)
+	if _, err := os.Stat(sourcePath); err == nil {
+		evs, err := event.LoadAll(sourcePath)
 		if err != nil {
 			return sessionMeta{}, sessionData{}, fmt.Errorf("load events: %w", err)
 		}
 		data.Events = evs
 		// Also read raw lines so that --format jsonl preserves bit-exact bytes.
-		raw, err := os.ReadFile(eventsPath)
+		raw, err := os.ReadFile(sourcePath)
 		if err == nil {
 			for _, line := range splitLinesKeep(raw) {
 				data.EventsRaw = append(data.EventsRaw, line)
@@ -386,10 +392,10 @@ func renderJSON(out io.Writer, meta sessionMeta, data sessionData) error {
 		})
 	}
 	doc := struct {
-		GilExport  string         `json:"_gil_export"`
-		Version    int            `json:"version"`
-		Metadata   jsonlMetadata  `json:"metadata"`
-		Events     []jsonEvent    `json:"events"`
+		GilExport string        `json:"_gil_export"`
+		Version   int           `json:"version"`
+		Metadata  jsonlMetadata `json:"metadata"`
+		Events    []jsonEvent   `json:"events"`
 	}{
 		GilExport: "session",
 		Version:   1,

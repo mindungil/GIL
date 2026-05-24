@@ -27,6 +27,14 @@ func TestPersister_AppendAndLoad(t *testing.T) {
 	require.Len(t, loaded, 2)
 	require.Equal(t, "first", loaded[0].Type)
 	require.Equal(t, int64(2), loaded[1].ID)
+
+	countBody, err := os.ReadFile(filepath.Join(dir, "events.count"))
+	require.NoError(t, err)
+	require.Equal(t, "2\n", string(countBody))
+
+	lastBody, err := os.ReadFile(filepath.Join(dir, "events.last"))
+	require.NoError(t, err)
+	require.Contains(t, string(lastBody), `"type":"second"`)
 }
 
 func TestPersister_Close_Idempotent(t *testing.T) {

@@ -6,12 +6,15 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 
 	"github.com/mindungil/gil/cli/internal/cmd/uistyle"
+	gilv1 "github.com/mindungil/gil/proto/gen/gil/v1"
+	"github.com/mindungil/gil/sdk"
 )
 
 // renderSummary is the unit-of-truth for the no-arg surface; we test
@@ -51,15 +54,16 @@ func TestRenderSummary_OneSession(t *testing.T) {
 		Glyphs:  uistyle.NewGlyphs(false),
 		Palette: uistyle.NewPalette(true),
 		Sessions: []summaryRow{
-			{ID: "01ABCDEFGH", Status: "RUNNING", Iter: 23, MaxIter: 100, CostUSD: 0.61, Goal: "Add dark mode"},
+			{ID: "01ABCDEFGH", Status: "RUNNING", Iter: 23, MaxIter: 100, CostUSD: 0.61, Goal: "Add dark mode", GitSummary: "feat/goal-summary · dirty (2 files)"},
 		},
 	})
 	out := buf.String()
 	require.Contains(t, out, "1 session", "singular noun for one session")
-	require.Contains(t, out, "01abcd")          // short ULID
-	require.Contains(t, out, "23/100")          // RUNNING shows denominator
+	require.Contains(t, out, "01abcd") // short ULID
+	require.Contains(t, out, "23/100") // RUNNING shows denominator
 	require.Contains(t, out, "$0.61")
 	require.Contains(t, out, "Add dark mode")
+	require.Contains(t, out, "git feat/goal-summary · dirty (2 files)")
 }
 
 func TestRenderSummary_ThreeSessions_StuckAnnotated(t *testing.T) {
@@ -236,6 +240,41 @@ func TestLoadSessionPlanCounts_RoundTrip(t *testing.T) {
 	require.Equal(t, 3, total)
 }
 
+func TestBuildTopSummaryRows_LimitsMetadataLoads(t *testing.T) {
+	clearSessionMetaCache()
+	t.Cleanup(clearSessionMetaCache)
+
+	oldLoadSpec := loadFrozenSpecForSession
+	oldLoadLatest := loadLatestEventSummary
+	t.Cleanup(func() {
+		loadFrozenSpecForSession = oldLoadSpec
+		loadLatestEventSummary = oldLoadLatest
+	})
+
+	var specCalls int32
+	var latestCalls int32
+	loadFrozenSpecForSession = func(sessionDir string) (*gilv1.FrozenSpec, error) {
+		atomic.AddInt32(&specCalls, 1)
+		return &gilv1.FrozenSpec{Goal: &gilv1.Goal{OneLiner: "x"}}, nil
+	}
+	loadLatestEventSummary = func(path string) (string, time.Time) {
+		atomic.AddInt32(&latestCalls, 1)
+		return "tool_call", time.Unix(123, 0)
+	}
+
+	sessions := make([]*sdk.Session, 20)
+	for i := range sessions {
+		sessions[i] = &sdk.Session{ID: fmt.Sprintf("01TOP%03d", i), WorkingDir: "", CreatedAt: time.Unix(int64(i), 0)}
+	}
+
+	rows, total := buildTopSummaryRows(sessions, "/tmp/sessions", 10)
+
+	require.Len(t, rows, 10)
+	require.Equal(t, 20, total)
+	require.Equal(t, int32(10), atomic.LoadInt32(&specCalls))
+	require.Equal(t, int32(0), atomic.LoadInt32(&latestCalls))
+}
+
 // TestRenderSummary_OverflowHint — when TotalSessions > len(Sessions)
 // the renderer emits a "+ N more" line after the session rows.
 func TestRenderSummary_OverflowHint(t *testing.T) {
@@ -246,8 +285,8 @@ func TestRenderSummary_OverflowHint(t *testing.T) {
 	}
 	var buf bytes.Buffer
 	renderSummary(&buf, summaryEnv{
-		Version:       "v0.1.0",
-		User:          "u", Host: "h",
+		Version: "v0.1.0",
+		User:    "u", Host: "h",
 		Now:           time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC),
 		Glyphs:        uistyle.NewGlyphs(false),
 		Palette:       uistyle.NewPalette(true),
@@ -267,8 +306,8 @@ func TestRenderSummary_NoOverflowHint(t *testing.T) {
 	}
 	var buf bytes.Buffer
 	renderSummary(&buf, summaryEnv{
-		Version:       "v0.1.0",
-		User:          "u", Host: "h",
+		Version: "v0.1.0",
+		User:    "u", Host: "h",
 		Now:           time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC),
 		Glyphs:        uistyle.NewGlyphs(false),
 		Palette:       uistyle.NewPalette(true),
