@@ -465,9 +465,10 @@ loop:
 			} else {
 				nextRole := classifyTurn(iter-1, lastResponse)
 				nextModel := a.pickModel(nextRole)
-				ctxWindow = provider.ContextTokens(nextModel)
-				// ContextTokens returns 200_000 for unknown models; belt-and-
-				// suspenders guard in case the implementation ever changes.
+				ctxWindow = provider.ContextTokensForProvider(a.ProviderName, nextModel)
+				// ContextTokensForProvider returns a non-zero fallback for
+				// unknown models; belt-and-suspenders guard in case the
+				// implementation ever changes.
 				if ctxWindow == 0 {
 					ctxWindow = 200_000
 				}

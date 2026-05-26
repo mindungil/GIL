@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/mindungil/gil/core/provider"
@@ -20,6 +21,25 @@ func TestCompactor_NoOp_WhenMiddleTooSmall(t *testing.T) {
 	require.Equal(t, 10, len(out))
 	require.Equal(t, 10, res.OriginalCount)
 	require.Equal(t, 10, res.CompactedCount)
+}
+
+func TestCompactor_CompactsSmallButHugeMiddle(t *testing.T) {
+	// 11 msgs; headKeep=2 + tailKeep=6 leaves only 3 middle messages,
+	// but those middle messages are large enough to be the actual context
+	// pressure source. This mirrors real runs that previously emitted
+	// compact_done skipped=true despite estimated_tokens already exceeding
+	// the threshold.
+	msgs := makeMessages(11)
+	for i := 2; i < 5; i++ {
+		msgs[i].Content = strings.Repeat("x", 20_000)
+	}
+	c := &Compactor{Provider: provider.NewMock([]string{"huge middle summary"}), Model: "m"}
+	out, res, err := c.Compact(context.Background(), msgs)
+	require.NoError(t, err)
+	require.False(t, res.Skipped)
+	require.Equal(t, 9, len(out))
+	require.Equal(t, "huge middle summary", out[2].Content)
+	require.Greater(t, res.SavedTokens, int64(0))
 }
 
 func TestCompactor_PreservesHeadAndTail_Verbatim(t *testing.T) {

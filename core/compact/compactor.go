@@ -24,17 +24,21 @@ type Result struct {
 
 // Compactor implements the Hermes cache-preserving compaction pattern.
 type Compactor struct {
-	Provider   provider.Provider
+	Provider provider.Provider
 	// ProviderID is the un-wrapped factory key (e.g. "anthropic") used for
 	// token-density lookups. When empty, falls back to Provider.Name() —
 	// set this to the factory key to avoid the "+retry" suffix that
 	// NewRetry injects, which would miss the providerCharsPerToken table.
 	ProviderID string
-	Model     string
-	HeadKeep  int      // first N messages kept verbatim; default 2
-	TailKeep  int      // last N messages kept verbatim; default 6
-	MinMiddle int      // skip if middle has fewer than this many messages; default 8
-	History   *History // optional anti-thrashing tracker; nil disables tracking
+	Model      string
+	HeadKeep   int // first N messages kept verbatim; default 2
+	TailKeep   int // last N messages kept verbatim; default 6
+	MinMiddle  int // skip if middle has fewer than this many messages; default 8
+	// MinMiddleTokens allows compacting a small number of very large middle
+	// messages. This covers real long-context pressure where only a few turns
+	// contain huge tool outputs. Default 8k tokens.
+	MinMiddleTokens int64
+	History         *History // optional anti-thrashing tracker; nil disables tracking
 }
 
 // Compact returns a NEW message slice. The original is not mutated (deep-copy semantics).
@@ -54,6 +58,14 @@ func (c *Compactor) Compact(ctx context.Context, msgs []provider.Message) ([]pro
 	if minMiddle <= 0 {
 		minMiddle = 8
 	}
+	minMiddleTokens := c.MinMiddleTokens
+	if minMiddleTokens <= 0 {
+		minMiddleTokens = 8_000
+	}
+	providerID := c.ProviderID
+	if providerID == "" && c.Provider != nil {
+		providerID = c.Provider.Name()
+	}
 
 	// Anti-thrashing: skip when history signals low value from recent compactions.
 	if c.History != nil && c.History.ShouldSkip() {
@@ -69,7 +81,8 @@ func (c *Compactor) Compact(ctx context.Context, msgs []provider.Message) ([]pro
 	}
 
 	// Always return a NEW slice — never mutate original.
-	if len(msgs)-headKeep-tailKeep < minMiddle {
+	middleCount := len(msgs) - headKeep - tailKeep
+	if middleCount <= 0 {
 		// Skip path: deep-copy and return as-is.
 		out := make([]provider.Message, len(msgs))
 		for i := range msgs {
@@ -85,6 +98,17 @@ func (c *Compactor) Compact(ctx context.Context, msgs []provider.Message) ([]pro
 	head := msgs[:headKeep]
 	middle := msgs[headKeep : len(msgs)-tailKeep]
 	tail := msgs[len(msgs)-tailKeep:]
+	if middleCount < minMiddle && estimateTokens(providerID, middle) < minMiddleTokens {
+		out := make([]provider.Message, len(msgs))
+		for i := range msgs {
+			out[i] = cloneMessage(msgs[i])
+		}
+		return out, Result{
+			OriginalCount:  len(msgs),
+			CompactedCount: len(msgs),
+			Skipped:        true,
+		}, nil
+	}
 
 	// Build summary prompt from structured template.
 	prompt := BuildSummaryPrompt(middle)
@@ -118,10 +142,6 @@ func (c *Compactor) Compact(ctx context.Context, msgs []provider.Message) ([]pro
 	// NewRetry wraps the provider and makes Name() return "<id>+retry",
 	// which misses the providerCharsPerToken lookup — same bug class as
 	// the runner.go P27 fix.
-	providerID := c.ProviderID
-	if providerID == "" {
-		providerID = c.Provider.Name()
-	}
 	saved := estimateTokens(providerID, middle) - estimateTokens(providerID, []provider.Message{{Content: resp.Text}})
 	if saved < 0 {
 		saved = 0
@@ -184,4 +204,3 @@ func estimateTokens(providerID string, msgs []provider.Message) int64 {
 	}
 	return total
 }
-

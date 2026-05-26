@@ -764,6 +764,55 @@ func TestAgentLoop_AutoCompactsAtThreshold(t *testing.T) {
 	require.Greater(t, compactCount, 0, "expected at least one compact_done event")
 }
 
+func TestAgentLoop_LocalProviderUnknownModelCompactsBeforeCloudFallback(t *testing.T) {
+	bigText := strings.Repeat("x", 20_000) // ~5k tokens at default density
+	seq := []provider.MockTurn{}
+	for i := 0; i < 10; i++ {
+		seq = append(seq, provider.MockTurn{Text: bigText, StopReason: "tool_use", ToolCalls: []provider.ToolCall{{
+			ID: fmt.Sprintf("c%d", i), Name: "noop", Input: json.RawMessage(`{}`),
+		}}})
+	}
+	seq = append(seq, provider.MockTurn{Text: "done", StopReason: "end_turn"})
+	prov := provider.NewMockToolProvider(seq)
+
+	summaryProv := provider.NewMock([]string{"## compacted"})
+	compactor := &compact.Compactor{Provider: summaryProv, Model: "future-local-model", HeadKeep: 1, TailKeep: 2, MinMiddle: 2}
+	spec := &gilv1.FrozenSpec{Budget: &gilv1.Budget{MaxIterations: 12}, Verification: &gilv1.Verification{}}
+	loop := &AgentLoop{
+		Spec:         spec,
+		Provider:     prov,
+		ProviderName: "vllm",
+		Model:        "future-local-model",
+		Tools:        []tool.Tool{&noopTool{}},
+		Verifier:     verify.NewRunner(t.TempDir()),
+		Compactor:    compactor,
+		Events:       event.NewStream(),
+	}
+	sub := loop.Events.Subscribe(256)
+	var collected []event.Event
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for e := range sub.Events() {
+			collected = append(collected, e)
+		}
+	}()
+
+	_, err := loop.Run(context.Background())
+	require.NoError(t, err)
+	sub.Close()
+	<-done
+
+	var sawCompact bool
+	for _, e := range collected {
+		if e.Type == "compact_start" {
+			sawCompact = true
+			break
+		}
+	}
+	require.True(t, sawCompact, "vllm unknown models must use the local 32k fallback, not the 200k cloud fallback")
+}
+
 func TestAgentLoop_NoCompactWhenCompactorNil(t *testing.T) {
 	// Same big-text provider, but Compactor=nil → no compact events.
 	bigText := strings.Repeat("x", 4000)

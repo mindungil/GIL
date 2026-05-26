@@ -25,8 +25,8 @@ import (
 const compactChatThresholdFactor = 0.95
 
 // fallbackContextWindow is the context-window estimate used when the
-// provider.ContextTokens lookup returns 0 (unknown model). Matches
-// runner.go's same belt-and-suspenders guard.
+// provider.ContextTokensForProvider lookup returns 0. Matches runner.go's
+// same belt-and-suspenders guard.
 const fallbackContextWindow int64 = 200_000
 
 // compactChatIfNeeded estimates the token cost of msgs and runs the
@@ -44,7 +44,7 @@ func compactChatIfNeeded(
 	if prov == nil || len(msgs) == 0 {
 		return msgs, false, nil
 	}
-	ctxWindow := provider.ContextTokens(model)
+	ctxWindow := provider.ContextTokensForProvider(providerID, model)
 	if ctxWindow == 0 {
 		ctxWindow = fallbackContextWindow
 	}

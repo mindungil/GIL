@@ -27,9 +27,22 @@ func TestContextTokens_KnownGoogle(t *testing.T) {
 func TestContextTokens_KnownOllama(t *testing.T) {
 	require.Equal(t, int64(8_192), ContextTokens("ollama:llama3:8b"))
 	require.Equal(t, int64(32_768), ContextTokens("ollama:qwen3-coder:32b"))
+	require.Equal(t, int64(32_768), ContextTokens("qwen3.6-27b"))
 }
 
 func TestContextTokens_UnknownReturnsConservativeDefault(t *testing.T) {
 	require.Equal(t, int64(200_000), ContextTokens("future-model-v9"))
 	require.Equal(t, int64(200_000), ContextTokens(""))
+}
+
+func TestContextTokensForProvider_LocalUnknownFailsClosed(t *testing.T) {
+	require.Equal(t, int64(32_768), ContextTokensForProvider("vllm", "future-local-model"))
+	require.Equal(t, int64(32_768), ContextTokensForProvider("ollama", "future-local-model"))
+	require.Equal(t, int64(32_768), ContextTokensForProvider("local-openai", "future-local-model"))
+}
+
+func TestContextTokensForProvider_CloudUnknownKeepsLegacyDefault(t *testing.T) {
+	require.Equal(t, int64(200_000), ContextTokensForProvider("anthropic", "future-model-v9"))
+	require.Equal(t, int64(200_000), ContextTokensForProvider("openai", "future-model-v9"))
+	require.Equal(t, int64(200_000), ContextTokensForProvider("", "future-model-v9"))
 }

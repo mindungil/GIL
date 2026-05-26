@@ -107,6 +107,24 @@ func TestCompactChat_AboveThreshold_CompactsAndReplaces(t *testing.T) {
 	require.True(t, foundSummary, "compacted output must include the LLM-generated summary")
 }
 
+func TestCompactChat_QwenVLLMUsesLocalContextWindow(t *testing.T) {
+	prov := provider.NewMock([]string{"<<qwen summary>>"})
+	bigChunk := strings.Repeat("q", 10_000)
+	var msgs []provider.Message
+	for i := 0; i < 20; i++ {
+		role := provider.RoleUser
+		if i%2 == 1 {
+			role = provider.RoleAssistant
+		}
+		msgs = append(msgs, provider.Message{Role: role, Content: bigChunk})
+	}
+
+	out, didCompact, err := compactChatIfNeeded(context.Background(), "vllm", "qwen3.6-27b", prov, msgs)
+	require.NoError(t, err)
+	require.True(t, didCompact, "vllm/qwen3.6-27b must compact near the local 32k window, not the 200k cloud fallback")
+	require.Equal(t, 9, len(out))
+}
+
 func TestCompactChat_ProviderError_PreservesOriginal(t *testing.T) {
 	// errProvider always errors; compactor surfaces it. The caller in
 	// session_prompt.go reads err and keeps msgs unchanged.
